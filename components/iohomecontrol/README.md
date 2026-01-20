@@ -1,4 +1,4 @@
-# io-homecontrol ESPHome Custom Component
+# io-homecontrol ESPHome Custom Component!
 
 ESPHome custom component for controlling io-homecontrol devices (Velux, Somfy) using an ESP32 with 868MHz FSK-capable radio module.
 

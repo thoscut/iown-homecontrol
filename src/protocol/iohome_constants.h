@@ -28,7 +28,9 @@ constexpr float FREQ_DEVIATION = 19.2f;        // kHz
 constexpr uint16_t PREAMBLE_LENGTH = 512;      // bits
 
 // Sync Word
+// Raw OTA: 0xFF33 (preamble end). Bitswapped for RadioLib: {0x57, 0xFD, 0x99}.
 constexpr uint32_t SYNC_WORD = 0xFF33;
+constexpr uint8_t SYNC_WORD_BYTES[] = {0x57, 0xFD, 0x99};
 constexpr uint8_t SYNC_WORD_LEN = 3;
 
 // Frequency Hopping

@@ -27,6 +27,7 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     initialized_(false),
     receiving_(false),
     verbose_(false),
+    rolling_code_store_(nullptr),
     channel_hopper_(nullptr),
     auth_manager_(nullptr),
     beacon_handler_(nullptr),
@@ -113,6 +114,16 @@ bool IoHomeControl::begin(
   }
 
   initialized_ = true;
+
+  // Load persisted rolling code if store is set
+  if (rolling_code_store_ != nullptr) {
+    if (rolling_code_store_->load(own_node_id_, rolling_code_)) {
+      LOG_PRINTF("  Rolling code loaded: %u\n", rolling_code_);
+    } else {
+      LOG_PRINT("  Rolling code not found, starting at 0");
+    }
+  }
+
   return true;
 }
 
@@ -298,6 +309,11 @@ bool IoHomeControl::send_command(
   if (is_1w_mode_) {
     frame::set_rolling_code(&tx_frame, rolling_code_);
     rolling_code_++; // Increment for next transmission
+
+    // Persist rolling code if store is set
+    if (rolling_code_store_ != nullptr) {
+      rolling_code_store_->save(own_node_id_, rolling_code_);
+    }
   }
 
   // Finalize frame (calculate HMAC and CRC)
@@ -413,6 +429,10 @@ void IoHomeControl::process_received_frame(const frame::IoFrame* frame, int16_t 
       }
     }
   }
+}
+
+void IoHomeControl::set_rolling_code_store(RollingCodeStore* store) {
+  rolling_code_store_ = store;
 }
 
 // ============================================================================

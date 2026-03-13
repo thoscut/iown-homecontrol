@@ -14,6 +14,7 @@
 #include "protocol/iohome_crypto.h"
 #include "protocol/iohome_frame.h"
 #include "protocol/iohome_2w.h"
+#include "protocol/iohome_rolling_code_store.h"
 
 namespace iohome {
 
@@ -177,6 +178,12 @@ public:
    */
   void set_verbose(bool enable) { verbose_ = enable; }
 
+  /**
+   * @brief Set rolling code store for persistence
+   * @param store Pointer to RollingCodeStore (ownership NOT transferred)
+   */
+  void set_rolling_code_store(RollingCodeStore* store);
+
   // ========================================================================
   // 2W Mode Features
   // ========================================================================
@@ -302,6 +309,9 @@ protected:
   bool initialized_;
   bool receiving_;
   bool verbose_;
+
+  // Rolling code persistence
+  RollingCodeStore* rolling_code_store_;
 
   // 2W Mode Components
   mode2w::ChannelHopper* channel_hopper_;

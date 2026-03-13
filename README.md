@@ -12,39 +12,50 @@
 
 ## Status
 
-- [X] [Document Layer 1](docs/radio.md)
-- [X] [Document Layer 2](docs/linklayer.md)
-- [X] [Document Layer 3](docs/commands.md)
-  - [X] io-homecontrol Packet Definition
-- [ ] Document Layer 4+
+### Protocol Documentation
+- [X] [Document Layer 1](docs/radio.md) - Physical Layer (RF, modulation, frequencies)
+- [X] [Document Layer 2](docs/linklayer.md) - Link Layer (frames, CRC, encryption)
+- [X] [Document Layer 3](docs/commands.md) - Command Layer
+  - [X] io-homecontrol Packet Definition (Kaitai Struct: 90%)
   - [X] Standard commands
-  - [X] Advanced commands
+  - [X] Advanced commands (Discovery, Auth, Pairing)
   - [ ] EMS2 Frame/CarrierSense: Infos needed!
 - [X] [Documentation](https://velocet.github.io/iown-homecontrol)
-  - [ ] Cleanup: 60 %
   - [X] MkDocs version
-  - [X] Better understanding of the device serial and QR/Barcode
-- [ ] iohc Firmware
-  - [X] Reverse official Somfy iohc Firmware
-    - [X] Renode: Emulate Firmware
-    - [X] Custom IDA Pro Loader
-    - [X] Custom SVD file for use in Ghidra/IDA Pro
-    - [X] Extract Si4461 config
-  - [ ] Reverse Actuator Firmware: STILL MISSING! Can you provide one?
-  - [ ] Hack the god damn ESP32 based Somfy Connectivity Box
-- [ ] [rtl_433](https://github.com/merbanan/rtl_433/blob/master/src/devices/somfy_iohc.c): Corrections
-- [X] ReWrite of crypto test in Python
-- [ ] Library
-  - [ ] 1W Library - Implementation Status: WIP
-  - [ ] 2W Library - Implementation Status: WIP
-  - [ ] Simple [MicroPython](https://micropython.org/) implementation for rapid testing/prototyping
-  - [X] [Kaitai Struct](https://kaitai.io/) implementation for easier portablity: 90%
-- [X] High Level Abstraction (KLF200 API and Overkiz Cloud JSON...)
-- [ ] Bonus Points: Build a better/cheaper Somfy TaHoma with a LoRa32
-  - [X] [ESPHome](#esphome) component for Home Assistant integration
-  - [ ] Support for RTS ^^
-  - [ ] Expose as ZigBee device for HomeAssistant integration other smart home systems
-  - [ ] Expose as HomeKit device (HomeSpan?) incl. QR code to ease installation
+  - [X] Device serial and QR/Barcode format
+
+### Library
+- [X] C++ Protocol Library (`src/protocol/`)
+  - [X] CRC-16/KERMIT calculation and verification
+  - [X] AES-128 encryption/decryption (mbedTLS)
+  - [X] HMAC generation and verification
+  - [X] Frame construction and parsing
+  - [X] Rolling code management (1W mode)
+  - [X] 2W mode features (frequency hopping, challenge-response, beacon handling)
+- [X] Protocol constants and command definitions (`src/protocol/iohome_constants.h`)
+- [X] High-level controller (`src/IoHomeControl.h/.cpp`)
+- [X] Velux-specific support (`src/velux/`)
+  - [X] Predefined ventilation positions (Lüftungsstellungen 1-3)
+  - [X] Rain sensor integration
+  - [X] All models: GGL, GGU, GPL, GPU (Solar, Electric)
+  - [X] Blind models: DML, RML, FML, MML, SML
+
+### Integration
+- [X] [ESPHome](#esphome) component for Home Assistant
+- [X] RadioLib integration (SX1276, SX1262, RFM69, RFM95)
+- [X] [rtl_433](https://github.com/merbanan/rtl_433/blob/master/src/devices/somfy_iohc.c) - RF decoder
+- [X] Python crypto test suite
+- [ ] Simple [MicroPython](https://micropython.org/) implementation
+- [ ] Expose as ZigBee device for HomeAssistant integration
+- [ ] Expose as HomeKit device (HomeSpan?)
+
+### Firmware Analysis
+- [X] Reverse official Somfy iohc Firmware
+  - [X] Renode: Emulate Firmware
+  - [X] Custom IDA Pro Loader
+  - [X] Custom SVD file for Ghidra/IDA Pro
+  - [X] Extract Si4461 config
+- [ ] Reverse Actuator Firmware: STILL MISSING! Can you provide one?
 
 > [!IMPORTANT]
 > We need your help implementing the protocol! Please contact us!
@@ -66,7 +77,7 @@ If you want to port the library to a non-ESP32 platform you should consider the 
 An [ESPHome](https://esphome.io) external component is available for integration with [Home Assistant](https://www.home-assistant.io/). This enables controlling io-homecontrol devices (blinds, shutters, etc.) directly from Home Assistant using an ESP32 + LoRa radio module.
 
 > [!WARNING]
-> The ESPHome component is experimental. The io-homecontrol protocol implementation is still a work in progress. Basic frame reception and 2W cover commands are supported.
+> The ESPHome component is experimental. Basic frame reception and 2W cover commands are supported. The protocol library supports 1W mode with encryption, 2W mode with frequency hopping, and Velux-specific features.
 
 Add this to your ESPHome YAML configuration:
 

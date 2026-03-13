@@ -49,6 +49,7 @@ __pycache__/
 ### MacOS ###
 ._*
 _*
+!__init__.py
 .DS_Store
 *.icloud
 

@@ -19,7 +19,11 @@ VeluxWindow::VeluxWindow(const uint8_t node_id[NODE_ID_SIZE], VeluxModel model)
     rain_protection_enabled_(false),
     last_rain_status_(RainSensorStatus::UNKNOWN)
 {
-  memcpy(node_id_, node_id, NODE_ID_SIZE);
+  if (node_id != nullptr) {
+    memcpy(node_id_, node_id, NODE_ID_SIZE);
+  } else {
+    memset(node_id_, 0, NODE_ID_SIZE);
+  }
 }
 
 uint8_t VeluxWindow::get_ventilation_position(uint8_t level) const {
@@ -40,6 +44,10 @@ bool VeluxWindow::create_ventilation_frame(
   const uint8_t src_node[NODE_ID_SIZE],
   uint8_t level
 ) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
   // Initialize frame
   frame::init_frame(frame, true);  // 1W mode (most Velux windows)
   frame::set_destination(frame, node_id_);
@@ -58,6 +66,10 @@ bool VeluxWindow::create_position_frame(
   const uint8_t src_node[NODE_ID_SIZE],
   WindowPosition position
 ) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
   frame::init_frame(frame, true);
   frame::set_destination(frame, node_id_);
   frame::set_source(frame, src_node);
@@ -71,6 +83,10 @@ bool VeluxWindow::create_emergency_close_frame(
   frame::IoFrame* frame,
   const uint8_t src_node[NODE_ID_SIZE]
 ) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
   frame::init_frame(frame, true);
   frame::set_destination(frame, node_id_);
   frame::set_source(frame, src_node);
@@ -84,6 +100,10 @@ bool VeluxWindow::create_emergency_close_frame(
 }
 
 RainSensorStatus VeluxWindow::parse_rain_sensor_status(const frame::IoFrame* frame) {
+  if (frame == nullptr) {
+    return RainSensorStatus::UNKNOWN;
+  }
+
   if (frame->command_id != VELUX_CMD_GET_RAIN_SENSOR) {
     return RainSensorStatus::UNKNOWN;
   }
@@ -111,7 +131,11 @@ RainSensorStatus VeluxWindow::parse_rain_sensor_status(const frame::IoFrame* fra
 VeluxBlind::VeluxBlind(const uint8_t node_id[NODE_ID_SIZE], VeluxModel model)
   : model_(model)
 {
-  memcpy(node_id_, node_id, NODE_ID_SIZE);
+  if (node_id != nullptr) {
+    memcpy(node_id_, node_id, NODE_ID_SIZE);
+  } else {
+    memset(node_id_, 0, NODE_ID_SIZE);
+  }
 }
 
 size_t VeluxBlind::get_recommended_positions(uint8_t positions[5]) const {
@@ -168,6 +192,10 @@ bool VeluxBlind::create_tilt_frame(
   const uint8_t src_node[NODE_ID_SIZE],
   uint8_t tilt_angle
 ) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
   if (!supports_tilt()) {
     return false;
   }

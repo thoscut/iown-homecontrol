@@ -27,6 +27,8 @@ before deployment in production home automation systems.
 | F6 | High | `IoHomeControl.cpp` | Re-initialization leaks previously allocated 2W components | ✅ Fixed |
 | F7 | Medium | ESPHome component | ISR `packet_flag_` not using atomic operations on ESP32 | ✅ Fixed |
 | F8 | Medium | `parse_frame()` | Missing buffer bounds checks before each `memcpy` | ✅ Fixed |
+| F9 | High | `iohome_velux.cpp` | Missing nullptr checks in VeluxWindow/VeluxBlind constructors and methods | ✅ Fixed |
+| F10 | Medium | `iohome_2w.cpp` | Missing nullptr check in `verify_challenge_response()` | ✅ Fixed |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 

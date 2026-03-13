@@ -180,6 +180,10 @@ bool AuthenticationManager::create_challenge_response(
 }
 
 bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* frame) {
+  if (frame == nullptr) {
+    return false;
+  }
+
   if (state_ != ChallengeState::CHALLENGE_SENT) {
     return false;  // No challenge was sent
   }

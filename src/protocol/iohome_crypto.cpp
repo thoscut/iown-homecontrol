@@ -8,9 +8,7 @@
 #include <string.h>
 
 // Include mbedTLS for AES (available in ESP32 Arduino Core)
-#ifdef ARDUINO
-  #include <mbedtls/aes.h>
-#else
+#ifndef UNIT_TEST
   #include <mbedtls/aes.h>
 #endif
 
@@ -157,6 +155,19 @@ void construct_iv_2w(
 // ============================================================================
 // AES-128 Encryption/Decryption
 // ============================================================================
+
+#ifdef UNIT_TEST
+
+// Stubs for native test builds (no mbedTLS available)
+bool aes128_encrypt(const uint8_t[AES_BLOCK_SIZE], const uint8_t[AES_KEY_SIZE], uint8_t[AES_BLOCK_SIZE]) { return false; }
+bool aes128_decrypt(const uint8_t[AES_BLOCK_SIZE], const uint8_t[AES_KEY_SIZE], uint8_t[AES_BLOCK_SIZE]) { return false; }
+bool encrypt_1w_key(const uint8_t[AES_KEY_SIZE], const uint8_t[NODE_ID_SIZE], uint8_t[AES_KEY_SIZE]) { return false; }
+bool encrypt_2w_key(const uint8_t[AES_KEY_SIZE], const uint8_t[HMAC_SIZE], uint8_t[AES_KEY_SIZE]) { return false; }
+bool create_1w_hmac(const uint8_t*, size_t, const uint8_t[ROLLING_CODE_SIZE], const uint8_t[AES_KEY_SIZE], uint8_t[HMAC_SIZE]) { return false; }
+bool create_2w_hmac(const uint8_t*, size_t, const uint8_t[HMAC_SIZE], const uint8_t[AES_KEY_SIZE], uint8_t[HMAC_SIZE]) { return false; }
+bool verify_hmac(const uint8_t*, size_t, const uint8_t[HMAC_SIZE], const uint8_t*, const uint8_t[AES_KEY_SIZE], bool) { return false; }
+
+#else // !UNIT_TEST
 
 bool aes128_encrypt(
   const uint8_t input[AES_BLOCK_SIZE],
@@ -331,6 +342,8 @@ bool verify_hmac(
 
   return (diff == 0);
 }
+
+#endif // UNIT_TEST
 
 } // namespace crypto
 } // namespace iohome

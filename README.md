@@ -12,6 +12,8 @@
 
 ## Status
 
+> **Current: Experimental / Alpha** — See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for detailed assessment.
+
 ### Protocol Documentation
 - [X] [Document Layer 1](docs/radio.md) - Physical Layer (RF, modulation, frequencies)
 - [X] [Document Layer 2](docs/linklayer.md) - Link Layer (frames, CRC, encryption)
@@ -29,7 +31,7 @@
   - [X] CRC-16/KERMIT calculation and verification
   - [X] AES-128 encryption/decryption (mbedTLS)
   - [X] HMAC generation and verification
-  - [X] Frame construction and parsing
+  - [X] Frame construction and parsing (with bounds checking)
   - [X] Rolling code management (1W mode)
   - [X] 2W mode features (frequency hopping, challenge-response, beacon handling)
 - [X] Protocol constants and command definitions (`src/protocol/iohome_constants.h`)
@@ -41,10 +43,14 @@
   - [X] Blind models: DML, RML, FML, MML, SML
 
 ### Integration
-- [X] [ESPHome](#esphome) component for Home Assistant
+- [X] [ESPHome](#esphome) component for Home Assistant (basic cover control)
 - [X] RadioLib integration (SX1276, SX1262, RFM69, RFM95)
 - [X] [rtl_433](https://github.com/merbanan/rtl_433/blob/master/src/devices/somfy_iohc.c) - RF decoder
 - [X] Python crypto test suite
+- [ ] ESPHome: Encrypted frame support
+- [ ] ESPHome: Position feedback (2W mode)
+- [ ] Rolling code persistence across reboots
+- [ ] Unit test suite
 - [ ] Simple [MicroPython](https://micropython.org/) implementation
 - [ ] Expose as ZigBee device for HomeAssistant integration
 - [ ] Expose as HomeKit device (HomeSpan?)

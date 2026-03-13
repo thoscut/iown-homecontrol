@@ -17,6 +17,9 @@ namespace frame {
 // ============================================================================
 
 void init_frame(IoFrame* frame, bool is_1w) {
+  if (frame == nullptr) {
+    return;
+  }
   memset(frame, 0, sizeof(IoFrame));
   frame->is_1w_mode = is_1w;
 
@@ -73,6 +76,10 @@ void set_rolling_code(IoFrame* frame, uint16_t code) {
 }
 
 bool finalize_frame(IoFrame* frame, const uint8_t system_key[AES_KEY_SIZE], const uint8_t* challenge) {
+  if (frame == nullptr || system_key == nullptr) {
+    return false;
+  }
+
   // Prepare frame data for HMAC (command ID + parameters)
   uint8_t frame_data[1 + FRAME_MAX_DATA_SIZE];
   frame_data[0] = frame->command_id;
@@ -124,6 +131,10 @@ bool finalize_frame(IoFrame* frame, const uint8_t system_key[AES_KEY_SIZE], cons
 }
 
 size_t serialize_frame(const IoFrame* frame, uint8_t* buffer, size_t buffer_size) {
+  if (frame == nullptr || buffer == nullptr) {
+    return 0;
+  }
+
   if (buffer_size < frame->frame_length) {
     return 0; // Buffer too small
   }
@@ -171,6 +182,10 @@ size_t serialize_frame(const IoFrame* frame, uint8_t* buffer, size_t buffer_size
 // ============================================================================
 
 bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame) {
+  if (buffer == nullptr || frame == nullptr) {
+    return false; // Null pointer check
+  }
+
   if (buffer_len < FRAME_MIN_SIZE) {
     return false; // Frame too short
   }
@@ -186,8 +201,12 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame) {
   // Determine mode
   frame->is_1w_mode = !is_2w_mode(frame->ctrl_byte_0);
 
-  // Get frame length
+  // Get frame length and validate bounds
   frame->frame_length = get_frame_length(frame->ctrl_byte_0);
+
+  if (frame->frame_length < FRAME_MIN_SIZE || frame->frame_length > FRAME_MAX_SIZE) {
+    return false; // Invalid frame length
+  }
 
   if (buffer_len < frame->frame_length) {
     return false; // Buffer doesn't contain complete frame
@@ -204,15 +223,29 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame) {
   // Parse Command ID
   frame->command_id = buffer[offset++];
 
-  // Calculate data length
+  // Calculate data length with overflow protection
+  // Minimum overhead = header(9) + cmd(1) + hmac(6) + crc(2) = 18 for 2W
+  // Minimum overhead = header(9) + cmd(1) + rolling_code(2) + hmac(6) + crc(2) = 20 for 1W
+  size_t overhead;
   if (frame->is_1w_mode) {
-    frame->data_len = frame->frame_length - (9 + 1 + ROLLING_CODE_SIZE + HMAC_SIZE + CRC_SIZE);
+    overhead = 9 + 1 + ROLLING_CODE_SIZE + HMAC_SIZE + CRC_SIZE;
   } else {
-    frame->data_len = frame->frame_length - (9 + 1 + HMAC_SIZE + CRC_SIZE);
+    overhead = 9 + 1 + HMAC_SIZE + CRC_SIZE;
   }
+
+  if (frame->frame_length < overhead) {
+    return false; // Frame too short for required fields
+  }
+
+  frame->data_len = frame->frame_length - overhead;
 
   if (frame->data_len > FRAME_MAX_DATA_SIZE) {
     return false; // Invalid data length
+  }
+
+  // Validate remaining buffer has enough data
+  if (offset + frame->data_len > buffer_len) {
+    return false; // Buffer underrun
   }
 
   // Parse Parameters
@@ -221,15 +254,24 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame) {
 
   // Parse Rolling Code (1W mode only)
   if (frame->is_1w_mode) {
+    if (offset + ROLLING_CODE_SIZE > buffer_len) {
+      return false;
+    }
     memcpy(frame->rolling_code, &buffer[offset], ROLLING_CODE_SIZE);
     offset += ROLLING_CODE_SIZE;
   }
 
   // Parse HMAC
+  if (offset + HMAC_SIZE > buffer_len) {
+    return false;
+  }
   memcpy(frame->hmac, &buffer[offset], HMAC_SIZE);
   offset += HMAC_SIZE;
 
   // Parse CRC
+  if (offset + CRC_SIZE > buffer_len) {
+    return false;
+  }
   memcpy(frame->crc, &buffer[offset], CRC_SIZE);
   offset += CRC_SIZE;
 
@@ -237,6 +279,10 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame) {
 }
 
 bool validate_frame(const IoFrame* frame, const uint8_t* system_key, const uint8_t* challenge) {
+  if (frame == nullptr) {
+    return false;
+  }
+
   // Serialize frame for CRC check
   uint8_t temp_buffer[FRAME_MAX_SIZE];
   size_t frame_len = serialize_frame(frame, temp_buffer, sizeof(temp_buffer));

@@ -10,7 +10,11 @@ namespace iown_homecontrol {
 
 static const char *const TAG = "iown_homecontrol";
 
+#if defined(ESP32)
+std::atomic<bool> IOWNHomeControlComponent::packet_flag_{false};
+#else
 volatile bool IOWNHomeControlComponent::packet_flag_ = false;
+#endif
 
 void IOWNHomeControlComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up io-homecontrol...");
@@ -176,10 +180,17 @@ uint16_t IOWNHomeControlComponent::compute_crc(const uint8_t *data, size_t len) 
 }
 
 void IOWNHomeControlComponent::receive_frame_() {
+#if defined(ESP32)
+  if (!packet_flag_.load(std::memory_order_acquire)) {
+    return;
+  }
+  packet_flag_.store(false, std::memory_order_release);
+#else
   if (!packet_flag_) {
     return;
   }
   packet_flag_ = false;
+#endif
 
   size_t len = this->phy_->getPacketLength();
   if (len == 0 || len > IOHC_MAX_FRAME_SIZE) {

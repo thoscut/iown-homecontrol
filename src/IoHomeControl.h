@@ -42,6 +42,13 @@ public:
   IoHomeControl(PhysicalLayer* radio);
 
   /**
+   * @brief Destroy the IoHomeControl object
+   *
+   * Cleans up dynamically allocated 2W mode components.
+   */
+  ~IoHomeControl();
+
+  /**
    * @brief Initialize the controller
    *
    * @param own_node_id This controller's node ID (3 bytes)

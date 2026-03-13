@@ -23,6 +23,10 @@
 #include <SPI.h>
 #include <vector>
 
+#if defined(ESP32)
+#include <atomic>
+#endif
+
 namespace esphome {
 namespace iown_homecontrol {
 
@@ -117,11 +121,11 @@ class IOWNHomeControlComponent : public Component {
 
   std::vector<IOWNCover *> covers_;
 
-  static volatile bool packet_flag_;
-
 #if defined(ESP32)
-  static void IRAM_ATTR packet_isr_() { packet_flag_ = true; }
+  static std::atomic<bool> packet_flag_;
+  static void IRAM_ATTR packet_isr_() { packet_flag_.store(true, std::memory_order_release); }
 #else
+  static volatile bool packet_flag_;
   static void packet_isr_() { packet_flag_ = true; }
 #endif
 

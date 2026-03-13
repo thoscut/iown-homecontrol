@@ -6,6 +6,7 @@
 
 #include "IoHomeControl.h"
 #include <string.h>
+#include <new>
 
 #ifdef ARDUINO
   #include <Arduino.h>
@@ -36,11 +37,28 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
   is_1w_mode_ = true;
 }
 
+IoHomeControl::~IoHomeControl() {
+  delete channel_hopper_;
+  delete auth_manager_;
+  delete beacon_handler_;
+  delete discovery_manager_;
+}
+
 bool IoHomeControl::begin(
   const uint8_t own_node_id[NODE_ID_SIZE],
   const uint8_t system_key[AES_KEY_SIZE],
   bool is_1w
 ) {
+  if (own_node_id == nullptr || system_key == nullptr) {
+    LOG_PRINT("Error: Invalid parameters (nullptr)");
+    return false;
+  }
+
+  if (radio_ == nullptr) {
+    LOG_PRINT("Error: Radio not set");
+    return false;
+  }
+
   memcpy(own_node_id_, own_node_id, NODE_ID_SIZE);
   memcpy(system_key_, system_key, AES_KEY_SIZE);
   is_1w_mode_ = is_1w;
@@ -49,20 +67,46 @@ bool IoHomeControl::begin(
   LOG_PRINTF("  Node ID: %02X %02X %02X\n",
              own_node_id_[0], own_node_id_[1], own_node_id_[2]);
 
+  // Clean up any existing 2W components before re-initialization
+  delete channel_hopper_;
+  channel_hopper_ = nullptr;
+  delete auth_manager_;
+  auth_manager_ = nullptr;
+  delete beacon_handler_;
+  beacon_handler_ = nullptr;
+  delete discovery_manager_;
+  discovery_manager_ = nullptr;
+
   // Initialize 2W components if in 2W mode
   if (!is_1w_mode_) {
     LOG_PRINT("Initializing 2W mode components...");
 
-    channel_hopper_ = new mode2w::ChannelHopper();
+    channel_hopper_ = new (std::nothrow) mode2w::ChannelHopper();
+    if (channel_hopper_ == nullptr) {
+      LOG_PRINT("Error: Failed to allocate ChannelHopper");
+      return false;
+    }
     channel_hopper_->begin(CHANNEL_HOP_TIME_MS);
 
-    auth_manager_ = new mode2w::AuthenticationManager();
+    auth_manager_ = new (std::nothrow) mode2w::AuthenticationManager();
+    if (auth_manager_ == nullptr) {
+      LOG_PRINT("Error: Failed to allocate AuthenticationManager");
+      return false;
+    }
     auth_manager_->begin(system_key_);
 
-    beacon_handler_ = new mode2w::BeaconHandler();
+    beacon_handler_ = new (std::nothrow) mode2w::BeaconHandler();
+    if (beacon_handler_ == nullptr) {
+      LOG_PRINT("Error: Failed to allocate BeaconHandler");
+      return false;
+    }
     beacon_handler_->begin();
 
-    discovery_manager_ = new mode2w::DiscoveryManager();
+    discovery_manager_ = new (std::nothrow) mode2w::DiscoveryManager();
+    if (discovery_manager_ == nullptr) {
+      LOG_PRINT("Error: Failed to allocate DiscoveryManager");
+      return false;
+    }
     discovery_manager_->begin(own_node_id_);
 
     LOG_PRINT("2W mode components initialized");
@@ -477,7 +521,11 @@ mode2w::ChallengeState IoHomeControl::get_auth_state() const {
 
 void IoHomeControl::start_discovery(uint8_t device_type, unsigned long timeout_ms) {
   if (discovery_manager_ == nullptr) {
-    discovery_manager_ = new mode2w::DiscoveryManager();
+    discovery_manager_ = new (std::nothrow) mode2w::DiscoveryManager();
+    if (discovery_manager_ == nullptr) {
+      LOG_PRINT("Error: Failed to allocate DiscoveryManager");
+      return;
+    }
     discovery_manager_->begin(own_node_id_);
   }
 
@@ -514,8 +562,17 @@ bool IoHomeControl::get_discovered_device(size_t index, mode2w::DiscoveredDevice
 }
 
 bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE], const uint8_t new_system_key[AES_KEY_SIZE]) {
+  if (dest_node == nullptr || new_system_key == nullptr) {
+    LOG_PRINT("Error: Invalid parameters (nullptr)");
+    return false;
+  }
+
   if (discovery_manager_ == nullptr) {
-    discovery_manager_ = new mode2w::DiscoveryManager();
+    discovery_manager_ = new (std::nothrow) mode2w::DiscoveryManager();
+    if (discovery_manager_ == nullptr) {
+      LOG_PRINT("Error: Failed to allocate DiscoveryManager");
+      return false;
+    }
     discovery_manager_->begin(own_node_id_);
   }
 

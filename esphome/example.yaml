@@ -1,0 +1,98 @@
+# ESPHome configuration example for io-homecontrol
+#
+# This example shows how to use the iown_homecontrol component to
+# control Somfy/Velux blinds and shutters via io-homecontrol protocol.
+#
+# IMPORTANT: This is experimental. The io-homecontrol protocol implementation
+# is still work in progress. Use at your own risk.
+#
+# Supported radio modules: SX1276 (default), SX1262
+# Supported boards: Any ESP32 with a compatible LoRa radio module
+#
+# Common board pin configurations:
+#
+#   Heltec WiFi LoRa 32 V2 (SX1276):
+#     cs_pin: 18, rst_pin: 14, dio0_pin: 26, dio1_pin: 33
+#     sck_pin: 5, mosi_pin: 27, miso_pin: 19
+#
+#   Heltec WiFi LoRa 32 V3 (SX1262):
+#     cs_pin: 8, rst_pin: 12, dio0_pin: 14, dio1_pin: 13
+#     sck_pin: 9, mosi_pin: 10, miso_pin: 11
+#
+#   TTGO LoRa32 V2.1 (SX1276):
+#     cs_pin: 18, rst_pin: 23, dio0_pin: 26, dio1_pin: 33
+#     sck_pin: 5, mosi_pin: 27, miso_pin: 19
+
+esphome:
+  name: iown-homecontrol
+  friendly_name: "io-homecontrol Gateway"
+
+esp32:
+  board: heltec_wifi_lora_32_V2
+  framework:
+    type: arduino
+
+# Load the iown_homecontrol component
+# Option 1: From local path (for development)
+external_components:
+  - source:
+      type: local
+      path: esphome/components
+
+# Option 2: From GitHub (for production use)
+# external_components:
+#   - source:
+#       type: git
+#       url: https://github.com/thoscut/iown-homecontrol
+#       ref: main
+#     components: [iown_homecontrol]
+
+# io-homecontrol hub configuration
+iown_homecontrol:
+  cs_pin: 18            # SPI Chip Select
+  rst_pin: 14           # Radio Reset
+  dio0_pin: 26          # Radio DIO0 / IRQ
+  dio1_pin: 33          # Radio DIO1
+  # SPI pins (optional, uses board defaults if omitted)
+  sck_pin: 5            # SPI Clock
+  mosi_pin: 27          # SPI MOSI
+  miso_pin: 19          # SPI MISO
+  # Radio configuration
+  radio_type: SX1276    # SX1276 or SX1262
+  frequency: 868.95     # Channel 2 (default, used for 1W and 2W)
+  # source_address: 0x1A380B  # 3-byte source node ID (optional)
+
+# Cover entities for io-homecontrol blinds/shutters
+cover:
+  - platform: iown_homecontrol
+    name: "Living Room Blind"
+    target_address: 0x00003F  # Broadcast address (controls all devices)
+
+  # Example: Control a specific device by its address
+  # - platform: iown_homecontrol
+  #   name: "Bedroom Blind"
+  #   target_address: 0xABCDEF  # Replace with actual device address
+
+# WiFi configuration
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot in case WiFi connection fails
+  ap:
+    ssid: "IOWN-Homecontrol"
+    password: !secret ap_password
+
+# Enable logging (set to DEBUG to see received frames)
+logger:
+  level: DEBUG
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_key
+
+# Enable OTA updates
+ota:
+  - platform: esphome
+    password: !secret ota_password

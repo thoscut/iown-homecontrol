@@ -41,6 +41,7 @@
   - [X] [Kaitai Struct](https://kaitai.io/) implementation for easier portablity: 90%
 - [X] High Level Abstraction (KLF200 API and Overkiz Cloud JSON...)
 - [ ] Bonus Points: Build a better/cheaper Somfy TaHoma with a LoRa32
+  - [X] [ESPHome](#esphome) component for Home Assistant integration
   - [ ] Support for RTS ^^
   - [ ] Expose as ZigBee device for HomeAssistant integration other smart home systems
   - [ ] Expose as HomeKit device (HomeSpan?) incl. QR code to ease installation
@@ -59,6 +60,39 @@ If you want to port the library to a non-ESP32 platform you should consider the 
 
 > [!TIP]
 > Got a RTL-SDR? Use [rtl_433](https://github.com/merbanan/rtl_433) to decode io-homecontrol: `rtl_433 -R 189 -f 868.9M -s 1000k -g 42.1`
+
+### ESPHome
+
+An [ESPHome](https://esphome.io) external component is available for integration with [Home Assistant](https://www.home-assistant.io/). This enables controlling io-homecontrol devices (blinds, shutters, etc.) directly from Home Assistant using an ESP32 + LoRa radio module.
+
+> [!WARNING]
+> The ESPHome component is experimental. The io-homecontrol protocol implementation is still a work in progress. Basic frame reception and 2W cover commands are supported.
+
+Add this to your ESPHome YAML configuration:
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/thoscut/iown-homecontrol
+      ref: main
+    components: [iown_homecontrol]
+
+iown_homecontrol:
+  cs_pin: 18
+  rst_pin: 14
+  dio0_pin: 26
+  dio1_pin: 33
+  radio_type: SX1276
+  frequency: 868.95
+
+cover:
+  - platform: iown_homecontrol
+    name: "Living Room Blind"
+    target_address: 0x00003F
+```
+
+See [`esphome/example.yaml`](esphome/example.yaml) for a complete configuration example with board-specific pin mappings.
 
 ### Compatible Hardware
 

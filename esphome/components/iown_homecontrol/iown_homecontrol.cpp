@@ -5,6 +5,10 @@
 
 #include "iown_homecontrol.h"
 
+#if defined(ESP32)
+#include <mbedtls/aes.h>
+#endif
+
 namespace esphome {
 namespace iown_homecontrol {
 
@@ -100,6 +104,7 @@ void IOWNHomeControlComponent::dump_config() {
                 this->radio_type_ == RADIO_SX1276 ? "SX1276" : "SX1262");
   ESP_LOGCONFIG(TAG, "  Source Address: 0x%06X",
                 static_cast<unsigned int>(this->source_address_));
+  ESP_LOGCONFIG(TAG, "  Encryption: %s", this->encryption_enabled_ ? "enabled" : "disabled");
 }
 
 int16_t IOWNHomeControlComponent::configure_phy_layer_() {
@@ -177,6 +182,82 @@ uint16_t IOWNHomeControlComponent::compute_crc(const uint8_t *data, size_t len) 
     }
   }
   return crc;
+}
+
+void IOWNHomeControlComponent::set_system_key(const std::vector<uint8_t> &key) {
+  if (key.size() == 16) {
+    memcpy(this->system_key_, key.data(), 16);
+  }
+}
+
+bool IOWNHomeControlComponent::compute_hmac_(const uint8_t *frame_data,
+                                             size_t data_len,
+                                             const uint8_t rolling_code[2],
+                                             uint8_t hmac_out[6]) {
+#if defined(ESP32)
+  // Build 16-byte IV for 1W mode HMAC
+  uint8_t iv[16];
+  memset(iv, 0x55, 16);
+
+  // Compute proprietary checksum over frame data
+  uint8_t chksum1 = 0, chksum2 = 0;
+  for (size_t i = 0; i < data_len; i++) {
+    uint8_t tmpchksum = frame_data[i] ^ chksum2;
+    uint8_t new_chksum2 = ((chksum1 & 0x7F) << 1) & 0xFF;
+
+    if ((chksum1 & 0x80) == 0) {
+      if (tmpchksum >= 128)
+        new_chksum2 |= 1;
+      chksum1 = new_chksum2;
+      chksum2 = (tmpchksum << 1) & 0xFF;
+    } else {
+      if (tmpchksum >= 128)
+        new_chksum2 |= 1;
+      chksum1 = new_chksum2 ^ 0x55;
+      chksum2 = ((tmpchksum << 1) ^ 0x5B) & 0xFF;
+    }
+
+    // IV bytes 0-7: first 8 bytes of frame data
+    if (i < 8)
+      iv[i] = frame_data[i];
+  }
+
+  // IV bytes 8-9: checksum
+  iv[8] = chksum1;
+  iv[9] = chksum2;
+
+  // IV bytes 10-11: rolling code
+  iv[10] = rolling_code[0];
+  iv[11] = rolling_code[1];
+
+  // IV bytes 12-15: already 0x55 padding
+
+  // AES-128-ECB encrypt IV with system key
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  if (mbedtls_aes_setkey_enc(&aes, this->system_key_, 128) != 0) {
+    mbedtls_aes_free(&aes);
+    return false;
+  }
+  uint8_t encrypted[16];
+  if (mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, iv, encrypted) != 0) {
+    mbedtls_aes_free(&aes);
+    return false;
+  }
+  mbedtls_aes_free(&aes);
+
+  // Truncate to 6 bytes
+  memcpy(hmac_out, encrypted, 6);
+  return true;
+#else
+  // mbedTLS not available on non-ESP32 platforms
+  ESP_LOGE(TAG, "Encryption requires ESP32 (mbedTLS not available)");
+  (void) frame_data;
+  (void) data_len;
+  (void) rolling_code;
+  (void) hmac_out;
+  return false;
+#endif
 }
 
 void IOWNHomeControlComponent::receive_frame_() {
@@ -301,8 +382,104 @@ bool IOWNHomeControlComponent::send_frame(const uint8_t *data, size_t len) {
 bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address,
                                                   uint8_t command,
                                                   uint16_t main_param) {
+  if (this->encryption_enabled_) {
+    /*
+     * Build a 1W io-homecontrol frame with HMAC:
+     *
+     * Byte 0:     Control Byte 0 (order=00, mode=1W, size)
+     * Byte 1:     Control Byte 1 (0x00)
+     * Byte 2-4:   Destination NodeID (3 bytes, big-endian)
+     * Byte 5-7:   Source NodeID (3 bytes, big-endian)
+     * Byte 8:     Command ID
+     * Byte 9:     Originator (0x01 = user)
+     * Byte 10:    ACEI flags (0x00)
+     * Byte 11-12: Main Parameter (2 bytes, big-endian)
+     * Byte 13:    Functional Parameter 1 (0x00)
+     * Byte 14:    Functional Parameter 2 (0x00)
+     * Byte 15-16: Rolling Code (2 bytes, LSB first)
+     * Byte 17-22: HMAC (6 bytes)
+     * Byte 23-24: CRC-16/KERMIT (2 bytes, little-endian)
+     */
+
+    uint8_t frame[25];
+    size_t pos = 0;
+
+    // Size = bytes after ctrl0, excluding CRC = 22
+    uint8_t payload_size = 22;
+
+    // Control Byte 0: order=00, mode=1W, size
+    frame[pos++] = (0x00 << 6) | IOHC_MODE_1W | (payload_size & 0x1F);
+
+    // Control Byte 1
+    frame[pos++] = 0x00;
+
+    // Destination NodeID (3 bytes, big-endian)
+    frame[pos++] = (target_address >> 16) & 0xFF;
+    frame[pos++] = (target_address >> 8) & 0xFF;
+    frame[pos++] = target_address & 0xFF;
+
+    // Source NodeID (3 bytes, big-endian)
+    frame[pos++] = (this->source_address_ >> 16) & 0xFF;
+    frame[pos++] = (this->source_address_ >> 8) & 0xFF;
+    frame[pos++] = this->source_address_ & 0xFF;
+
+    // Command ID
+    frame[pos++] = command;
+
+    // Originator: 0x01 = user
+    frame[pos++] = 0x01;
+
+    // ACEI: 0x00 = no flags
+    frame[pos++] = 0x00;
+
+    // Main Parameter (2 bytes, big-endian)
+    frame[pos++] = (main_param >> 8) & 0xFF;
+    frame[pos++] = main_param & 0xFF;
+
+    // Functional Parameter 1
+    frame[pos++] = 0x00;
+
+    // Functional Parameter 2
+    frame[pos++] = 0x00;
+
+    // Compute HMAC over command data (cmd + originator + acei + main_param + fp1 + fp2)
+    const uint8_t *hmac_data = &frame[8];  // starts at command byte
+    size_t hmac_data_len = 7;              // cmd(1) + orig(1) + acei(1) + param(2) + fp1(1) + fp2(1)
+
+    uint8_t rc[2];
+    rc[0] = this->rolling_code_ & 0xFF;
+    rc[1] = (this->rolling_code_ >> 8) & 0xFF;
+
+    uint8_t hmac[6];
+    if (!this->compute_hmac_(hmac_data, hmac_data_len, rc, hmac)) {
+      ESP_LOGE(TAG, "HMAC computation failed");
+      return false;
+    }
+
+    // Rolling code (2 bytes, LSB first)
+    frame[pos++] = rc[0];
+    frame[pos++] = rc[1];
+
+    // HMAC (6 bytes)
+    memcpy(&frame[pos], hmac, 6);
+    pos += 6;
+
+    // CRC-16/KERMIT (little-endian)
+    uint16_t crc = compute_crc(frame, pos);
+    frame[pos++] = crc & 0xFF;
+    frame[pos++] = (crc >> 8) & 0xFF;
+
+    this->rolling_code_++;
+
+    ESP_LOGD(TAG, "Sending 1W cover command: target=0x%06X cmd=0x%02X param=0x%04X rc=%u",
+             static_cast<unsigned int>(target_address), command, main_param,
+             static_cast<unsigned>(this->rolling_code_ - 1));
+
+    return this->send_frame(frame, pos);
+  }
+
   /*
-   * Build a 2W io-homecontrol frame:
+   * Build a 2W io-homecontrol frame (unencrypted):
    *
    * Byte 0:     Control Byte 0 (order=00, mode=2W, size)
    * Byte 1:     Control Byte 1 (0x00)
@@ -363,7 +540,7 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address,
   frame[pos++] = crc & 0xFF;
   frame[pos++] = (crc >> 8) & 0xFF;
 
-  ESP_LOGD(TAG, "Sending cover command: target=0x%06X cmd=0x%02X param=0x%04X",
+  ESP_LOGD(TAG, "Sending 2W cover command: target=0x%06X cmd=0x%02X param=0x%04X",
            static_cast<unsigned int>(target_address), command, main_param);
 
   return this->send_frame(frame, pos);

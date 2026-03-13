@@ -92,13 +92,15 @@ class IOWNHomeControlComponent : public Component {
   void set_sck_pin(int pin) { this->sck_pin_ = pin; }
   void set_mosi_pin(int pin) { this->mosi_pin_ = pin; }
   void set_miso_pin(int pin) { this->miso_pin_ = pin; }
+  void set_system_key(const std::vector<uint8_t> &key);
+  void set_encryption_enabled(bool enabled) { this->encryption_enabled_ = enabled; }
 
   void register_cover(IOWNCover *cover) { this->covers_.push_back(cover); }
 
   /** Send a raw frame over the radio. */
   bool send_frame(const uint8_t *data, size_t len);
 
-  /** Send a cover control command (2W mode). */
+  /** Send a cover control command (2W plain or 1W encrypted mode). */
   bool send_cover_command(uint32_t target_address, uint8_t command, uint16_t main_param);
 
   /** Compute CRC-16/KERMIT over the given data. */
@@ -121,6 +123,10 @@ class IOWNHomeControlComponent : public Component {
 
   std::vector<IOWNCover *> covers_;
 
+  uint8_t system_key_[16] = {0};
+  bool encryption_enabled_{false};
+  uint16_t rolling_code_{0};
+
 #if defined(ESP32)
   static std::atomic<bool> packet_flag_;
   static void IRAM_ATTR packet_isr_() { packet_flag_.store(true, std::memory_order_release); }
@@ -137,6 +143,10 @@ class IOWNHomeControlComponent : public Component {
 
   /** Parse a received io-homecontrol frame. */
   void parse_frame_(const uint8_t *data, size_t len);
+
+  /** Compute 6-byte HMAC for 1W mode using AES-128-ECB. */
+  bool compute_hmac_(const uint8_t *frame_data, size_t data_len,
+                     const uint8_t rolling_code[2], uint8_t hmac_out[6]);
 };
 
 }  // namespace iown_homecontrol

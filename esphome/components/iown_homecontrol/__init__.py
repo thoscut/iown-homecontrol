@@ -40,6 +40,15 @@ CONF_SOURCE_ADDRESS = "source_address"
 CONF_SCK_PIN = "sck_pin"
 CONF_MOSI_PIN = "mosi_pin"
 CONF_MISO_PIN = "miso_pin"
+CONF_SYSTEM_KEY = "system_key"
+CONF_ENCRYPTION_ENABLED = "encryption_enabled"
+
+def _validate_hex_string(value):
+    """Validate that a string contains only hexadecimal characters."""
+    if not all(c in "0123456789abcdefABCDEF" for c in value):
+        raise cv.Invalid("must contain only hexadecimal characters (0-9, a-f, A-F)")
+    return value
+
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -60,6 +69,10 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_SCK_PIN): cv.int_range(min=0, max=48),
         cv.Optional(CONF_MOSI_PIN): cv.int_range(min=0, max=48),
         cv.Optional(CONF_MISO_PIN): cv.int_range(min=0, max=48),
+        cv.Optional(CONF_SYSTEM_KEY): cv.All(
+            cv.string, cv.Length(min=32, max=32), _validate_hex_string
+        ),
+        cv.Optional(CONF_ENCRYPTION_ENABLED, default=False): cv.boolean,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -82,6 +95,13 @@ async def to_code(config):
         cg.add(var.set_mosi_pin(config[CONF_MOSI_PIN]))
     if CONF_MISO_PIN in config:
         cg.add(var.set_miso_pin(config[CONF_MISO_PIN]))
+
+    if CONF_SYSTEM_KEY in config:
+        key_hex = config[CONF_SYSTEM_KEY]
+        key_bytes = [int(key_hex[i : i + 2], 16) for i in range(0, 32, 2)]
+        cg.add(var.set_system_key(key_bytes))
+    if config.get(CONF_ENCRYPTION_ENABLED):
+        cg.add(var.set_encryption_enabled(True))
 
     # Add RadioLib as a library dependency
     cg.add_library("jgromes/RadioLib", "7.1.2")

@@ -150,10 +150,9 @@ int16_t IOWNHomeControlComponent::configure_phy_layer_() {
 
   // Set Tx output power (start at 20 dBm, decrease until supported)
   int8_t pwr = 20;
-  state = RADIOLIB_ERR_INVALID_OUTPUT_POWER;
-  while (state == RADIOLIB_ERR_INVALID_OUTPUT_POWER && pwr >= -3) {
-    state = this->phy_->setOutputPower(pwr--);
-  }
+  do {
+    state = this->phy_->setOutputPower(pwr);
+  } while (state == RADIOLIB_ERR_INVALID_OUTPUT_POWER && --pwr >= -3);
   if (state != RADIOLIB_ERR_NONE) {
     ESP_LOGW(TAG, "Could not set output power: %d", state);
   }

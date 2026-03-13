@@ -54,13 +54,15 @@ void IOWNCover::control(const cover::CoverCall &call) {
     if (pos == cover::COVER_OPEN) {
       ESP_LOGI(TAG, "OPEN -> 0x%06X", static_cast<unsigned int>(this->target_address_));
       this->hub_->send_cover_command(this->target_address_, IOHC_CMD_EXECUTE, IOHC_PARAM_OPEN);
+      // Assumed state: set position to target since we have no feedback
       this->position = cover::COVER_OPEN;
-      this->current_operation = cover::COVER_OPERATION_OPENING;
+      this->current_operation = cover::COVER_OPERATION_IDLE;
     } else if (pos == cover::COVER_CLOSED) {
       ESP_LOGI(TAG, "CLOSE -> 0x%06X", static_cast<unsigned int>(this->target_address_));
       this->hub_->send_cover_command(this->target_address_, IOHC_CMD_EXECUTE, IOHC_PARAM_CLOSE);
+      // Assumed state: set position to target since we have no feedback
       this->position = cover::COVER_CLOSED;
-      this->current_operation = cover::COVER_OPERATION_CLOSING;
+      this->current_operation = cover::COVER_OPERATION_IDLE;
     }
 
     this->publish_state();

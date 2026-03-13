@@ -21,6 +21,8 @@ IOWNCover = iown_homecontrol_ns.class_("IOWNCover", cover.Cover, cg.Component)
 
 CONF_IOWN_ID = "iown_homecontrol_id"
 CONF_TARGET_ADDRESS = "target_address"
+CONF_FULL_OPEN_DURATION = "full_open_duration"
+CONF_FULL_CLOSE_DURATION = "full_close_duration"
 
 CONFIG_SCHEMA = (
     cover.COVER_SCHEMA.extend(
@@ -30,6 +32,12 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_TARGET_ADDRESS, default=0x00003F): cv.int_range(
                 min=0, max=0xFFFFFF
             ),
+            cv.Optional(
+                CONF_FULL_OPEN_DURATION, default="30s"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(
+                CONF_FULL_CLOSE_DURATION, default="30s"
+            ): cv.positive_time_period_milliseconds,
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )
@@ -43,3 +51,5 @@ async def to_code(config):
     hub = await cg.get_variable(config[CONF_IOWN_ID])
     cg.add(var.set_hub(hub))
     cg.add(var.set_target_address(config[CONF_TARGET_ADDRESS]))
+    cg.add(var.set_open_duration(config[CONF_FULL_OPEN_DURATION]))
+    cg.add(var.set_close_duration(config[CONF_FULL_CLOSE_DURATION]))

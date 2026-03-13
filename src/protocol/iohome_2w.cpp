@@ -188,9 +188,10 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
     return false;  // No challenge was sent
   }
 
-  // Check timeout
+  // Check timeout (handles unsigned wraparound correctly)
   unsigned long current_time = GET_TIME_MS();
-  if (current_time - challenge_timestamp_ > challenge_timeout_ms_) {
+  unsigned long elapsed = current_time - challenge_timestamp_;
+  if (elapsed > challenge_timeout_ms_) {
     state_ = ChallengeState::IDLE;
     return false;  // Timeout
   }

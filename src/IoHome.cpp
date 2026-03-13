@@ -8,7 +8,10 @@ IoHomeNode::IoHomeNode(PhysicalLayer* phy, const IoHomeChannel_t* channel) {
   // this->channel = channel;
 }
 
-void IoHomeNode::begin(const IoHomeChannel_t* channel, NodeId source_node_id, NodeId destination_node_id, uint8_t* stack_key, uint8_t* system_key) {}
+void IoHomeNode::begin(const IoHomeChannel_t* channel, NodeId source_node_id, NodeId destination_node_id, uint8_t* stack_key, uint8_t* system_key) {
+  this->channel = channel;
+  // NOTE: Legacy API - use IoHomeControl for full functionality
+}
 
 int16_t IoHomeNode::setPhyProperties() {
 
@@ -47,7 +50,10 @@ int16_t IoHomeNode::setPhyProperties() {
   return(state);
 } // set the physical layer configuration
 
-uint16_t IoHomeNode::crc16() {}
+uint16_t IoHomeNode::crc16() {
+  // CRC-16/KERMIT stub - use iohome::crypto::compute_crc16() for full implementation
+  return 0;
+}
 
 template<typename T>
 T IoHomeNode::ntoh(uint8_t* buff, size_t size) {

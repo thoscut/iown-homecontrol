@@ -22,7 +22,7 @@
   "dependencies": [
     {
       "name": "RadioLib",
-      "version": "https://github.com/jgromes/RadioLib"
+      "version": "^7.1.2"
     }
   ],
   "frameworks": [

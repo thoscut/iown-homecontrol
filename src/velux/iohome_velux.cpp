@@ -2,6 +2,11 @@
  * @file iohome_velux.cpp
  * @brief Velux-specific features implementation
  * @author iown-homecontrol project
+ *
+ * Position and ventilation commands are emitted as standard "Activate/Execute
+ * Function" frames (command 0x00) carrying a Main Parameter. That is how
+ * io-homecontrol actuators are driven; there is no separate "set position"
+ * command ID.
  */
 
 #include "iohome_velux.h"
@@ -9,6 +14,31 @@
 
 namespace iohome {
 namespace velux {
+namespace {
+
+/**
+ * @brief Fill in the common header of a Velux control frame.
+ *
+ * Frames are left un-finalized: the caller owns the key (1W) or the challenge
+ * (2W) and must call frame::finalize_frame() before transmitting.
+ */
+void begin_control_frame(frame::IoFrame* frame,
+                         const uint8_t dest_node[NODE_ID_SIZE],
+                         const uint8_t src_node[NODE_ID_SIZE]) {
+  frame::init_frame(frame, true);  // 1W - most Velux actuators are 1W driven
+  frame::set_destination(frame, dest_node);
+  frame::set_source(frame, src_node);
+}
+
+/// Convert a "percent open" value into the Main Parameter, which counts closure.
+uint16_t main_param_for_percent_open(uint8_t percent_open) {
+  if (percent_open > 100) {
+    percent_open = 100;
+  }
+  return mp_from_percent_closed(static_cast<uint8_t>(100 - percent_open));
+}
+
+} // namespace
 
 // ============================================================================
 // VeluxWindow Implementation
@@ -48,17 +78,14 @@ bool VeluxWindow::create_ventilation_frame(
     return false;
   }
 
-  // Initialize frame
-  frame::init_frame(frame, true);  // 1W mode (most Velux windows)
-  frame::set_destination(frame, node_id_);
-  frame::set_source(frame, src_node);
+  if (level > 3) {
+    return false;
+  }
 
-  // Get ventilation position
-  uint8_t position = get_ventilation_position(level);
+  begin_control_frame(frame, node_id_, src_node);
 
-  // Use standard position command
-  uint8_t params[2] = {position, 0x00};
-  return frame::set_command(frame, CMD_SET_POSITION, params, 2);
+  const uint8_t percent_open = get_ventilation_position(level);
+  return frame::set_execute_command(frame, main_param_for_percent_open(percent_open));
 }
 
 bool VeluxWindow::create_position_frame(
@@ -70,13 +97,22 @@ bool VeluxWindow::create_position_frame(
     return false;
   }
 
-  frame::init_frame(frame, true);
-  frame::set_destination(frame, node_id_);
-  frame::set_source(frame, src_node);
+  begin_control_frame(frame, node_id_, src_node);
 
-  uint8_t pos_value = static_cast<uint8_t>(position);
-  uint8_t params[2] = {pos_value, 0x00};
-  return frame::set_command(frame, CMD_SET_POSITION, params, 2);
+  const uint8_t percent_open = static_cast<uint8_t>(position);
+  return frame::set_execute_command(frame, main_param_for_percent_open(percent_open));
+}
+
+bool VeluxWindow::create_stop_frame(
+  frame::IoFrame* frame,
+  const uint8_t src_node[NODE_ID_SIZE]
+) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
+  begin_control_frame(frame, node_id_, src_node);
+  return frame::set_execute_command(frame, MP_STOP);
 }
 
 bool VeluxWindow::create_emergency_close_frame(
@@ -87,16 +123,13 @@ bool VeluxWindow::create_emergency_close_frame(
     return false;
   }
 
-  frame::init_frame(frame, true);
-  frame::set_destination(frame, node_id_);
-  frame::set_source(frame, src_node);
+  begin_control_frame(frame, node_id_, src_node);
 
-  // Emergency close has priority flag
-  frame->ctrl_byte_1 |= 0x10;  // Set priority bit
-
-  // Close position (0%)
-  uint8_t params[2] = {0x00, 0x00};
-  return frame::set_command(frame, VELUX_CMD_EMERGENCY_CLOSE, params, 2);
+  // Priority lives in the ACEI byte, not in Control Byte 1. Environment
+  // protection outranks ordinary user commands, which is what a rain-triggered
+  // close needs. Bit 0 (IsValid) stays set.
+  const uint8_t acei = make_acei(PriorityLevel::ENVIRONMENT_PROTECTION);
+  return frame::set_execute_command(frame, MP_CLOSE, Originator::SENSOR_RAIN, acei);
 }
 
 RainSensorStatus VeluxWindow::parse_rain_sensor_status(const frame::IoFrame* frame) {
@@ -139,16 +172,18 @@ VeluxBlind::VeluxBlind(const uint8_t node_id[NODE_ID_SIZE], VeluxModel model)
 }
 
 size_t VeluxBlind::get_recommended_positions(uint8_t positions[5]) const {
+  if (positions == nullptr) {
+    return 0;
+  }
+
   switch (model_) {
     case VeluxModel::DML:  // Blackout blind
-      // Fully closed, half, fully open
       positions[0] = 0;
       positions[1] = 50;
       positions[2] = 100;
       return 3;
 
     case VeluxModel::RML:  // Roller blind
-      // Closed, quarter, half, three-quarter, open
       positions[0] = 0;
       positions[1] = 25;
       positions[2] = 50;
@@ -158,7 +193,7 @@ size_t VeluxBlind::get_recommended_positions(uint8_t positions[5]) const {
 
     case VeluxModel::MML:  // Awning blind (outside)
     case VeluxModel::SML:  // Roller shutter (outside)
-      // Closed, half, open (less positions for weather protection)
+      // Fewer positions for weather protection
       positions[0] = 0;
       positions[1] = 50;
       positions[2] = 100;
@@ -174,7 +209,6 @@ size_t VeluxBlind::get_recommended_positions(uint8_t positions[5]) const {
       return 5;
 
     default:
-      // Generic: closed, half, open
       positions[0] = 0;
       positions[1] = 50;
       positions[2] = 100;
@@ -183,14 +217,28 @@ size_t VeluxBlind::get_recommended_positions(uint8_t positions[5]) const {
 }
 
 bool VeluxBlind::supports_tilt() const {
-  // Only venetian blinds support tilt
-  return model_ == VeluxModel::FML;  // Pleated blind has limited tilt
+  // Pleated blinds are the only Velux blind in this list with a slat angle to
+  // control; the roller and blackout types have none.
+  return model_ == VeluxModel::FML;
+}
+
+bool VeluxBlind::create_position_frame(
+  frame::IoFrame* frame,
+  const uint8_t src_node[NODE_ID_SIZE],
+  uint8_t percent_open
+) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
+  begin_control_frame(frame, node_id_, src_node);
+  return frame::set_execute_command(frame, main_param_for_percent_open(percent_open));
 }
 
 bool VeluxBlind::create_tilt_frame(
   frame::IoFrame* frame,
   const uint8_t src_node[NODE_ID_SIZE],
-  uint8_t tilt_angle
+  uint8_t tilt_percent
 ) {
   if (frame == nullptr || src_node == nullptr) {
     return false;
@@ -200,13 +248,17 @@ bool VeluxBlind::create_tilt_frame(
     return false;
   }
 
-  frame::init_frame(frame, true);
-  frame::set_destination(frame, node_id_);
-  frame::set_source(frame, src_node);
+  if (tilt_percent > 100) {
+    tilt_percent = 100;
+  }
 
-  // Tilt command (custom Velux command)
-  uint8_t params[2] = {tilt_angle, 0x00};
-  return frame::set_command(frame, 0x65, params, 2);  // Tilt command
+  begin_control_frame(frame, node_id_, src_node);
+
+  // Tilt is carried in Functional Parameter 1 while the Main Parameter keeps
+  // the current position (0xD200). FP1 uses the same 0-100 % scale as the
+  // main parameter but is a single byte.
+  const uint8_t fp1 = static_cast<uint8_t>((static_cast<uint16_t>(tilt_percent) * 200u) / 100u);
+  return frame::set_execute_command(frame, MP_STOP, Originator::USER, ACEI_DEFAULT, fp1);
 }
 
 // ============================================================================
@@ -219,20 +271,15 @@ VeluxModel detect_model(uint8_t device_type, uint8_t manufacturer) {
     return VeluxModel::UNKNOWN;
   }
 
-  // Map device type to Velux model
-  switch (device_type) {
-    case 0x03:  // Window opener
+  switch (static_cast<DeviceType>(device_type)) {
+    case DeviceType::WINDOW_OPENER:
       return VeluxModel::GGL_ELECTRIC;
-
-    case 0x00:  // Roller shutter
+    case DeviceType::ROLLER_SHUTTER:
       return VeluxModel::SML;
-
-    case 0x04:  // Venetian blind
+    case DeviceType::VENETIAN_BLIND:
       return VeluxModel::FML;
-
-    case 0x05:  // Exterior blind
+    case DeviceType::EXTERIOR_BLIND:
       return VeluxModel::MML;
-
     default:
       return VeluxModel::UNKNOWN;
   }
@@ -277,6 +324,7 @@ const char* get_model_name(VeluxModel model) {
     case VeluxModel::KLF_200:
       return "KLF 200 - Internet gateway";
 
+    case VeluxModel::UNKNOWN:
     default:
       return "Unknown Velux device";
   }
@@ -293,25 +341,24 @@ bool is_blind(VeluxModel model) {
 }
 
 bool supports_rain_sensor(VeluxModel model) {
-  // Most electric roof windows support rain sensor
-  return is_roof_window(model) &&
-         (model == VeluxModel::GGL_ELECTRIC ||
-          model == VeluxModel::GGU_ELECTRIC ||
-          model == VeluxModel::GGL_SOLAR ||
-          model == VeluxModel::GGU_SOLAR);
+  // Rain sensors ship with the powered roof windows.
+  return model == VeluxModel::GGL_ELECTRIC ||
+         model == VeluxModel::GGU_ELECTRIC ||
+         model == VeluxModel::GGL_SOLAR ||
+         model == VeluxModel::GGU_SOLAR;
 }
 
 uint8_t get_recommended_ventilation(float indoor_temp_celsius) {
-  // Intelligent ventilation based on temperature
   if (indoor_temp_celsius < 18.0f) {
     return 0;  // Too cold, keep closed
-  } else if (indoor_temp_celsius < 22.0f) {
-    return 1;  // Comfortable, minimal ventilation
-  } else if (indoor_temp_celsius < 25.0f) {
-    return 2;  // Warm, medium ventilation
-  } else {
-    return 3;  // Hot, maximum ventilation
   }
+  if (indoor_temp_celsius < 22.0f) {
+    return 1;  // Comfortable, minimal ventilation
+  }
+  if (indoor_temp_celsius < 25.0f) {
+    return 2;  // Warm, medium ventilation
+  }
+  return 3;    // Hot, maximum ventilation
 }
 
 } // namespace velux

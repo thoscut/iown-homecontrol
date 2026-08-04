@@ -27,12 +27,12 @@ namespace velux {
  * @brief Velux window positions (standardized)
  */
 enum class WindowPosition : uint8_t {
-  CLOSED = 0,              // 0% - Completely closed
-  VENTILATION_1 = 10,      // 10% - Minimal ventilation (Lüftungsstellung 1)
-  VENTILATION_2 = 20,      // 20% - Medium ventilation (Lüftungsstellung 2)
-  VENTILATION_3 = 30,      // 30% - Maximum ventilation (Lüftungsstellung 3)
-  HALF_OPEN = 50,          // 50% - Half open
-  FULLY_OPEN = 100         // 100% - Fully open
+  CLOSED = 0,              // 0% open - completely closed
+  VENTILATION_1 = 10,      // 10% open - minimal ventilation (Lueftungsstellung 1)
+  VENTILATION_2 = 20,      // 20% open - medium ventilation (Lueftungsstellung 2)
+  VENTILATION_3 = 30,      // 30% open - maximum ventilation (Lueftungsstellung 3)
+  HALF_OPEN = 50,          // 50% open
+  FULLY_OPEN = 100         // 100% open
 };
 
 /**
@@ -79,14 +79,24 @@ enum class RainSensorStatus : uint8_t {
 };
 
 /**
- * @brief Velux-specific commands (in addition to standard commands)
+ * @brief Velux-specific command IDs
+ *
+ * @warning UNVERIFIED. These IDs are not documented in docs/commands.md and
+ *          have not been confirmed against a capture. They sit in the range the
+ *          standard reserves for naming/info commands (0x50-0x57 are documented
+ *          there), so sending them may do something unexpected. Treat every
+ *          helper that uses them as experimental.
+ *
+ *          Standard actuator control - opening, closing, positioning,
+ *          ventilation - does *not* need these: it goes through command 0x00
+ *          with a Main Parameter, which is what the helpers below emit.
  */
-constexpr uint8_t VELUX_CMD_GET_RAIN_SENSOR = 0x58;     // Get rain sensor status
-constexpr uint8_t VELUX_CMD_SET_VENTILATION = 0x59;     // Set ventilation mode
-constexpr uint8_t VELUX_CMD_EMERGENCY_CLOSE = 0x5A;     // Emergency close (rain)
-constexpr uint8_t VELUX_CMD_GET_WINDOW_STATUS = 0x5B;   // Extended status
-constexpr uint8_t VELUX_CMD_RESET_LIMITS = 0x5C;        // Reset position limits
-constexpr uint8_t VELUX_CMD_SET_LIMITS = 0x5D;          // Set position limits
+constexpr uint8_t VELUX_CMD_GET_RAIN_SENSOR = 0x58;     // UNVERIFIED
+constexpr uint8_t VELUX_CMD_SET_VENTILATION = 0x59;     // UNVERIFIED
+constexpr uint8_t VELUX_CMD_EMERGENCY_CLOSE = 0x5A;     // UNVERIFIED
+constexpr uint8_t VELUX_CMD_GET_WINDOW_STATUS = 0x5B;   // UNVERIFIED
+constexpr uint8_t VELUX_CMD_RESET_LIMITS = 0x5C;        // UNVERIFIED
+constexpr uint8_t VELUX_CMD_SET_LIMITS = 0x5D;          // UNVERIFIED
 
 // ============================================================================
 // Velux Window Controller
@@ -97,6 +107,12 @@ constexpr uint8_t VELUX_CMD_SET_LIMITS = 0x5D;          // Set position limits
  *
  * Provides high-level functions for Velux roof windows with
  * predefined positions and rain sensor integration.
+ *
+ * @note The create_*_frame() helpers return frames that are addressed and
+ *       filled in but *not* finalized. The caller owns the system key (1W) or
+ *       the challenge (2W) and must call frame::finalize_frame() - or
+ *       frame::finalize_frame_plain() - before transmitting, otherwise the
+ *       frame carries no MAC and no CRC.
  */
 class VeluxWindow {
 public:
@@ -145,9 +161,24 @@ public:
   );
 
   /**
+   * @brief Create a stop frame
+   *
+   * @param frame Output IoFrame (not finalized - see class note)
+   * @param src_node Source node ID (3 bytes)
+   * @return true on success
+   */
+  bool create_stop_frame(
+    frame::IoFrame* frame,
+    const uint8_t src_node[NODE_ID_SIZE]
+  );
+
+  /**
    * @brief Create emergency close frame (for rain)
    *
-   * @param frame Output IoFrame
+   * Uses the environment-protection priority level in the ACEI byte and the
+   * rain-sensor originator, so it outranks ordinary user commands.
+   *
+   * @param frame Output IoFrame (not finalized - see class note)
    * @param src_node Source node ID (3 bytes)
    * @return true on success
    */
@@ -207,6 +238,9 @@ protected:
  * @brief Velux Blind-specific controller
  *
  * For DML, RML, FML, MML, SML blinds.
+ *
+ * @note As with VeluxWindow, the create_*_frame() helpers do not finalize the
+ *       frame; call frame::finalize_frame() before transmitting.
  */
 class VeluxBlind {
 public:
@@ -236,17 +270,36 @@ public:
   bool supports_tilt() const;
 
   /**
-   * @brief Create tilt frame (for venetian blinds)
+   * @brief Create a position frame
    *
-   * @param frame Output IoFrame
+   * @param frame Output IoFrame (not finalized - see class note)
    * @param src_node Source node ID (3 bytes)
-   * @param tilt_angle Tilt angle (0-100)
+   * @param percent_open 0 = closed, 100 = open
    * @return true on success
+   */
+  bool create_position_frame(
+    frame::IoFrame* frame,
+    const uint8_t src_node[NODE_ID_SIZE],
+    uint8_t percent_open
+  );
+
+  /**
+   * @brief Create a tilt frame
+   *
+   * The tilt value travels in Functional Parameter 1 while the Main Parameter
+   * holds "current position" (0xD200), so the blind changes slat angle without
+   * moving. FP1 is one byte on the 0..0xC8 scale, i.e. the high byte of the
+   * 16-bit 0..0xC800 percentage range.
+   *
+   * @param frame Output IoFrame (not finalized - see class note)
+   * @param src_node Source node ID (3 bytes)
+   * @param tilt_percent Tilt (0-100)
+   * @return true on success, false if the model has no tilt
    */
   bool create_tilt_frame(
     frame::IoFrame* frame,
     const uint8_t src_node[NODE_ID_SIZE],
-    uint8_t tilt_angle
+    uint8_t tilt_percent
   );
 
   const uint8_t* get_node_id() const { return node_id_; }

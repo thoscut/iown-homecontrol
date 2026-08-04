@@ -4,6 +4,15 @@
  * @author iown-homecontrol project
  *
  * Functions for constructing and parsing io-homecontrol protocol frames.
+ *
+ * Wire layout (see docs/linklayer.md):
+ *
+ *   | ctrl0 | ctrl1 | dest[3] | src[3] | cmd | data[0..n] | [seq[2]] | [mac[6]] | crc[2] |
+ *
+ * The sequence number and MAC form the optional *authentication trailer*.
+ * It is present in authenticated 1W frames (seq + MAC) and in authenticated
+ * 2W frames (MAC only, the challenge takes the place of the sequence number).
+ * Plain frames - discovery, key transfer, acks - carry neither.
  */
 
 #pragma once
@@ -24,7 +33,7 @@ namespace frame {
  */
 struct IoFrame {
   // Control Bytes
-  uint8_t ctrl_byte_0;              // Order, Protocol Mode, Frame Length
+  uint8_t ctrl_byte_0;              // Order, Protocol Mode, Size
   uint8_t ctrl_byte_1;              // Beacon, Routed, Low Power, ACK, Version
 
   // Addresses
@@ -36,18 +45,33 @@ struct IoFrame {
   uint8_t data[FRAME_MAX_DATA_SIZE]; // Parameters (0-21 bytes)
   uint8_t data_len;                 // Actual length of data
 
-  // 1W Mode only
-  uint8_t rolling_code[ROLLING_CODE_SIZE]; // Sequence number (2 bytes)
-
-  // Authentication
-  uint8_t hmac[HMAC_SIZE];          // HMAC/MAC (6 bytes)
+  // Authentication trailer (only meaningful when `authenticated` is true)
+  uint8_t rolling_code[ROLLING_CODE_SIZE]; // Sequence number (1W only)
+  uint8_t hmac[HMAC_SIZE];          // Truncated AES MAC (6 bytes)
 
   // CRC
-  uint8_t crc[CRC_SIZE];            // CRC-16 (2 bytes, LSB first)
+  uint8_t crc[CRC_SIZE];            // CRC-16/KERMIT (2 bytes, LSB first)
 
   // Metadata
   bool is_1w_mode;                  // true = 1W, false = 2W
-  uint8_t frame_length;             // Total frame length
+  bool authenticated;               // true if seq/MAC trailer is present
+  uint8_t frame_length;             // Total frame length in bytes
+};
+
+/**
+ * @brief How parse_frame() should interpret the tail of the payload.
+ */
+enum class AuthTrailer : uint8_t {
+  /**
+   * Infer from the protocol mode: 1W frames carry seq + MAC when the payload
+   * is long enough to hold them, 2W frames are treated as plain. This matches
+   * every capture in docs/ and is the right default for a receive path.
+   */
+  AUTO,
+  /// Payload is data only; no sequence number and no MAC.
+  NONE,
+  /// Force an authentication trailer appropriate for the frame's mode.
+  PRESENT
 };
 
 // ============================================================================
@@ -61,6 +85,14 @@ struct IoFrame {
  * @param is_1w true for 1W mode, false for 2W mode
  */
 void init_frame(IoFrame* frame, bool is_1w = true);
+
+/**
+ * @brief Set the command order relationship (Control Byte 0, bits 7-6)
+ *
+ * @param frame Pointer to IoFrame structure
+ * @param order Order relationship
+ */
+void set_order(IoFrame* frame, FrameOrder order);
 
 /**
  * @brief Set destination node address
@@ -81,33 +113,76 @@ void set_source(IoFrame* frame, const uint8_t node_id[NODE_ID_SIZE]);
 /**
  * @brief Set command ID and parameters
  *
+ * Recomputes the frame length and the Control Byte 0 size field. Fails if the
+ * resulting frame would not fit into the 5-bit size field.
+ *
  * @param frame Pointer to IoFrame structure
  * @param cmd_id Command ID
  * @param params Pointer to parameter data (can be nullptr)
  * @param params_len Length of parameters
- * @return true on success, false if params_len too large
+ * @return true on success, false if params_len is too large
  */
 bool set_command(IoFrame* frame, uint8_t cmd_id, const uint8_t* params = nullptr, size_t params_len = 0);
+
+/**
+ * @brief Build the payload of command 0x00 (Activate/Execute Function)
+ *
+ * Layout: originator(1) | acei(1) | main parameter(2, MSB first) | fp1(1) | fp2(1)
+ *
+ * @param frame Pointer to IoFrame structure
+ * @param main_param Main parameter (e.g. MP_OPEN, MP_CLOSE, MP_STOP)
+ * @param originator Command originator
+ * @param acei ACEI byte; bit 0 must be set or actuators reject the frame
+ * @param fp1 Functional parameter 1
+ * @param fp2 Functional parameter 2
+ * @return true on success, false on invalid arguments
+ */
+bool set_execute_command(IoFrame* frame,
+                         uint16_t main_param,
+                         Originator originator = Originator::USER,
+                         uint8_t acei = ACEI_DEFAULT,
+                         uint8_t fp1 = 0x00,
+                         uint8_t fp2 = 0x00);
 
 /**
  * @brief Set rolling code (1W mode only)
  *
  * @param frame Pointer to IoFrame structure
- * @param code Rolling code value (0-65535)
+ * @param code Rolling code value (0-65535), stored LSB first
  */
 void set_rolling_code(IoFrame* frame, uint16_t code);
 
 /**
- * @brief Finalize frame by calculating HMAC and CRC
- *
- * This must be called after all frame fields are set.
+ * @brief Read the rolling code as a 16-bit value
  *
  * @param frame Pointer to IoFrame structure
- * @param system_key System key for HMAC calculation (16 bytes)
- * @param challenge Challenge for 2W mode (nullptr for 1W mode)
+ * @return Rolling code value, or 0 if `frame` is null
+ */
+uint16_t get_rolling_code(const IoFrame* frame);
+
+/**
+ * @brief Finalize an authenticated frame by calculating MAC and CRC
+ *
+ * Must be called after all frame fields are set. Marks the frame as
+ * authenticated so serialization emits the sequence number and MAC.
+ *
+ * @param frame Pointer to IoFrame structure
+ * @param system_key System key for MAC calculation (16 bytes)
+ * @param challenge Challenge for 2W mode (must be non-null in 2W mode)
  * @return true on success, false on error
  */
 bool finalize_frame(IoFrame* frame, const uint8_t system_key[AES_KEY_SIZE], const uint8_t* challenge = nullptr);
+
+/**
+ * @brief Finalize a plain (unauthenticated) frame by calculating only the CRC
+ *
+ * Used for discovery, key transfer and acknowledgement frames, which carry no
+ * MAC because the peers have not agreed on a key yet.
+ *
+ * @param frame Pointer to IoFrame structure
+ * @return true on success, false on error
+ */
+bool finalize_frame_plain(IoFrame* frame);
 
 /**
  * @brief Serialize frame to byte buffer
@@ -124,21 +199,23 @@ size_t serialize_frame(const IoFrame* frame, uint8_t* buffer, size_t buffer_size
 // ============================================================================
 
 /**
- * @brief Parse a received frame from byte buffer
+ * @brief Parse a received frame from a byte buffer
  *
  * @param buffer Input buffer
  * @param buffer_len Length of input buffer
  * @param frame Output IoFrame structure
+ * @param trailer How to interpret the tail of the payload
  * @return true on success, false on parse error
  */
-bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame);
+bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame,
+                 AuthTrailer trailer = AuthTrailer::AUTO);
 
 /**
- * @brief Validate frame (CRC and optionally HMAC)
+ * @brief Validate frame (CRC and, for authenticated frames, the MAC)
  *
  * @param frame Pointer to IoFrame structure
- * @param system_key System key for HMAC verification (nullptr to skip HMAC check)
- * @param challenge Challenge for 2W mode (nullptr for 1W mode)
+ * @param system_key System key for MAC verification (nullptr to skip MAC check)
+ * @param challenge Challenge for 2W mode (required to verify a 2W MAC)
  * @return true if frame is valid, false otherwise
  */
 bool validate_frame(const IoFrame* frame, const uint8_t* system_key = nullptr, const uint8_t* challenge = nullptr);
@@ -150,28 +227,72 @@ bool validate_frame(const IoFrame* frame, const uint8_t* system_key = nullptr, c
 /**
  * @brief Get protocol mode from control byte
  *
+ * Control Byte 0 bit 5 is `isOneWay`: 1 = 1W, 0 = 2W.
+ *
+ * @param ctrl_byte_0 Control byte 0
+ * @return true if 1W mode, false if 2W mode
+ */
+inline bool is_1w_mode(uint8_t ctrl_byte_0) {
+  return (ctrl_byte_0 & CTRL0_ONE_WAY_MASK) != 0;
+}
+
+/**
+ * @brief Get protocol mode from control byte
+ *
  * @param ctrl_byte_0 Control byte 0
  * @return true if 2W mode, false if 1W mode
  */
 inline bool is_2w_mode(uint8_t ctrl_byte_0) {
-  return (ctrl_byte_0 & CTRL0_PROTOCOL_MASK) != 0;
+  return (ctrl_byte_0 & CTRL0_ONE_WAY_MASK) == 0;
 }
 
 /**
- * @brief Get frame length from control byte
+ * @brief Get the command order relationship from control byte 0
+ */
+inline FrameOrder get_order(uint8_t ctrl_byte_0) {
+  return static_cast<FrameOrder>((ctrl_byte_0 & CTRL0_ORDER_MASK) >> CTRL0_ORDER_SHIFT);
+}
+
+/**
+ * @brief Get total frame length from control byte 0
+ *
+ * The `Size` field holds the frame length excluding Control Byte 0 and the
+ * CRC, so the total length is `Size + 3`.
  *
  * @param ctrl_byte_0 Control byte 0
- * @return Frame length (11-32 bytes)
+ * @return Total frame length in bytes (3-34)
  */
 inline uint8_t get_frame_length(uint8_t ctrl_byte_0) {
-  return (ctrl_byte_0 & CTRL0_LENGTH_MASK) + FRAME_MIN_SIZE;
+  return static_cast<uint8_t>((ctrl_byte_0 & CTRL0_LENGTH_MASK) + FRAME_SIZE_FIELD_BIAS);
 }
 
 /**
- * @brief Check if address is broadcast
+ * @brief Encode a total frame length into the Control Byte 0 size field
+ *
+ * @param ctrl_byte_0 Current control byte 0 (other bits are preserved)
+ * @param total_length Total frame length in bytes
+ * @return Updated control byte 0
+ */
+inline uint8_t set_frame_length(uint8_t ctrl_byte_0, uint8_t total_length) {
+  const uint8_t size_field =
+    static_cast<uint8_t>((total_length - FRAME_SIZE_FIELD_BIAS) & CTRL0_LENGTH_MASK);
+  return static_cast<uint8_t>((ctrl_byte_0 & ~CTRL0_LENGTH_MASK) | size_field);
+}
+
+/**
+ * @brief Size of the authentication trailer for a given mode
+ *
+ * @param is_1w true for 1W (sequence number + MAC), false for 2W (MAC only)
+ */
+inline uint8_t auth_trailer_size(bool is_1w) {
+  return is_1w ? AUTH_TRAILER_SIZE_1W : AUTH_TRAILER_SIZE_2W;
+}
+
+/**
+ * @brief Check whether an address is a broadcast or group address
  *
  * @param node_id Node ID (3 bytes)
- * @return true if broadcast address
+ * @return true for 00:00:3F, FF:FF:FF and 00:00:00
  */
 bool is_broadcast(const uint8_t node_id[NODE_ID_SIZE]);
 

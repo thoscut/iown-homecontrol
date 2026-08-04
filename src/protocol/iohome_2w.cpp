@@ -8,19 +8,6 @@
 #include "iohome_crypto.h"
 #include <string.h>
 
-#ifdef ARDUINO
-  #include <Arduino.h>
-  #define GET_TIME_MS() millis()
-  #define GET_TIME_US() micros()
-  #define RANDOM_BYTE() random(256)
-#else
-  #include <time.h>
-  #include <stdlib.h>
-  #define GET_TIME_MS() (clock() * 1000 / CLOCKS_PER_SEC)
-  #define GET_TIME_US() (clock() * 1000000 / CLOCKS_PER_SEC)
-  #define RANDOM_BYTE() (rand() % 256)
-#endif
-
 namespace iohome {
 namespace mode2w {
 
@@ -30,60 +17,71 @@ namespace mode2w {
 
 ChannelHopper::ChannelHopper()
   : current_channel_(ChannelState::CHANNEL_2),
-    last_hop_time_ms_(0),
-    hop_interval_us_(2700),  // 2.7ms in microseconds
+    last_hop_time_us_(0),
+    hop_interval_us_(2700),  // 2.7 ms
     enabled_(false)
 {
 }
 
 void ChannelHopper::begin(float hop_interval_ms) {
-  hop_interval_us_ = (unsigned long)(hop_interval_ms * 1000.0f);
-  last_hop_time_ms_ = GET_TIME_MS();
-  current_channel_ = ChannelState::CHANNEL_2;  // Start with primary channel
+  if (hop_interval_ms <= 0.0f) {
+    hop_interval_ms = CHANNEL_HOP_TIME_MS;
+  }
+  hop_interval_us_ = static_cast<unsigned long>(hop_interval_ms * 1000.0f);
+  if (hop_interval_us_ == 0) {
+    hop_interval_us_ = 1;
+  }
+  last_hop_time_us_ = 0;
+  current_channel_ = ChannelState::CHANNEL_2;  // Start on the primary channel
   enabled_ = false;
 }
 
-bool ChannelHopper::update(unsigned long current_time_ms) {
+bool ChannelHopper::update_us(unsigned long current_time_us) {
   if (!enabled_) {
     return false;
   }
 
-  // Convert to microseconds for precision
-  unsigned long current_time_us = current_time_ms * 1000UL;
-  unsigned long last_hop_time_us = last_hop_time_ms_ * 1000UL;
-  unsigned long elapsed_us = current_time_us - last_hop_time_us;
+  // Unsigned subtraction stays correct across the counter wrap.
+  const unsigned long elapsed_us = current_time_us - last_hop_time_us_;
 
   if (elapsed_us >= hop_interval_us_) {
     next_channel();
-    last_hop_time_ms_ = current_time_ms;
+    last_hop_time_us_ = current_time_us;
     return true;
   }
 
   return false;
 }
 
-float ChannelHopper::get_current_frequency() const {
-  switch (current_channel_) {
+bool ChannelHopper::update(unsigned long current_time_ms) {
+  // Millisecond resolution cannot express the 2.7 ms dwell time; this wrapper
+  // exists for tests and for slow-hop experiments only.
+  return update_us(current_time_ms * 1000UL);
+}
+
+float ChannelHopper::frequency_of(ChannelState channel) {
+  switch (channel) {
     case ChannelState::CHANNEL_1:
       return FREQUENCY_CHANNEL_1;
-    case ChannelState::CHANNEL_2:
-      return FREQUENCY_CHANNEL_2;
     case ChannelState::CHANNEL_3:
       return FREQUENCY_CHANNEL_3;
+    case ChannelState::CHANNEL_2:
     default:
       return FREQUENCY_CHANNEL_2;
   }
 }
 
-void ChannelHopper::reset() {
-  current_channel_ = ChannelState::CHANNEL_2;
-  last_hop_time_ms_ = GET_TIME_MS();
+float ChannelHopper::get_current_frequency() const {
+  return frequency_of(current_channel_);
 }
 
-unsigned long ChannelHopper::time_until_next_hop_us(unsigned long current_time_ms) const {
-  unsigned long current_time_us = current_time_ms * 1000UL;
-  unsigned long last_hop_time_us = last_hop_time_ms_ * 1000UL;
-  unsigned long elapsed_us = current_time_us - last_hop_time_us;
+void ChannelHopper::reset(unsigned long current_time_us) {
+  current_channel_ = ChannelState::CHANNEL_2;
+  last_hop_time_us_ = current_time_us;
+}
+
+unsigned long ChannelHopper::time_until_next_hop_us(unsigned long current_time_us) const {
+  const unsigned long elapsed_us = current_time_us - last_hop_time_us_;
 
   if (elapsed_us >= hop_interval_us_) {
     return 0;
@@ -101,6 +99,7 @@ void ChannelHopper::next_channel() {
       current_channel_ = ChannelState::CHANNEL_3;
       break;
     case ChannelState::CHANNEL_3:
+    default:
       current_channel_ = ChannelState::CHANNEL_1;
       break;
   }
@@ -112,28 +111,40 @@ void ChannelHopper::next_channel() {
 
 AuthenticationManager::AuthenticationManager()
   : state_(ChallengeState::IDLE),
-    challenge_timestamp_(0),
-    challenge_timeout_ms_(5000)
+    state_timestamp_ms_(0),
+    challenge_timeout_ms_(DEFAULT_CHALLENGE_TIMEOUT_MS),
+    session_timeout_ms_(DEFAULT_SESSION_TIMEOUT_MS),
+    key_set_(false)
 {
   memset(system_key_, 0, AES_KEY_SIZE);
   memset(current_challenge_, 0, HMAC_SIZE);
 }
 
-void AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
+bool AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
+  if (system_key == nullptr) {
+    return false;
+  }
   memcpy(system_key_, system_key, AES_KEY_SIZE);
+  key_set_ = true;
   state_ = ChallengeState::IDLE;
+  return true;
 }
 
-void AuthenticationManager::generate_challenge(uint8_t challenge_out[HMAC_SIZE]) {
-  // Generate random 6-byte challenge
-  for (int i = 0; i < HMAC_SIZE; i++) {
-    challenge_out[i] = RANDOM_BYTE();
+bool AuthenticationManager::generate_challenge(uint8_t challenge_out[HMAC_SIZE]) {
+  if (challenge_out == nullptr) {
+    return false;
   }
 
-  // Store current challenge
+  // A predictable challenge lets an attacker precompute a valid response, so
+  // refuse to emit one rather than fall back to a PRNG.
+  if (!crypto::random_bytes(challenge_out, HMAC_SIZE)) {
+    reset();
+    return false;
+  }
+
   memcpy(current_challenge_, challenge_out, HMAC_SIZE);
-  challenge_timestamp_ = GET_TIME_MS();
   state_ = ChallengeState::CHALLENGE_SENT;
+  return true;
 }
 
 bool AuthenticationManager::create_challenge_request(
@@ -141,22 +152,27 @@ bool AuthenticationManager::create_challenge_request(
   const uint8_t dest_node[NODE_ID_SIZE],
   const uint8_t src_node[NODE_ID_SIZE]
 ) {
-  // Initialize frame for 2W mode
-  frame::init_frame(frame, false);  // false = 2W mode
-  frame::set_destination(frame, dest_node);
-  frame::set_source(frame, src_node);
-
-  // Generate new challenge
-  uint8_t challenge[HMAC_SIZE];
-  generate_challenge(challenge);
-
-  // Set command 0x3C with challenge as parameters
-  if (!frame::set_command(frame, CMD_CHALLENGE_REQUEST, challenge, HMAC_SIZE)) {
+  if (frame == nullptr || dest_node == nullptr || src_node == nullptr || !key_set_) {
     return false;
   }
 
-  // Finalize frame (HMAC and CRC)
-  return frame::finalize_frame(frame, system_key_, challenge);
+  frame::init_frame(frame, false);  // 2W mode
+  frame::set_destination(frame, dest_node);
+  frame::set_source(frame, src_node);
+
+  uint8_t challenge[HMAC_SIZE];
+  if (!generate_challenge(challenge)) {
+    return false;
+  }
+
+  if (!frame::set_command(frame, CMD_CHALLENGE_REQUEST, challenge, HMAC_SIZE)) {
+    crypto::secure_zero(challenge, sizeof(challenge));
+    return false;
+  }
+
+  const bool ok = frame::finalize_frame(frame, system_key_, challenge);
+  crypto::secure_zero(challenge, sizeof(challenge));
+  return ok;
 }
 
 bool AuthenticationManager::create_challenge_response(
@@ -165,55 +181,74 @@ bool AuthenticationManager::create_challenge_response(
   const uint8_t src_node[NODE_ID_SIZE],
   const uint8_t received_challenge[HMAC_SIZE]
 ) {
-  // Initialize frame for 2W mode
-  frame::init_frame(frame, false);  // false = 2W mode
+  if (frame == nullptr || dest_node == nullptr || src_node == nullptr ||
+      received_challenge == nullptr || !key_set_) {
+    return false;
+  }
+
+  frame::init_frame(frame, false);  // 2W mode
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 
-  // Set command 0x3D with challenge as parameters
   if (!frame::set_command(frame, CMD_CHALLENGE_RESPONSE, received_challenge, HMAC_SIZE)) {
     return false;
   }
 
-  // Finalize frame with challenge
   return frame::finalize_frame(frame, system_key_, received_challenge);
 }
 
-bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* frame) {
-  if (frame == nullptr) {
+bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* frame,
+                                                      unsigned long now_ms) {
+  if (frame == nullptr || !key_set_) {
     return false;
   }
 
   if (state_ != ChallengeState::CHALLENGE_SENT) {
-    return false;  // No challenge was sent
+    return false;  // No challenge outstanding
   }
 
-  // Check timeout (handles unsigned wraparound correctly)
-  unsigned long current_time = GET_TIME_MS();
-  unsigned long elapsed = current_time - challenge_timestamp_;
-  if (elapsed > challenge_timeout_ms_) {
-    state_ = ChallengeState::IDLE;
+  // Unsigned subtraction is wrap-safe, so this stays correct past the
+  // ~49 day millis() rollover.
+  if ((now_ms - state_timestamp_ms_) > challenge_timeout_ms_) {
+    reset();
     return false;  // Timeout
   }
 
-  // Verify command ID
   if (frame->command_id != CMD_CHALLENGE_RESPONSE) {
     return false;
   }
 
-  // Verify HMAC with current challenge
   if (!frame::validate_frame(frame, system_key_, current_challenge_)) {
+    // Consume the challenge on a failed attempt too: leaving it live would
+    // let an attacker grind responses against a single known nonce.
+    reset();
     return false;
   }
 
   state_ = ChallengeState::AUTHENTICATED;
+  state_timestamp_ms_ = now_ms;
+
+  // The challenge is single-use; forget it so a replayed response fails.
+  crypto::secure_zero(current_challenge_, HMAC_SIZE);
   return true;
+}
+
+ChallengeState AuthenticationManager::get_state(unsigned long now_ms) {
+  const unsigned long elapsed = now_ms - state_timestamp_ms_;
+
+  if (state_ == ChallengeState::CHALLENGE_SENT && elapsed > challenge_timeout_ms_) {
+    reset();
+  } else if (state_ == ChallengeState::AUTHENTICATED && elapsed > session_timeout_ms_) {
+    reset();
+  }
+
+  return state_;
 }
 
 void AuthenticationManager::reset() {
   state_ = ChallengeState::IDLE;
-  memset(current_challenge_, 0, HMAC_SIZE);
-  challenge_timestamp_ = 0;
+  crypto::secure_zero(current_challenge_, HMAC_SIZE);
+  state_timestamp_ms_ = 0;
 }
 
 // ============================================================================
@@ -221,48 +256,53 @@ void AuthenticationManager::reset() {
 // ============================================================================
 
 BeaconHandler::BeaconHandler()
-  : beacon_received_(false)
+  : beacon_received_(false),
+    beacon_count_(0)
 {
   memset(&last_beacon_, 0, sizeof(BeaconInfo));
 }
 
 void BeaconHandler::begin() {
   beacon_received_ = false;
+  beacon_count_ = 0;
+  memset(&last_beacon_, 0, sizeof(BeaconInfo));
 }
 
-bool BeaconHandler::process_beacon(const frame::IoFrame* frame, int16_t rssi, float snr) {
-  // Check if frame has beacon flag set
+bool BeaconHandler::process_beacon(const frame::IoFrame* frame, int16_t rssi, float snr,
+                                   unsigned long now_ms) {
+  if (frame == nullptr) {
+    return false;
+  }
+
   if (!(frame->ctrl_byte_1 & CTRL1_USE_BEACON)) {
     return false;  // Not a beacon frame
   }
 
-  // Store beacon information
   memcpy(last_beacon_.node_id, frame->src_node, NODE_ID_SIZE);
 
-  // Determine beacon type from command or data
-  if (frame->data_len > 0) {
+  const uint8_t copy_len =
+    frame->data_len < FRAME_MAX_DATA_SIZE ? frame->data_len : FRAME_MAX_DATA_SIZE;
+
+  if (copy_len > 0) {
     last_beacon_.type = static_cast<BeaconType>(frame->data[0]);
+    memcpy(last_beacon_.data, frame->data, copy_len);
   } else {
     last_beacon_.type = BeaconType::SYNC_BEACON;
   }
 
-  // Copy beacon data
-  last_beacon_.data_len = frame->data_len;
-  if (frame->data_len > 0) {
-    size_t copy_len = frame->data_len < FRAME_MAX_DATA_SIZE ? frame->data_len : FRAME_MAX_DATA_SIZE;
-    memcpy(last_beacon_.data, frame->data, copy_len);
-  }
-
+  // Record the length actually stored, not the claimed one.
+  last_beacon_.data_len = copy_len;
   last_beacon_.rssi = rssi;
   last_beacon_.snr = snr;
-  last_beacon_.timestamp_ms = GET_TIME_MS();
+  last_beacon_.timestamp_ms = now_ms;
   beacon_received_ = true;
+  beacon_count_++;
 
   return true;
 }
 
-bool BeaconHandler::get_last_beacon(BeaconInfo* info) {
-  if (!beacon_received_) {
+bool BeaconHandler::get_last_beacon(BeaconInfo* info) const {
+  if (info == nullptr || !beacon_received_) {
     return false;
   }
 
@@ -270,21 +310,20 @@ bool BeaconHandler::get_last_beacon(BeaconInfo* info) {
   return true;
 }
 
-bool BeaconHandler::has_recent_beacon(unsigned long timeout_ms) {
+bool BeaconHandler::has_recent_beacon(unsigned long now_ms, unsigned long timeout_ms) const {
   if (!beacon_received_) {
     return false;
   }
 
-  unsigned long current_time = GET_TIME_MS();
-  return (current_time - last_beacon_.timestamp_ms) <= timeout_ms;
+  return (now_ms - last_beacon_.timestamp_ms) <= timeout_ms;
 }
 
-unsigned long BeaconHandler::time_since_last_beacon(unsigned long current_time_ms) {
+unsigned long BeaconHandler::time_since_last_beacon(unsigned long now_ms) const {
   if (!beacon_received_) {
-    return 0xFFFFFFFF;  // Max value if no beacon received
+    return 0xFFFFFFFFUL;  // Max value if no beacon was received
   }
 
-  return current_time_ms - last_beacon_.timestamp_ms;
+  return now_ms - last_beacon_.timestamp_ms;
 }
 
 // ============================================================================
@@ -302,76 +341,95 @@ DiscoveryManager::DiscoveryManager()
   memset(discovered_devices_, 0, sizeof(discovered_devices_));
 }
 
-void DiscoveryManager::begin(const uint8_t own_node_id[NODE_ID_SIZE]) {
+bool DiscoveryManager::begin(const uint8_t own_node_id[NODE_ID_SIZE]) {
+  if (own_node_id == nullptr) {
+    return false;
+  }
   memcpy(own_node_id_, own_node_id, NODE_ID_SIZE);
   state_ = DiscoveryState::IDLE;
   discovered_count_ = 0;
+  return true;
 }
 
-void DiscoveryManager::start_discovery(uint8_t device_type, unsigned long timeout_ms) {
+void DiscoveryManager::start_discovery(uint8_t device_type, unsigned long timeout_ms,
+                                       unsigned long now_ms) {
   state_ = DiscoveryState::DISCOVERING;
-  discovery_start_time_ = GET_TIME_MS();
+  discovery_start_time_ = now_ms;
   discovery_timeout_ = timeout_ms;
   discovery_device_type_ = device_type;
   discovered_count_ = 0;
 }
 
 void DiscoveryManager::stop_discovery() {
-  state_ = DiscoveryState::IDLE;
+  state_ = (discovered_count_ > 0) ? DiscoveryState::FOUND : DiscoveryState::IDLE;
 }
 
-bool DiscoveryManager::create_discovery_request(frame::IoFrame* frame, uint8_t device_type) {
-  // Initialize frame for broadcast
-  frame::init_frame(frame, true);  // Use 1W for discovery
-
-  // Set broadcast destination
-  frame::set_destination(frame, BROADCAST_ADDRESS);
-  frame::set_source(frame, own_node_id_);
-
-  // Determine command based on device type
-  uint8_t cmd_id;
-  switch (device_type) {
-    case 0x00: // Actuator
-      cmd_id = CMD_DISCOVER_ACTUATOR;
-      break;
-    case 0x12: // Sensor
-      cmd_id = CMD_DISCOVER_SENSOR;
-      break;
-    case 0x11: // Beacon
-      cmd_id = CMD_DISCOVER_BEACON;
-      break;
-    default:
-      cmd_id = CMD_DISCOVER_ACTUATOR;
-      break;
-  }
-
-  // Set command with device type as parameter
-  uint8_t params[1] = {device_type};
-  return frame::set_command(frame, cmd_id, params, 1);
-}
-
-bool DiscoveryManager::process_discovery_response(const frame::IoFrame* frame, int16_t rssi) {
+bool DiscoveryManager::update(unsigned long now_ms) {
   if (state_ != DiscoveryState::DISCOVERING) {
     return false;
   }
 
-  // Check if we have space for more devices
+  if (discovery_timeout_ > 0 && (now_ms - discovery_start_time_) >= discovery_timeout_) {
+    state_ = (discovered_count_ > 0) ? DiscoveryState::FOUND : DiscoveryState::TIMED_OUT;
+    return false;
+  }
+
+  return true;
+}
+
+bool DiscoveryManager::create_discovery_request(frame::IoFrame* frame, uint8_t device_type) {
+  if (frame == nullptr) {
+    return false;
+  }
+
+  // Discovery is a 2W broadcast, see the capture in docs/linklayer.md:
+  //   C8 00 00003B F00F00 28 1234
+  frame::init_frame(frame, false);
+  frame::set_destination(frame, ADDRESS_BROADCAST);
+  frame::set_source(frame, own_node_id_);
+
+  // Command 0x28 carries no parameters; the device type is only a local
+  // filter applied to the answers.
+  if (!frame::set_command(frame, CMD_DISCOVER, nullptr, 0)) {
+    return false;
+  }
+
+  discovery_device_type_ = device_type;
+
+  // Discovery is unauthenticated - the peers have no shared key yet.
+  return frame::finalize_frame_plain(frame);
+}
+
+bool DiscoveryManager::process_discovery_response(const frame::IoFrame* frame, int16_t rssi,
+                                                  unsigned long now_ms) {
+  if (frame == nullptr) {
+    return false;
+  }
+
+  if (!update(now_ms)) {
+    return false;  // Not discovering, or the window has closed
+  }
+
+  // Only discovery answers populate the device list; ignoring everything else
+  // keeps ordinary traffic from being mistaken for a discovered device.
+  if (frame->command_id != CMD_DISCOVER_ANSWER &&
+      frame->command_id != CMD_DISCOVER_REMOTE_ANSWER) {
+    return false;
+  }
+
   if (discovered_count_ >= MAX_DISCOVERED_DEVICES) {
     return false;
   }
 
-  // Check if device was already discovered (avoid duplicates)
   for (size_t i = 0; i < discovered_count_; i++) {
     if (memcmp(discovered_devices_[i].node_id, frame->src_node, NODE_ID_SIZE) == 0) {
-      return false;  // Already in list
+      return false;  // Already in the list
     }
   }
 
-  // Add to discovered devices
   DiscoveredDevice* device = &discovered_devices_[discovered_count_];
   memcpy(device->node_id, frame->src_node, NODE_ID_SIZE);
 
-  // Extract device info from frame data
   if (frame->data_len >= 2) {
     device->device_type = static_cast<DeviceType>(frame->data[0]);
     device->manufacturer = frame->data[1];
@@ -380,23 +438,17 @@ bool DiscoveryManager::process_discovery_response(const frame::IoFrame* frame, i
     device->manufacturer = 0;
   }
 
-  if (frame->data_len >= 3) {
-    device->protocol_version = frame->data[2];
-  } else {
-    device->protocol_version = 0;
-  }
-
+  device->protocol_version = (frame->data_len >= 3) ? frame->data[2] : 0;
   device->rssi = rssi;
-  device->timestamp_ms = GET_TIME_MS();
+  device->timestamp_ms = now_ms;
 
   discovered_count_++;
-  state_ = DiscoveryState::FOUND;
-
+  // Stay in DISCOVERING so the remaining devices are collected too.
   return true;
 }
 
-bool DiscoveryManager::get_discovered_device(size_t index, DiscoveredDevice* device) {
-  if (index >= discovered_count_) {
+bool DiscoveryManager::get_discovered_device(size_t index, DiscoveredDevice* device) const {
+  if (device == nullptr || index >= discovered_count_) {
     return false;
   }
 
@@ -408,21 +460,39 @@ bool DiscoveryManager::create_key_transfer_1w(
   frame::IoFrame* frame,
   const uint8_t dest_node[NODE_ID_SIZE],
   const uint8_t src_node[NODE_ID_SIZE],
-  const uint8_t system_key[AES_KEY_SIZE]
+  const uint8_t system_key[AES_KEY_SIZE],
+  uint8_t manufacturer,
+  uint16_t sequence
 ) {
-  // Initialize frame for 1W mode
+  if (frame == nullptr || dest_node == nullptr || src_node == nullptr || system_key == nullptr) {
+    return false;
+  }
+
   frame::init_frame(frame, true);
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 
-  // Encrypt system key with transfer key
-  uint8_t encrypted_key[AES_KEY_SIZE];
-  if (!crypto::encrypt_1w_key(system_key, dest_node, encrypted_key)) {
+  // Payload per docs/commands.md "30: Send 1W Key":
+  //   encrypted key (16) | manufacturer (1) | reserved (1) | sequence (2)
+  uint8_t params[AES_KEY_SIZE + 4];
+  if (!crypto::encrypt_1w_key(system_key, dest_node, params)) {
     return false;
   }
 
-  // Set command 0x30 with encrypted key
-  return frame::set_command(frame, CMD_KEY_TRANSFER_1W, encrypted_key, AES_KEY_SIZE);
+  params[AES_KEY_SIZE + 0] = manufacturer;
+  params[AES_KEY_SIZE + 1] = 0x01;
+  params[AES_KEY_SIZE + 2] = static_cast<uint8_t>((sequence >> 8) & 0xFF);
+  params[AES_KEY_SIZE + 3] = static_cast<uint8_t>(sequence & 0xFF);
+
+  const bool set_ok = frame::set_command(frame, CMD_SEND_1W_KEY, params, sizeof(params));
+  crypto::secure_zero(params, sizeof(params));
+
+  if (!set_ok) {
+    return false;
+  }
+
+  // Key transfer carries no MAC: the receiver does not have the key yet.
+  return frame::finalize_frame_plain(frame);
 }
 
 bool DiscoveryManager::create_key_transfer_2w(
@@ -432,19 +502,48 @@ bool DiscoveryManager::create_key_transfer_2w(
   const uint8_t system_key[AES_KEY_SIZE],
   const uint8_t challenge[HMAC_SIZE]
 ) {
-  // Initialize frame for 2W mode
+  if (frame == nullptr || dest_node == nullptr || src_node == nullptr ||
+      system_key == nullptr || challenge == nullptr) {
+    return false;
+  }
+
   frame::init_frame(frame, false);
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 
-  // Encrypt system key with transfer key and challenge
   uint8_t encrypted_key[AES_KEY_SIZE];
   if (!crypto::encrypt_2w_key(system_key, challenge, encrypted_key)) {
     return false;
   }
 
-  // Set command 0x31 with encrypted key
-  return frame::set_command(frame, CMD_KEY_TRANSFER_2W, encrypted_key, AES_KEY_SIZE);
+  const bool set_ok = frame::set_command(frame, CMD_KEY_TRANSFER, encrypted_key, AES_KEY_SIZE);
+  crypto::secure_zero(encrypted_key, sizeof(encrypted_key));
+
+  if (!set_ok) {
+    return false;
+  }
+
+  return frame::finalize_frame_plain(frame);
+}
+
+bool DiscoveryManager::create_remove_1w_controller(
+  frame::IoFrame* frame,
+  const uint8_t dest_node[NODE_ID_SIZE],
+  const uint8_t src_node[NODE_ID_SIZE]
+) {
+  if (frame == nullptr || dest_node == nullptr || src_node == nullptr) {
+    return false;
+  }
+
+  frame::init_frame(frame, true);
+  frame::set_destination(frame, dest_node);
+  frame::set_source(frame, src_node);
+
+  if (!frame::set_command(frame, CMD_REMOVE_1W_CONTROLLER, nullptr, 0)) {
+    return false;
+  }
+
+  return frame::finalize_frame_plain(frame);
 }
 
 } // namespace mode2w

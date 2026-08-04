@@ -36,7 +36,12 @@ enum class ChannelState : uint8_t {
 /**
  * @brief Frequency Hopping State Machine
  *
- * Manages channel switching for 2W mode with precise timing (2.7ms per channel).
+ * Manages channel switching for 2W mode with a 2.7 ms dwell time.
+ *
+ * The dwell time is shorter than a millisecond tick, so all timing is kept in
+ * microseconds. Feed update_us() from micros(); update() is a millisecond
+ * convenience wrapper whose resolution is too coarse for the real protocol
+ * timing and is only appropriate for tests and slow-hop experiments.
  */
 class ChannelHopper {
 public:
@@ -50,63 +55,71 @@ public:
   void begin(float hop_interval_ms = CHANNEL_HOP_TIME_MS);
 
   /**
-   * @brief Update state machine (call this frequently in loop)
+   * @brief Update the state machine using a microsecond timestamp
    *
-   * @param current_time_ms Current time in milliseconds
-   * @return true if channel changed, false otherwise
+   * @param current_time_us Current time in microseconds (e.g. micros())
+   * @return true if the channel changed
+   */
+  bool update_us(unsigned long current_time_us);
+
+  /**
+   * @brief Update the state machine using a millisecond timestamp
+   *
+   * @param current_time_ms Current time in milliseconds (e.g. millis())
+   * @return true if the channel changed
    */
   bool update(unsigned long current_time_ms);
 
   /**
    * @brief Get current channel state
-   *
-   * @return Current ChannelState
    */
   ChannelState get_current_channel() const { return current_channel_; }
 
   /**
    * @brief Get current frequency in MHz
-   *
-   * @return Frequency in MHz
    */
   float get_current_frequency() const;
 
   /**
-   * @brief Reset to initial channel
+   * @brief Get the frequency of a specific channel in MHz
    */
-  void reset();
+  static float frequency_of(ChannelState channel);
+
+  /**
+   * @brief Reset to the primary channel
+   *
+   * @param current_time_us Current time in microseconds
+   */
+  void reset(unsigned long current_time_us = 0);
 
   /**
    * @brief Enable/disable hopping
-   *
-   * @param enabled true to enable, false to disable
    */
   void set_enabled(bool enabled) { enabled_ = enabled; }
 
   /**
    * @brief Check if hopping is enabled
-   *
-   * @return true if enabled
    */
   bool is_enabled() const { return enabled_; }
 
   /**
-   * @brief Get time until next hop in microseconds
+   * @brief Get time until the next hop in microseconds
    *
-   * @param current_time_ms Current time in milliseconds
-   * @return Time until next hop in microseconds
+   * @param current_time_us Current time in microseconds
    */
-  unsigned long time_until_next_hop_us(unsigned long current_time_ms) const;
+  unsigned long time_until_next_hop_us(unsigned long current_time_us) const;
+
+  /**
+   * @brief Configured dwell time per channel in microseconds
+   */
+  unsigned long get_hop_interval_us() const { return hop_interval_us_; }
 
 protected:
   ChannelState current_channel_;
-  unsigned long last_hop_time_ms_;
-  unsigned long hop_interval_us_;  // in microseconds for precision
+  unsigned long last_hop_time_us_;
+  unsigned long hop_interval_us_;
   bool enabled_;
 
-  /**
-   * @brief Switch to next channel
-   */
   void next_channel();
 };
 
@@ -126,32 +139,41 @@ enum class ChallengeState : uint8_t {
 /**
  * @brief Challenge-Response Authentication Manager
  *
- * Handles 2W authentication using challenge-response mechanism.
+ * Handles 2W authentication using a challenge-response mechanism.
+ *
+ * Challenges are drawn from the platform CSPRNG. If the platform has no secure
+ * random source, generate_challenge() fails rather than emitting a predictable
+ * nonce - a predictable challenge would let an attacker precompute a valid
+ * response and defeat the whole handshake.
  */
 class AuthenticationManager {
 public:
+  /// A session stays authenticated for this long before a new handshake is required.
+  static constexpr uint32_t DEFAULT_SESSION_TIMEOUT_MS = 30000;
+  /// A pending challenge expires after this long without an answer.
+  static constexpr uint32_t DEFAULT_CHALLENGE_TIMEOUT_MS = 5000;
+
   AuthenticationManager();
 
   /**
-   * @brief Initialize authentication manager
+   * @brief Initialize the authentication manager
    *
-   * @param system_key System key for HMAC calculation (16 bytes)
+   * @param system_key System key for MAC calculation (16 bytes)
+   * @return false if `system_key` is null
    */
-  void begin(const uint8_t system_key[AES_KEY_SIZE]);
+  bool begin(const uint8_t system_key[AES_KEY_SIZE]);
 
   /**
-   * @brief Generate a new challenge
+   * @brief Generate a new random challenge
    *
    * @param challenge_out Output buffer (6 bytes)
+   * @return false when no secure random source is available, or on bad input
    */
-  void generate_challenge(uint8_t challenge_out[HMAC_SIZE]);
+  bool generate_challenge(uint8_t challenge_out[HMAC_SIZE]);
 
   /**
-   * @brief Create challenge request frame
+   * @brief Create a challenge request frame (command 0x3C)
    *
-   * @param frame Output IoFrame structure
-   * @param dest_node Destination node ID (3 bytes)
-   * @param src_node Source node ID (3 bytes)
    * @return true on success
    */
   bool create_challenge_request(
@@ -161,12 +183,9 @@ public:
   );
 
   /**
-   * @brief Create challenge response frame
+   * @brief Create a challenge response frame (command 0x3D)
    *
-   * @param frame Output IoFrame structure
-   * @param dest_node Destination node ID (3 bytes)
-   * @param src_node Source node ID (3 bytes)
-   * @param received_challenge Challenge from request (6 bytes)
+   * @param received_challenge Challenge from the request (6 bytes)
    * @return true on success
    */
   bool create_challenge_response(
@@ -177,38 +196,57 @@ public:
   );
 
   /**
-   * @brief Verify challenge response
+   * @brief Verify a challenge response
+   *
+   * On success the challenge is consumed: a replayed response is rejected
+   * because the manager leaves the CHALLENGE_SENT state.
    *
    * @param frame Received response frame
+   * @param now_ms Current time in milliseconds
    * @return true if valid
    */
-  bool verify_challenge_response(const frame::IoFrame* frame);
+  bool verify_challenge_response(const frame::IoFrame* frame, unsigned long now_ms);
 
   /**
-   * @brief Get current challenge
+   * @brief Get the current challenge (6 bytes)
    *
-   * @return Pointer to current challenge (6 bytes)
+   * Only meaningful while a handshake is in progress.
    */
   const uint8_t* get_current_challenge() const { return current_challenge_; }
 
   /**
-   * @brief Get authentication state
+   * @brief Get the authentication state, expiring it if it has timed out
    *
-   * @return Current ChallengeState
+   * @param now_ms Current time in milliseconds
    */
-  ChallengeState get_state() const { return state_; }
+  ChallengeState get_state(unsigned long now_ms);
 
   /**
-   * @brief Reset authentication state
+   * @brief Get the last known authentication state without expiring it
+   */
+  ChallengeState peek_state() const { return state_; }
+
+  /**
+   * @brief Whether the session is currently authenticated
+   */
+  bool is_authenticated(unsigned long now_ms) { return get_state(now_ms) == ChallengeState::AUTHENTICATED; }
+
+  /**
+   * @brief Reset the authentication state and wipe the stored challenge
    */
   void reset();
+
+  void set_challenge_timeout_ms(uint32_t timeout_ms) { challenge_timeout_ms_ = timeout_ms; }
+  void set_session_timeout_ms(uint32_t timeout_ms) { session_timeout_ms_ = timeout_ms; }
 
 protected:
   uint8_t system_key_[AES_KEY_SIZE];
   uint8_t current_challenge_[HMAC_SIZE];
   ChallengeState state_;
-  unsigned long challenge_timestamp_;
+  unsigned long state_timestamp_ms_;
   uint32_t challenge_timeout_ms_;
+  uint32_t session_timeout_ms_;
+  bool key_set_;
 };
 
 // ============================================================================
@@ -219,7 +257,7 @@ protected:
  * @brief Beacon type
  */
 enum class BeaconType : uint8_t {
-  SYNC_BEACON = 0x00,      // Synchronization beacon
+  SYNC_BEACON = 0x00,       // Synchronization beacon
   DISCOVERY_BEACON = 0x01,  // Discovery beacon
   SYSTEM_BEACON = 0x02      // System announcement
 };
@@ -246,48 +284,43 @@ class BeaconHandler {
 public:
   BeaconHandler();
 
-  /**
-   * @brief Initialize beacon handler
-   */
   void begin();
 
   /**
-   * @brief Process received beacon frame
+   * @brief Process a received beacon frame
    *
    * @param frame Received frame
    * @param rssi RSSI value
    * @param snr SNR value
-   * @return true if beacon was processed
+   * @param now_ms Current time in milliseconds
+   * @return true if the frame was a beacon and was recorded
    */
-  bool process_beacon(const frame::IoFrame* frame, int16_t rssi, float snr);
+  bool process_beacon(const frame::IoFrame* frame, int16_t rssi, float snr, unsigned long now_ms);
 
   /**
-   * @brief Get last received beacon info
+   * @brief Copy out the last received beacon info
    *
-   * @param info Output BeaconInfo structure
    * @return true if beacon info is available
    */
-  bool get_last_beacon(BeaconInfo* info);
+  bool get_last_beacon(BeaconInfo* info) const;
 
   /**
-   * @brief Check if beacon was received recently
-   *
-   * @param timeout_ms Timeout in milliseconds (default: 5000)
-   * @return true if beacon was received within timeout
+   * @brief Check whether a beacon was received within `timeout_ms`
    */
-  bool has_recent_beacon(unsigned long timeout_ms = 5000);
+  bool has_recent_beacon(unsigned long now_ms, unsigned long timeout_ms = 5000) const;
 
   /**
-   * @brief Get time since last beacon in milliseconds
-   *
-   * @param current_time_ms Current time in milliseconds
-   * @return Time since last beacon
+   * @brief Time since the last beacon, or 0xFFFFFFFF if none was received
    */
-  unsigned long time_since_last_beacon(unsigned long current_time_ms);
+  unsigned long time_since_last_beacon(unsigned long now_ms) const;
+
+  /// Total number of beacons processed.
+  uint32_t beacon_count() const { return beacon_count_; }
 
 protected:
   BeaconInfo last_beacon_;
   bool beacon_received_;
+  uint32_t beacon_count_;
 };
 
 // ============================================================================
@@ -300,7 +333,8 @@ protected:
 enum class DiscoveryState : uint8_t {
   IDLE,           // Not discovering
   DISCOVERING,    // Discovery in progress
-  FOUND           // Device found
+  FOUND,          // Discovery finished with at least one device
+  TIMED_OUT       // Discovery window elapsed without any device
 };
 
 /**
@@ -322,22 +356,26 @@ struct DiscoveredDevice {
  */
 class DiscoveryManager {
 public:
+  static constexpr size_t MAX_DISCOVERED_DEVICES = 32;
+
   DiscoveryManager();
 
   /**
-   * @brief Initialize discovery manager
+   * @brief Initialize the discovery manager
    *
    * @param own_node_id This controller's node ID (3 bytes)
+   * @return false if `own_node_id` is null
    */
-  void begin(const uint8_t own_node_id[NODE_ID_SIZE]);
+  bool begin(const uint8_t own_node_id[NODE_ID_SIZE]);
 
   /**
    * @brief Start device discovery
    *
    * @param device_type Type of device to discover (0xFF for all)
    * @param timeout_ms Discovery timeout in milliseconds
+   * @param now_ms Current time in milliseconds
    */
-  void start_discovery(uint8_t device_type = 0xFF, unsigned long timeout_ms = 10000);
+  void start_discovery(uint8_t device_type, unsigned long timeout_ms, unsigned long now_ms);
 
   /**
    * @brief Stop device discovery
@@ -345,63 +383,62 @@ public:
   void stop_discovery();
 
   /**
-   * @brief Create discovery request frame
+   * @brief Expire the discovery window if `timeout_ms` has elapsed
    *
-   * @param frame Output IoFrame structure
-   * @param device_type Type of device to discover
+   * @param now_ms Current time in milliseconds
+   * @return true if discovery is still running
+   */
+  bool update(unsigned long now_ms);
+
+  /**
+   * @brief Create a discovery request frame (command 0x28)
+   *
+   * The frame is finalized as a plain frame - discovery is unauthenticated
+   * because no key has been exchanged yet.
+   *
    * @return true on success
    */
   bool create_discovery_request(frame::IoFrame* frame, uint8_t device_type);
 
   /**
-   * @brief Process discovery response
+   * @brief Process a discovery answer (command 0x29 / 0x2B)
    *
-   * @param frame Received frame
-   * @param rssi RSSI value
-   * @return true if response was valid
+   * Frames carrying any other command ID are ignored, so ordinary traffic
+   * does not end up in the discovered-device list.
+   *
+   * @return true if the frame was a new discovery answer
    */
-  bool process_discovery_response(const frame::IoFrame* frame, int16_t rssi);
+  bool process_discovery_response(const frame::IoFrame* frame, int16_t rssi, unsigned long now_ms);
 
-  /**
-   * @brief Get number of discovered devices
-   *
-   * @return Number of devices
-   */
   size_t get_discovered_count() const { return discovered_count_; }
 
   /**
-   * @brief Get discovered device by index
-   *
-   * @param index Device index (0 to discovered_count-1)
-   * @param device Output DiscoveredDevice structure
-   * @return true if device exists
+   * @brief Copy out a discovered device by index
    */
-  bool get_discovered_device(size_t index, DiscoveredDevice* device);
+  bool get_discovered_device(size_t index, DiscoveredDevice* device) const;
+
+  DiscoveryState get_state() const { return state_; }
 
   /**
-   * @brief Create key transfer frame for pairing (1W mode)
+   * @brief Create a 1W key transfer frame (command 0x30)
    *
-   * @param frame Output IoFrame structure
-   * @param dest_node Destination node ID (3 bytes)
-   * @param src_node Source node ID (3 bytes)
-   * @param system_key System key to transfer (16 bytes)
+   * Payload: encrypted key (16) | manufacturer (1) | reserved (1) | sequence (2)
+   * The frame is finalized as a plain frame.
+   *
    * @return true on success
    */
   bool create_key_transfer_1w(
     frame::IoFrame* frame,
     const uint8_t dest_node[NODE_ID_SIZE],
     const uint8_t src_node[NODE_ID_SIZE],
-    const uint8_t system_key[AES_KEY_SIZE]
+    const uint8_t system_key[AES_KEY_SIZE],
+    uint8_t manufacturer = 0x00,
+    uint16_t sequence = 0
   );
 
   /**
-   * @brief Create key transfer frame for pairing (2W mode)
+   * @brief Create a 2W key transfer frame (command 0x32)
    *
-   * @param frame Output IoFrame structure
-   * @param dest_node Destination node ID (3 bytes)
-   * @param src_node Source node ID (3 bytes)
-   * @param system_key System key to transfer (16 bytes)
-   * @param challenge Challenge bytes (6 bytes)
    * @return true on success
    */
   bool create_key_transfer_2w(
@@ -412,6 +449,17 @@ public:
     const uint8_t challenge[HMAC_SIZE]
   );
 
+  /**
+   * @brief Create a "remove 1W controller" frame (command 0x39)
+   *
+   * Sent before a 1W key transfer so the actuator drops the previous key.
+   */
+  bool create_remove_1w_controller(
+    frame::IoFrame* frame,
+    const uint8_t dest_node[NODE_ID_SIZE],
+    const uint8_t src_node[NODE_ID_SIZE]
+  );
+
 protected:
   uint8_t own_node_id_[NODE_ID_SIZE];
   DiscoveryState state_;
@@ -419,7 +467,6 @@ protected:
   unsigned long discovery_timeout_;
   uint8_t discovery_device_type_;
 
-  static constexpr size_t MAX_DISCOVERED_DEVICES = 32;
   DiscoveredDevice discovered_devices_[MAX_DISCOVERED_DEVICES];
   size_t discovered_count_;
 };

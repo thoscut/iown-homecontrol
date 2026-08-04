@@ -11,6 +11,37 @@
 
 namespace iohome {
 namespace frame {
+namespace {
+
+/**
+ * @brief Recompute frame_length and the Control Byte 0 size field.
+ * @return false if the frame does not fit into the 5-bit size field.
+ */
+bool refresh_length(IoFrame* frame) {
+  size_t total = FRAME_HEADER_SIZE + frame->data_len + CRC_SIZE;
+  if (frame->authenticated) {
+    total += auth_trailer_size(frame->is_1w_mode);
+  }
+
+  if (total < FRAME_MIN_SIZE || total > FRAME_MAX_SIZE) {
+    return false;
+  }
+
+  frame->frame_length = static_cast<uint8_t>(total);
+  frame->ctrl_byte_0 = set_frame_length(frame->ctrl_byte_0, frame->frame_length);
+  return true;
+}
+
+/// Copy command id + parameters into the buffer the MAC is computed over.
+size_t build_mac_input(const IoFrame* frame, uint8_t out[1 + FRAME_MAX_DATA_SIZE]) {
+  out[0] = frame->command_id;
+  if (frame->data_len > 0) {
+    memcpy(&out[1], frame->data, frame->data_len);
+  }
+  return 1u + frame->data_len;
+}
+
+} // namespace
 
 // ============================================================================
 // Frame Construction
@@ -22,57 +53,113 @@ void init_frame(IoFrame* frame, bool is_1w) {
   }
   memset(frame, 0, sizeof(IoFrame));
   frame->is_1w_mode = is_1w;
+  frame->authenticated = false;
 
-  // Set default control bytes
-  frame->ctrl_byte_0 = 0x00; // Will be updated when data is set
-  frame->ctrl_byte_1 = 0x00; // Default: no beacon, not routed, normal power
+  // Control Byte 0: order = SINGLE, isOneWay bit set for 1W, size filled in
+  // once the payload is known.
+  frame->ctrl_byte_0 = is_1w ? CTRL0_ONE_WAY_MASK : 0x00;
+  frame->ctrl_byte_1 = 0x00;
 
-  if (!is_1w) {
-    frame->ctrl_byte_0 |= CTRL0_PROTOCOL_MASK; // Set 2W bit
+  frame->frame_length = FRAME_MIN_SIZE;
+  frame->ctrl_byte_0 = set_frame_length(frame->ctrl_byte_0, frame->frame_length);
+}
+
+void set_order(IoFrame* frame, FrameOrder order) {
+  if (frame == nullptr) {
+    return;
   }
+  frame->ctrl_byte_0 = static_cast<uint8_t>(
+    (frame->ctrl_byte_0 & ~CTRL0_ORDER_MASK) |
+    ((static_cast<uint8_t>(order) << CTRL0_ORDER_SHIFT) & CTRL0_ORDER_MASK));
 }
 
 void set_destination(IoFrame* frame, const uint8_t node_id[NODE_ID_SIZE]) {
+  if (frame == nullptr || node_id == nullptr) {
+    return;
+  }
   memcpy(frame->dest_node, node_id, NODE_ID_SIZE);
 }
 
 void set_source(IoFrame* frame, const uint8_t node_id[NODE_ID_SIZE]) {
+  if (frame == nullptr || node_id == nullptr) {
+    return;
+  }
   memcpy(frame->src_node, node_id, NODE_ID_SIZE);
 }
 
 bool set_command(IoFrame* frame, uint8_t cmd_id, const uint8_t* params, size_t params_len) {
-  if (params_len > FRAME_MAX_DATA_SIZE) {
-    return false; // Parameters too large
+  if (frame == nullptr) {
+    return false;
   }
 
-  frame->command_id = cmd_id;
-  frame->data_len = params_len;
+  if (params_len > FRAME_MAX_DATA_SIZE) {
+    return false; // Parameters too large for the frame structure
+  }
 
-  if (params != nullptr && params_len > 0) {
+  if (params == nullptr && params_len > 0) {
+    return false;
+  }
+
+  const uint8_t previous_len = frame->data_len;
+
+  frame->command_id = cmd_id;
+  frame->data_len = static_cast<uint8_t>(params_len);
+
+  if (params_len > 0) {
     memcpy(frame->data, params, params_len);
   }
 
-  // Update control byte 0 with frame length
-  // Frame length field = (total_length - 11)
-  // total_length = 9 (header) + 1 (cmd) + data_len + 2 (rolling code for 1W) + 6 (hmac) + 2 (crc)
-  uint8_t total_length;
-  if (frame->is_1w_mode) {
-    total_length = 9 + 1 + frame->data_len + ROLLING_CODE_SIZE + HMAC_SIZE + CRC_SIZE;
-  } else {
-    total_length = 9 + 1 + frame->data_len + HMAC_SIZE + CRC_SIZE;
+  if (!refresh_length(frame)) {
+    // Roll back so the frame stays consistent after a rejected update.
+    frame->data_len = previous_len;
+    refresh_length(frame);
+    return false;
   }
-
-  frame->frame_length = total_length;
-
-  // Update ctrl_byte_0 length field
-  frame->ctrl_byte_0 = (frame->ctrl_byte_0 & ~CTRL0_LENGTH_MASK) | ((total_length - FRAME_MIN_SIZE) & CTRL0_LENGTH_MASK);
 
   return true;
 }
 
+bool set_execute_command(IoFrame* frame,
+                         uint16_t main_param,
+                         Originator originator,
+                         uint8_t acei,
+                         uint8_t fp1,
+                         uint8_t fp2) {
+  if (frame == nullptr) {
+    return false;
+  }
+
+  // Actuators discard frames whose ACEI "IsValid" bit is clear.
+  if (!is_acei_valid(acei)) {
+    return false;
+  }
+
+  const uint8_t params[EXECUTE_PAYLOAD_SIZE] = {
+    static_cast<uint8_t>(originator),
+    acei,
+    static_cast<uint8_t>((main_param >> 8) & 0xFF),
+    static_cast<uint8_t>(main_param & 0xFF),
+    fp1,
+    fp2
+  };
+
+  return set_command(frame, CMD_EXECUTE, params, sizeof(params));
+}
+
 void set_rolling_code(IoFrame* frame, uint16_t code) {
+  if (frame == nullptr) {
+    return;
+  }
   frame->rolling_code[0] = code & 0xFF;         // LSB first
   frame->rolling_code[1] = (code >> 8) & 0xFF;
+}
+
+uint16_t get_rolling_code(const IoFrame* frame) {
+  if (frame == nullptr) {
+    return 0;
+  }
+  return static_cast<uint16_t>(frame->rolling_code[0] |
+                               (static_cast<uint16_t>(frame->rolling_code[1]) << 8));
 }
 
 bool finalize_frame(IoFrame* frame, const uint8_t system_key[AES_KEY_SIZE], const uint8_t* challenge) {
@@ -80,50 +167,79 @@ bool finalize_frame(IoFrame* frame, const uint8_t system_key[AES_KEY_SIZE], cons
     return false;
   }
 
-  // Prepare frame data for HMAC (command ID + parameters)
-  uint8_t frame_data[1 + FRAME_MAX_DATA_SIZE];
-  frame_data[0] = frame->command_id;
-  memcpy(&frame_data[1], frame->data, frame->data_len);
-  size_t frame_data_len = 1 + frame->data_len;
+  if (frame->data_len > FRAME_MAX_DATA_SIZE) {
+    return false;
+  }
 
-  // Calculate HMAC
+  if (!frame->is_1w_mode && challenge == nullptr) {
+    return false; // 2W MAC is bound to a challenge
+  }
+
+  const bool was_authenticated = frame->authenticated;
+  frame->authenticated = true;
+  if (!refresh_length(frame)) {
+    frame->authenticated = was_authenticated;
+    refresh_length(frame);
+    return false;
+  }
+
+  // MAC is computed over command ID + parameters.
+  uint8_t mac_input[1 + FRAME_MAX_DATA_SIZE];
+  const size_t mac_input_len = build_mac_input(frame, mac_input);
+
   bool hmac_success;
   if (frame->is_1w_mode) {
-    hmac_success = crypto::create_1w_hmac(
-      frame_data,
-      frame_data_len,
-      frame->rolling_code,
-      system_key,
-      frame->hmac
-    );
+    hmac_success = crypto::create_1w_hmac(mac_input, mac_input_len, frame->rolling_code,
+                                          system_key, frame->hmac);
   } else {
-    if (challenge == nullptr) {
-      return false; // 2W mode requires challenge
-    }
-    hmac_success = crypto::create_2w_hmac(
-      frame_data,
-      frame_data_len,
-      challenge,
-      system_key,
-      frame->hmac
-    );
+    hmac_success = crypto::create_2w_hmac(mac_input, mac_input_len, challenge,
+                                          system_key, frame->hmac);
   }
 
   if (!hmac_success) {
     return false;
   }
 
-  // Serialize frame to temporary buffer for CRC calculation
+  // Serialize to a scratch buffer so the CRC covers the exact wire bytes.
   uint8_t temp_buffer[FRAME_MAX_SIZE];
-  size_t crc_len = serialize_frame(frame, temp_buffer, sizeof(temp_buffer));
-  if (crc_len == 0) {
+  const size_t frame_len = serialize_frame(frame, temp_buffer, sizeof(temp_buffer));
+  if (frame_len == 0) {
     return false;
   }
 
-  // Calculate CRC (exclude CRC bytes themselves)
-  uint16_t crc_value = crypto::compute_crc16(temp_buffer, crc_len - CRC_SIZE);
+  const uint16_t crc_value = crypto::compute_crc16(temp_buffer, frame_len - CRC_SIZE);
+  frame->crc[0] = crc_value & 0xFF;          // LSB first
+  frame->crc[1] = (crc_value >> 8) & 0xFF;
 
-  // Store CRC (LSB first)
+  return true;
+}
+
+bool finalize_frame_plain(IoFrame* frame) {
+  if (frame == nullptr) {
+    return false;
+  }
+
+  if (frame->data_len > FRAME_MAX_DATA_SIZE) {
+    return false;
+  }
+
+  const bool was_authenticated = frame->authenticated;
+  frame->authenticated = false;
+  if (!refresh_length(frame)) {
+    frame->authenticated = was_authenticated;
+    refresh_length(frame);
+    return false;
+  }
+
+  memset(frame->hmac, 0, HMAC_SIZE);
+
+  uint8_t temp_buffer[FRAME_MAX_SIZE];
+  const size_t frame_len = serialize_frame(frame, temp_buffer, sizeof(temp_buffer));
+  if (frame_len == 0) {
+    return false;
+  }
+
+  const uint16_t crc_value = crypto::compute_crc16(temp_buffer, frame_len - CRC_SIZE);
   frame->crc[0] = crc_value & 0xFF;
   frame->crc[1] = (crc_value >> 8) & 0xFF;
 
@@ -135,42 +251,50 @@ size_t serialize_frame(const IoFrame* frame, uint8_t* buffer, size_t buffer_size
     return 0;
   }
 
-  if (buffer_size < frame->frame_length) {
+  if (frame->data_len > FRAME_MAX_DATA_SIZE) {
+    return 0;
+  }
+
+  size_t required = FRAME_HEADER_SIZE + frame->data_len + CRC_SIZE;
+  if (frame->authenticated) {
+    required += auth_trailer_size(frame->is_1w_mode);
+  }
+
+  if (required != frame->frame_length) {
+    return 0; // Frame metadata is inconsistent - refuse to emit garbage
+  }
+
+  if (buffer_size < required) {
     return 0; // Buffer too small
   }
 
   size_t offset = 0;
 
-  // Control Bytes
   buffer[offset++] = frame->ctrl_byte_0;
   buffer[offset++] = frame->ctrl_byte_1;
 
-  // Destination Node
   memcpy(&buffer[offset], frame->dest_node, NODE_ID_SIZE);
   offset += NODE_ID_SIZE;
 
-  // Source Node
   memcpy(&buffer[offset], frame->src_node, NODE_ID_SIZE);
   offset += NODE_ID_SIZE;
 
-  // Command ID
   buffer[offset++] = frame->command_id;
 
-  // Parameters
-  memcpy(&buffer[offset], frame->data, frame->data_len);
-  offset += frame->data_len;
-
-  // Rolling Code (1W mode only)
-  if (frame->is_1w_mode) {
-    memcpy(&buffer[offset], frame->rolling_code, ROLLING_CODE_SIZE);
-    offset += ROLLING_CODE_SIZE;
+  if (frame->data_len > 0) {
+    memcpy(&buffer[offset], frame->data, frame->data_len);
+    offset += frame->data_len;
   }
 
-  // HMAC
-  memcpy(&buffer[offset], frame->hmac, HMAC_SIZE);
-  offset += HMAC_SIZE;
+  if (frame->authenticated) {
+    if (frame->is_1w_mode) {
+      memcpy(&buffer[offset], frame->rolling_code, ROLLING_CODE_SIZE);
+      offset += ROLLING_CODE_SIZE;
+    }
+    memcpy(&buffer[offset], frame->hmac, HMAC_SIZE);
+    offset += HMAC_SIZE;
+  }
 
-  // CRC
   memcpy(&buffer[offset], frame->crc, CRC_SIZE);
   offset += CRC_SIZE;
 
@@ -181,9 +305,9 @@ size_t serialize_frame(const IoFrame* frame, uint8_t* buffer, size_t buffer_size
 // Frame Parsing
 // ============================================================================
 
-bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame) {
+bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame, AuthTrailer trailer) {
   if (buffer == nullptr || frame == nullptr) {
-    return false; // Null pointer check
+    return false;
   }
 
   if (buffer_len < FRAME_MIN_SIZE) {
@@ -192,90 +316,79 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame) {
 
   memset(frame, 0, sizeof(IoFrame));
 
-  size_t offset = 0;
-
-  // Parse Control Bytes
-  frame->ctrl_byte_0 = buffer[offset++];
-  frame->ctrl_byte_1 = buffer[offset++];
-
-  // Determine mode
-  frame->is_1w_mode = !is_2w_mode(frame->ctrl_byte_0);
-
-  // Get frame length and validate bounds
+  frame->ctrl_byte_0 = buffer[OFFSET_CTRL_BYTE_0];
+  frame->ctrl_byte_1 = buffer[OFFSET_CTRL_BYTE_1];
+  frame->is_1w_mode = is_1w_mode(frame->ctrl_byte_0);
   frame->frame_length = get_frame_length(frame->ctrl_byte_0);
 
   if (frame->frame_length < FRAME_MIN_SIZE || frame->frame_length > FRAME_MAX_SIZE) {
-    return false; // Invalid frame length
+    return false; // Length field cannot describe a legal frame
   }
 
   if (buffer_len < frame->frame_length) {
-    return false; // Buffer doesn't contain complete frame
+    return false; // Buffer doesn't contain the complete frame
   }
 
-  // Parse Destination Node
+  size_t offset = CTRL_BYTE_SIZE;
+
   memcpy(frame->dest_node, &buffer[offset], NODE_ID_SIZE);
   offset += NODE_ID_SIZE;
 
-  // Parse Source Node
   memcpy(frame->src_node, &buffer[offset], NODE_ID_SIZE);
   offset += NODE_ID_SIZE;
 
-  // Parse Command ID
   frame->command_id = buffer[offset++];
 
-  // Calculate data length with overflow protection
-  // Minimum overhead = header(9) + cmd(1) + hmac(6) + crc(2) = 18 for 2W
-  // Minimum overhead = header(9) + cmd(1) + rolling_code(2) + hmac(6) + crc(2) = 20 for 1W
-  size_t overhead;
-  if (frame->is_1w_mode) {
-    overhead = 9 + 1 + ROLLING_CODE_SIZE + HMAC_SIZE + CRC_SIZE;
-  } else {
-    overhead = 9 + 1 + HMAC_SIZE + CRC_SIZE;
+  // Everything between the command byte and the CRC is payload plus an
+  // optional authentication trailer.
+  const size_t payload_len = frame->frame_length - FRAME_HEADER_SIZE - CRC_SIZE;
+  const uint8_t trailer_len = auth_trailer_size(frame->is_1w_mode);
+
+  switch (trailer) {
+    case AuthTrailer::NONE:
+      frame->authenticated = false;
+      break;
+    case AuthTrailer::PRESENT:
+      if (payload_len < trailer_len) {
+        return false; // Frame is too short to carry the trailer it claims
+      }
+      frame->authenticated = true;
+      break;
+    case AuthTrailer::AUTO:
+    default:
+      // Authenticated 1W frames append a sequence number and a MAC. 2W frames
+      // seen in the wild (discovery, acks, execute) carry no MAC, so only
+      // assume a trailer for 1W.
+      frame->authenticated = frame->is_1w_mode && (payload_len >= trailer_len);
+      break;
   }
 
-  if (frame->frame_length < overhead) {
-    return false; // Frame too short for required fields
+  const size_t data_len = frame->authenticated ? (payload_len - trailer_len) : payload_len;
+
+  if (data_len > FRAME_MAX_DATA_SIZE) {
+    return false; // Payload larger than the structure can hold
   }
 
-  frame->data_len = frame->frame_length - overhead;
+  frame->data_len = static_cast<uint8_t>(data_len);
 
-  if (frame->data_len > FRAME_MAX_DATA_SIZE) {
-    return false; // Invalid data length
+  if (frame->data_len > 0) {
+    memcpy(frame->data, &buffer[offset], frame->data_len);
+    offset += frame->data_len;
   }
 
-  // Validate remaining buffer has enough data
-  if (offset + frame->data_len > buffer_len) {
-    return false; // Buffer underrun
-  }
-
-  // Parse Parameters
-  memcpy(frame->data, &buffer[offset], frame->data_len);
-  offset += frame->data_len;
-
-  // Parse Rolling Code (1W mode only)
-  if (frame->is_1w_mode) {
-    if (offset + ROLLING_CODE_SIZE > buffer_len) {
-      return false;
+  if (frame->authenticated) {
+    if (frame->is_1w_mode) {
+      memcpy(frame->rolling_code, &buffer[offset], ROLLING_CODE_SIZE);
+      offset += ROLLING_CODE_SIZE;
     }
-    memcpy(frame->rolling_code, &buffer[offset], ROLLING_CODE_SIZE);
-    offset += ROLLING_CODE_SIZE;
+    memcpy(frame->hmac, &buffer[offset], HMAC_SIZE);
+    offset += HMAC_SIZE;
   }
 
-  // Parse HMAC
-  if (offset + HMAC_SIZE > buffer_len) {
-    return false;
-  }
-  memcpy(frame->hmac, &buffer[offset], HMAC_SIZE);
-  offset += HMAC_SIZE;
-
-  // Parse CRC
-  if (offset + CRC_SIZE > buffer_len) {
-    return false;
-  }
   memcpy(frame->crc, &buffer[offset], CRC_SIZE);
   offset += CRC_SIZE;
 
-  return true;
+  return offset == frame->frame_length;
 }
 
 bool validate_frame(const IoFrame* frame, const uint8_t* system_key, const uint8_t* challenge) {
@@ -283,40 +396,37 @@ bool validate_frame(const IoFrame* frame, const uint8_t* system_key, const uint8
     return false;
   }
 
-  // Serialize frame for CRC check
+  // Serialize so the CRC is checked against the exact wire representation.
   uint8_t temp_buffer[FRAME_MAX_SIZE];
-  size_t frame_len = serialize_frame(frame, temp_buffer, sizeof(temp_buffer));
+  const size_t frame_len = serialize_frame(frame, temp_buffer, sizeof(temp_buffer));
   if (frame_len == 0) {
     return false;
   }
 
-  // Verify CRC
   if (!crypto::verify_crc16(temp_buffer, frame_len)) {
     return false;
   }
 
-  // Optionally verify HMAC
-  if (system_key != nullptr) {
-    uint8_t frame_data[1 + FRAME_MAX_DATA_SIZE];
-    frame_data[0] = frame->command_id;
-    memcpy(&frame_data[1], frame->data, frame->data_len);
-    size_t frame_data_len = 1 + frame->data_len;
-
-    const uint8_t* seq_or_challenge = frame->is_1w_mode ? frame->rolling_code : challenge;
-
-    if (!crypto::verify_hmac(
-        frame_data,
-        frame_data_len,
-        frame->hmac,
-        seq_or_challenge,
-        system_key,
-        !frame->is_1w_mode
-      )) {
-      return false;
-    }
+  if (system_key == nullptr) {
+    return true; // Caller opted out of MAC verification
   }
 
-  return true;
+  if (!frame->authenticated) {
+    // Nothing to verify: a plain frame carries no MAC. Report success so
+    // callers can decide by policy whether plain frames are acceptable.
+    return true;
+  }
+
+  const uint8_t* seq_or_challenge = frame->is_1w_mode ? frame->rolling_code : challenge;
+  if (seq_or_challenge == nullptr) {
+    return false; // 2W MAC cannot be checked without the challenge
+  }
+
+  uint8_t mac_input[1 + FRAME_MAX_DATA_SIZE];
+  const size_t mac_input_len = build_mac_input(frame, mac_input);
+
+  return crypto::verify_hmac(mac_input, mac_input_len, frame->hmac, seq_or_challenge,
+                             system_key, !frame->is_1w_mode);
 }
 
 // ============================================================================
@@ -324,16 +434,28 @@ bool validate_frame(const IoFrame* frame, const uint8_t* system_key, const uint8
 // ============================================================================
 
 bool is_broadcast(const uint8_t node_id[NODE_ID_SIZE]) {
-  return (node_id[0] == 0x00 && node_id[1] == 0x00 && node_id[2] == 0x00);
+  if (node_id == nullptr) {
+    return false;
+  }
+  return memcmp(node_id, ADDRESS_BROADCAST, NODE_ID_SIZE) == 0 ||
+         memcmp(node_id, ADDRESS_BROADCAST_ALL, NODE_ID_SIZE) == 0 ||
+         memcmp(node_id, ADDRESS_GROUP, NODE_ID_SIZE) == 0;
 }
 
 void print_frame(const IoFrame* frame, void (*print_func)(const char*)) {
+  if (frame == nullptr || print_func == nullptr) {
+    return;
+  }
+
   char buf[128];
 
-  snprintf(buf, sizeof(buf), "Frame: %s Mode", frame->is_1w_mode ? "1W" : "2W");
+  snprintf(buf, sizeof(buf), "Frame: %s mode, %s, order %u",
+           frame->is_1w_mode ? "1W" : "2W",
+           frame->authenticated ? "authenticated" : "plain",
+           static_cast<unsigned>(get_order(frame->ctrl_byte_0)));
   print_func(buf);
 
-  snprintf(buf, sizeof(buf), "  Length: %d bytes", frame->frame_length);
+  snprintf(buf, sizeof(buf), "  Length: %u bytes", static_cast<unsigned>(frame->frame_length));
   print_func(buf);
 
   snprintf(buf, sizeof(buf), "  Dest: %02X %02X %02X",
@@ -348,27 +470,32 @@ void print_frame(const IoFrame* frame, void (*print_func)(const char*)) {
   print_func(buf);
 
   if (frame->data_len > 0) {
-    char hex[64] = {0};
-    for (size_t i = 0; i < frame->data_len && i < 20; i++) {
-      snprintf(hex + strlen(hex), sizeof(hex) - strlen(hex), "%02X ", frame->data[i]);
+    // 3 chars per byte plus terminator.
+    char hex[3 * FRAME_MAX_DATA_SIZE + 1];
+    size_t used = 0;
+    for (size_t i = 0; i < frame->data_len && i < FRAME_MAX_DATA_SIZE; i++) {
+      used += snprintf(hex + used, sizeof(hex) - used, "%02X ", frame->data[i]);
     }
     snprintf(buf, sizeof(buf), "  Data: %s", hex);
     print_func(buf);
   }
 
-  if (frame->is_1w_mode) {
-    snprintf(buf, sizeof(buf), "  Rolling Code: %02X %02X",
-             frame->rolling_code[0], frame->rolling_code[1]);
+  if (frame->authenticated) {
+    if (frame->is_1w_mode) {
+      snprintf(buf, sizeof(buf), "  Sequence: %02X %02X (%u)",
+               frame->rolling_code[0], frame->rolling_code[1],
+               static_cast<unsigned>(get_rolling_code(frame)));
+      print_func(buf);
+    }
+
+    char mac_str[3 * HMAC_SIZE + 1];
+    size_t used = 0;
+    for (uint8_t i = 0; i < HMAC_SIZE; i++) {
+      used += snprintf(mac_str + used, sizeof(mac_str) - used, "%02X ", frame->hmac[i]);
+    }
+    snprintf(buf, sizeof(buf), "  MAC:  %s", mac_str);
     print_func(buf);
   }
-
-  char hmac_str[24] = {0};
-  for (int i = 0; i < HMAC_SIZE; i++) {
-    snprintf(hmac_str + strlen(hmac_str), sizeof(hmac_str) - strlen(hmac_str),
-             "%02X ", frame->hmac[i]);
-  }
-  snprintf(buf, sizeof(buf), "  HMAC: %s", hmac_str);
-  print_func(buf);
 
   snprintf(buf, sizeof(buf), "  CRC:  %02X %02X", frame->crc[0], frame->crc[1]);
   print_func(buf);

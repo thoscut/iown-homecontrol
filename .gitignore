@@ -91,3 +91,6 @@ $RECYCLE.BIN/
 .idea/**/markdown-navigator.xml
 .idea/**/markdown-navigator-enh.xml
 .idea/**/markdown-navigator/
+
+# Native unit test build output
+.build/

@@ -18,6 +18,14 @@
 > See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for the detailed
 > assessment and [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for what the
 > authentication does and does not protect against.
+>
+> **Have a board and an actuator?** [docs/HARDWARE-BRINGUP.md](docs/HARDWARE-BRINGUP.md)
+> is the step-by-step for closing that gap. The firmware in `src/main.cpp`
+> sweeps the three channels, prints every packet it hears as plain hex and says
+> so in as many words when the radio does not answer over SPI. Captures are the
+> most useful thing anyone can contribute right now: several open questions -
+> the Velux command IDs, the direction of Functional Parameter 1, the pairing
+> sequence - need one recording each to settle.
 
 ### Protocol Documentation
 - [X] [Document Layer 1](docs/radio.md) - Physical Layer (RF, modulation, frequencies)

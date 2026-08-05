@@ -1,7 +1,7 @@
 # Hardware bring-up
 
 Everything this library claims about the io-homecontrol wire format is checked
-against captures in `docs/` and reproduced by 197 host-run tests. None of it has
+against captures in `docs/` and reproduced by 198 host-run tests. None of it has
 been checked against a physical actuator. That is the single largest open item
 in `PRODUCTION_READINESS.md` (**K1**), and it is the one thing a laptop cannot
 close.
@@ -94,7 +94,7 @@ Every packet the radio delivers is printed raw, before the protocol layer forms
 any opinion about it:
 
 ```
-[RAW] f80000007f70875800016 1d40080c800003bd50552687549 9c7e72 rssi=-64 snr=9.5 len=27
+[RAW] F80000007F708758000161D40080C800003BD505526875499C7E72 rssi=-64 snr=9.5 len=27
 ```
 
 **Pass:** `[RAW]` lines appear when, and only when, the actuator is operated.
@@ -102,17 +102,36 @@ That alone confirms the frequency, the bit rate, the deviation and the sync
 word - four settings that were all wrong in this codebase at some point, and
 that produce total silence when they are.
 
-**Nothing at all?** In order of likelihood:
+**Nothing at all?** The listener sweeps the three channels for you. If it never
+lands on one you will see:
 
-1. Wrong channel. Frames go out on 868.25, 868.95 and 869.85 MHz; the listener
-   defaults to 868.95. Try the others (`IOHC_NODE_ID` sits next to the channel
-   in `src/main.cpp`).
-2. Sync word. It has to be programmed bit-reversed - `57 FD 99`, not the
+```
+[PHY] scanning all three channels until a frame arrives
+[PHY] nothing heard, trying 869.85 MHz
+[PHY] nothing heard, trying 868.25 MHz
+```
+
+and when it does:
+
+```
+[PHY] traffic on 868.95 MHz - staying here
+```
+
+It stops on the first frame that arrives at all, including one that fails its
+CRC - a broken frame still proves the channel carries traffic and that the PHY
+settings are close enough to demodulate it. Set `IOHC_SCAN_CHANNELS` to false in
+`src/main.cpp` to pin it to one channel.
+
+If the sweep completes without hearing anything, in order of likelihood:
+
+1. Sync word. It has to be programmed bit-reversed - `57 FD 99`, not the
    `FF 33` that appears over the air. Deriving one from the other by shifting
    yields `00 FF 33`, which matches nothing. `configure_radio()` gets this
    right; a hand-rolled setup may not.
-3. Antenna. An SX127x transmitting without one can damage itself; receiving
+2. Antenna. An SX127x transmitting without one can damage itself; receiving
    without one just does not work well.
+3. Nothing is transmitting. io-homecontrol devices are silent unless operated;
+   there is no periodic beacon to wait for on a 1W installation.
 
 **Statistics** print every 30 seconds:
 

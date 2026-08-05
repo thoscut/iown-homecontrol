@@ -47,6 +47,20 @@ static const uint8_t IOHC_SYSTEM_KEY[iohome::AES_KEY_SIZE] = {
 /// Operate in 1W (send-only, sequence-number authenticated) mode.
 static const bool IOHC_USE_1W = true;
 
+/// Sweep the three io-homecontrol channels until frames appear.
+///
+/// The commonest reason a listener hears nothing is that the traffic is on one
+/// of the other two channels. Rather than make that a guess, sit on each in
+/// turn until something arrives, then stay there. Set to false to pin the
+/// listener to IOHC_START_CHANNEL.
+static const bool IOHC_SCAN_CHANNELS = true;
+
+/// How long to give a channel before moving on, in milliseconds.
+static const uint32_t IOHC_SCAN_DWELL_MS = 8000;
+
+/// Channel to start on, and the only one used when scanning is off.
+static const float IOHC_START_CHANNEL = iohome::FREQUENCY_CHANNEL_2;
+
 // ---------------------------------------------------------------------------
 
 static iohome::IoHomeControl controller(phy);
@@ -86,8 +100,14 @@ static void on_frame(const iohome::frame::IoFrame* frame, int16_t rssi, float sn
  * actuators this controller is not paired with, or commands the library does
  * not model yet.
  */
+// Not volatile: on_raw_frame() is called from check_received() in loop(), not
+// from the packet ISR. Marking it volatile only cost a C++20 deprecation
+// warning for the increment.
+static uint32_t g_raw_frames = 0;
+
 static void on_raw_frame(const uint8_t* data, size_t len, int16_t rssi, float snr, void* ctx) {
   (void) ctx;
+  g_raw_frames++;
   Serial.print(F("[RAW] "));
   for (size_t i = 0; i < len; i++) {
     if (data[i] < 0x10) {
@@ -168,7 +188,7 @@ void setup() {
     halt("controller.begin", 0);
   }
 
-  state = controller.configure_radio(iohome::FREQUENCY_CHANNEL_2);
+  state = controller.configure_radio(IOHC_START_CHANNEL);
   if (state != RADIOLIB_ERR_NONE) {
     halt("configure_radio", state);
   }
@@ -182,12 +202,69 @@ void setup() {
   }
 
   Serial.printf("[PHY] RSSI (dBm): %d\n", controller.get_rssi());
+  Serial.printf("[PHY] channel: %.2f MHz\n", IOHC_START_CHANNEL);
+  if (IOHC_SCAN_CHANNELS) {
+    Serial.println(F("[PHY] scanning all three channels until a frame arrives"));
+  }
   Serial.println(F("Listening for io-homecontrol frames"));
+}
+
+/**
+ * Move to the next channel if this one has been silent long enough.
+ *
+ * Stops as soon as any frame arrives - including one that fails its CRC,
+ * because even a broken frame proves the channel carries traffic and the PHY
+ * settings are close enough to demodulate it.
+ */
+static void scan_channels(uint32_t now) {
+  static const float channels[] = {
+    iohome::FREQUENCY_CHANNEL_1,
+    iohome::FREQUENCY_CHANNEL_2,
+    iohome::FREQUENCY_CHANNEL_3,
+  };
+  static size_t index = 1;          // FREQUENCY_CHANNEL_2, the default start
+  static uint32_t switched_at = 0;
+  static bool done = false;
+
+  if (done) {
+    return;
+  }
+
+  if (g_raw_frames > 0) {
+    done = true;
+    Serial.printf("[PHY] traffic on %.2f MHz - staying here\n", channels[index]);
+    return;
+  }
+
+  if (now - switched_at < IOHC_SCAN_DWELL_MS) {
+    return;
+  }
+  switched_at = now;
+
+  index = (index + 1) % (sizeof(channels) / sizeof(channels[0]));
+
+  controller.stop_receive();
+  const int16_t state = controller.configure_radio(channels[index]);
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("[PHY] could not tune %.2f MHz: %d\n", channels[index], state);
+    return;
+  }
+  if (controller.start_receive(on_frame) != RADIOLIB_ERR_NONE) {
+    Serial.println(F("[PHY] could not resume receiving after retuning"));
+    return;
+  }
+  Serial.printf("[PHY] nothing heard, trying %.2f MHz\n", channels[index]);
 }
 
 void loop() {
   iohome::frame::IoFrame frame;
   controller.check_received(&frame);
+
+  const uint32_t now_ms = millis();
+
+  if (IOHC_SCAN_CHANNELS) {
+    scan_channels(now_ms);
+  }
 
   if (!IOHC_USE_1W) {
     controller.update_frequency_hopping();
@@ -195,9 +272,8 @@ void loop() {
 
   // Periodically report how the receive path is doing.
   static uint32_t last_report = 0;
-  const uint32_t now = millis();
-  if (now - last_report >= 30000) {
-    last_report = now;
+  if (now_ms - last_report >= 30000) {
+    last_report = now_ms;
     const iohome::RxStats& stats = controller.rx_stats();
     Serial.printf("[RX] received=%lu accepted=%lu crc=%lu mac=%lu replay=%lu plain=%lu malformed=%lu\n",
                   static_cast<unsigned long>(stats.received),

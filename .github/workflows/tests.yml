@@ -79,8 +79,10 @@ jobs:
             -Werror
             -DUNIT_TEST -DIOHOME_FORCE_SOFTWARE_AES
             -I src
+            -I include
           )
-          for source in src/protocol/*.cpp src/velux/*.cpp; do
+          for source in src/protocol/*.cpp src/velux/*.cpp \
+                        src/esp32_utils.cpp src/iown_mac.cpp; do
             echo "=== ${source}"
             g++ "${FLAGS[@]}" -c "${source}" -o /dev/null
           done

@@ -376,6 +376,42 @@ public:
   void set_raw_frame_callback(RawFrameCallback callback, void* context = nullptr);
 
   /**
+   * @brief Install the packet-length hook for a concrete radio class
+   *
+   * The hand-written form of set_packet_length_callback() needs a lambda that
+   * casts a `void*` back to the radio type, and names that type twice:
+   *
+   * @code{.cpp}
+   * controller.set_packet_length_callback(
+   *   [](uint8_t len, void* ctx) -> int16_t {
+   *     return static_cast<SX1276*>(ctx)->fixedPacketLengthMode(len);
+   *   },
+   *   &radio);
+   * @endcode
+   *
+   * Getting that cast wrong is undefined behaviour that compiles cleanly. This
+   * deduces the type from the argument, so it cannot disagree with itself:
+   *
+   * @code{.cpp}
+   * controller.use_radio_packet_length(radio);
+   * @endcode
+   *
+   * Works with any RadioLib class exposing `fixedPacketLengthMode(uint8_t)` -
+   * SX1276, SX1262 and the rest. The lambda captures nothing, so it still
+   * converts to the plain function pointer the callback takes.
+   *
+   * @param radio The concrete radio object; must outlive this controller.
+   */
+  template <typename RadioT>
+  void use_radio_packet_length(RadioT& radio) {
+    set_packet_length_callback(
+      [](uint8_t length, void* context) -> int16_t {
+        return static_cast<RadioT*>(context)->fixedPacketLengthMode(length);
+      },
+      &radio);
+  }
+
+  /**
    * @brief Access the replay guard protecting the receive path
    */
   ReplayGuard& replay_guard() { return replay_guard_; }

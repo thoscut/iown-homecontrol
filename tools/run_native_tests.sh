@@ -29,6 +29,8 @@ CXXFLAGS=(
   -DUNIT_TEST
   -DIOHOME_FORCE_SOFTWARE_AES
   "-I${REPO_ROOT}/src"
+  # The C helper layer under include/, which test_legacy_helpers checks.
+  "-I${REPO_ROOT}/include"
   "-I${REPO_ROOT}/tools/unity_min"
   # RadioLib mock, so IoHomeControl can be built and tested on the host.
   "-I${REPO_ROOT}/test/mocks"
@@ -69,6 +71,9 @@ PROTOCOL_SOURCES=(
   "${REPO_ROOT}/src/protocol/iohome_replay_guard.cpp"
   "${REPO_ROOT}/src/velux/iohome_velux.cpp"
   "${REPO_ROOT}/src/IoHomeControl.cpp"
+  # Legacy helpers: iown_crc_calc and the broadcast address.
+  "${REPO_ROOT}/src/esp32_utils.cpp"
+  "${REPO_ROOT}/src/iown_mac.cpp"
 )
 
 # Compile the Unity shim once.

@@ -4,8 +4,8 @@
   * @brief   ESP32 helper functions
   */
 
-#include <Arduino.h>
-
+// No Arduino dependency: this delegates to the protocol layer and nothing else,
+// which is what lets test_legacy_helpers build it on the host.
 #include "iown_frame.h"  // declares iown_crc_calc (and gives it C linkage)
 #include "protocol/iohome_crypto.h"
 

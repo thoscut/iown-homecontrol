@@ -579,6 +579,44 @@ void sniffer_cb(const uint8_t *data, size_t len, int16_t rssi, float snr, void *
 }
 }  // namespace
 
+namespace {
+/// Stands in for a concrete RadioLib class: only fixedPacketLengthMode matters.
+struct FakeRadio {
+  int16_t fixedPacketLengthMode(uint8_t len) {
+    lengths.push_back(len);
+    return RADIOLIB_ERR_NONE;
+  }
+  std::vector<uint8_t> lengths;
+};
+}  // namespace
+
+void test_packet_length_helper_programs_each_frame(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  // The hand-written form needs a lambda that casts void* back to the radio
+  // type, naming it twice. This deduces it, so the cast cannot be wrong.
+  FakeRadio fake;
+  controller.use_radio_packet_length(fake);
+
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+
+  // Narrowed to this frame's length before sending, widened again after - the
+  // radio must not be left expecting 25-byte packets.
+  TEST_ASSERT_EQUAL_UINT(2, fake.lengths.size());
+  TEST_ASSERT_EQUAL_UINT8(25, fake.lengths[0]);
+  TEST_ASSERT_EQUAL_UINT8(radio.last_transmission.size(), fake.lengths[0]);
+  TEST_ASSERT_EQUAL_UINT8(iohome::FRAME_MAX_SIZE, fake.lengths[1]);
+
+  // A longer frame programs a different length, not a constant.
+  const uint8_t fps[4] = {0x80, 0xC8, 0x00, 0x00};
+  TEST_ASSERT_TRUE(controller.send_execute_fp(PEER_NODE, 0xD400, fps, sizeof(fps)));
+  TEST_ASSERT_EQUAL_UINT(4, fake.lengths.size());
+  TEST_ASSERT_EQUAL_UINT8(27, fake.lengths[2]);
+  TEST_ASSERT_EQUAL_UINT8(iohome::FRAME_MAX_SIZE, fake.lengths[3]);
+}
+
 void test_raw_sniffer_sees_every_packet(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
@@ -825,6 +863,7 @@ int main(int, char**) {
   RUN_TEST(test_plain_frames_can_be_allowed_explicitly);
   RUN_TEST(test_rejects_garbage);
   RUN_TEST(test_check_received_needs_a_packet);
+  RUN_TEST(test_packet_length_helper_programs_each_frame);
   RUN_TEST(test_raw_sniffer_sees_every_packet);
   RUN_TEST(test_stats_reset);
 

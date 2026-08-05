@@ -10,9 +10,9 @@
  *       parameters configure_radio() sets through PhysicalLayer, the concrete
  *       radio class must also be told to
  *         - disable the radio's own CRC (io-homecontrol appends its own), and
- *         - use variable packet length without RadioLib's length byte,
+ *         - use fixed packet length without RadioLib's length byte,
  *       because those calls are not part of the PhysicalLayer interface.
- *       See docs/firmware.md for per-chip snippets.
+ *       See docs/RADIO-SETUP.md for per-chip snippets.
  */
 
 #pragma once

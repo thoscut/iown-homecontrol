@@ -29,7 +29,7 @@ def compute_crc_8408(data: bytes, crc: int = 0) -> int:
 
 def computeChecksum(frame_byte: int, chksum1: int, chksum2: int) -> Tuple[int, int]:
   """
-  Returns what looks like a custom-made CRC for use in intial values
+  Returns what looks like a custom-made CRC for use in initial values
   """
   tmpchksum = frame_byte ^ chksum2
   chksum2 = ((chksum1 & 0x7f) << 1) & 0xff

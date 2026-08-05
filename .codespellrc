@@ -1,0 +1,12 @@
+# codespell configuration
+#
+# Large parts of docs/ and README.md quote German-language marketing and
+# manual text verbatim, and scripts/ vendors third-party assets. Neither
+# should be "corrected".
+[codespell]
+skip = ./.git,./scripts/mkdocs,./scripts/LuaJIT,./scripts/rtl_433,./scripts/IDAPro,./scripts/GNURadio,./scripts/renode,./docs/assets,./.build,*.min.js,*.map,*.svg,*.pdf,*.7z,*.exe,*.wasm,*.pdn,*.log,*.bin,*.hex,*.grc,*.resc,*.repl,*.ksy
+# German words that collide with English misspellings, plus protocol terms.
+# German and French words that collide with English misspellings ('Confort'
+# is the label printed on the device), plus protocol shorthand.
+ignore-words-list = alle,ans,aktion,produkt,oder,vor,offen,ist,confort,nd,te,ba,fo,hda,parm,parms,doubleclick,inout,keypair,ser,statics,tage,ue,unter,wille,zar
+quiet-level = 3

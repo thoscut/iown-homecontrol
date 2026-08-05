@@ -153,7 +153,7 @@ bool IoHomeControl::begin(
   }
 
   // Restore the persisted rolling code and reserve a fresh block, so a reboot
-  // never re-uses a counter value a receiver has already seen.
+  // never reuses a counter value a receiver has already seen.
   if (rolling_code_store_ != nullptr) {
     uint16_t stored = 0;
     if (rolling_code_store_->load(own_node_id_, stored)) {

@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/schema/library.json",
   "name": "iown-homecontrol",
-  "version": "0.6.9",
-  "description": "io-homecontrol lib",
+  "version": "0.7.0",
+  "description": "io-homecontrol protocol library for Somfy, Velux and compatible devices, targeting ESP32 boards with RadioLib-supported radios.",
   "keywords": "io-homecontrol, somfy, velux, LoRa32, iown, iohome",
   "homepage": "https://velocet.github.io/iown-homecontrol",
   "license": "CC-BY-SA-4.0",
@@ -29,39 +29,10 @@
     "arduino",
     "espidf"
   ],
+  "examples": [
+    "examples/*/*.ino"
+  ],
   "build": {
     "libLDFMode": "deep+"
   }
-  // "examples": [
-  //   {
-  //     "name": "1W Remote",
-  //     "base": "examples/oneway",
-  //     "files": [
-  //       "platformio.ini",
-  //       "include/iown_homecontrol.h",
-  //       "examples/oneway/oneway.c",
-  //       "README.md"
-  //     ]
-  //   },
-  //   {
-  //     "name": "2W Remote",
-  //     "base": "examples/twoway",
-  //     "files": [
-  //       "platformio.ini",
-  //       "include/iown_homecontrol.h",
-  //       "examples/twoway/twoway.c",
-  //       "README.md"
-  //     ]
-  //   },
-  //   {
-  //     "name": "Gateway",
-  //     "base": "examples/gateway",
-  //     "files": [
-  //       "platformio.ini",
-  //       "include/iown_homecontrol.h",
-  //       "examples/gateway.c",
-  //       "README"
-  //     ]
-  //   }
-  // ]
 }

@@ -210,7 +210,7 @@ Since this is not if interest for most people this is behind a collapsed section
 
 <details markdown><summary>iohc Alliance Background & History</summary><br/><br/>
 
-There is a low level software library thats accessible to members of the iohc alliance. Gateways ("Boxes") like the *TaHoma*/*Cozytouch*/etc. are just a "whiteware" product from *Overkiz*. The mobile apps are built by *Modulotech*. *Overkiz*, *Somfy* and *Modulotech* are owned by *Atlantic*.
+There is a low level software library that's accessible to members of the iohc alliance. Gateways ("Boxes") like the *TaHoma*/*Cozytouch*/etc. are just a "whiteware" product from *Overkiz*. The mobile apps are built by *Modulotech*. *Overkiz*, *Somfy* and *Modulotech* are owned by *Atlantic*.
 
 The first manufacturer id was given to *Velux*. The initial alliance consisted of *Velux*, *Somfy* and *Honeywell*. From looking at the timeline my best guess would be that Somfy "invented" a new protocol but needed a stronger partner to get a bigger market share for their newly invented protocol.
 
@@ -270,7 +270,7 @@ Taken from the FAQ on the io-homecontrol homepage (which is offline .. of course
 
 <details markdown><summary>Quotes</summary>
 
-- Initative was created in 2002
+- Initiative was created in 2002
 - Launched in July 2005 by Somfy, Velux and Honeywell
 - First companies to adopt: Hörmann, Assa Abloy, Niko, Renson, Windowmaster
   - [Velux PR: Assa Abloy becomes new ioHome member](https://press.velux.com/assa-abloy-becomes-a-new-member-of-io-homecontrol/)
@@ -292,7 +292,7 @@ The Trademark is held by VKR Holding A/S (Denmark) which also owns Velux. This e
 <details markdown><summary>Links</summary>
 
 - Online Discussions
-  - [rtl_433: Add new decoder for Velux shutter remote control - io-homecontrol protocoll](https://github.com/merbanan/rtl_433/issues/1376)
+  - [rtl_433: Add new decoder for Velux shutter remote control - io-homecontrol protocol](https://github.com/merbanan/rtl_433/issues/1376)
   - [RFHEM: Somfy Smoove io remote 868.25 MHz](https://github.com/RFD-FHEM/RFFHEM/issues/984)
   - [OpenHAB: Io-homecontrol / velux - something's in the bush](https://community.openhab.org/t/io-homecontrol-velux-somethings-in-the-bush/11413)
   - Velux Blinds
@@ -316,6 +316,6 @@ The Trademark is held by VKR Holding A/S (Denmark) which also owns Velux. This e
 
 **Thanks to everyone who helped in gathering all the information that makes up this repo!**
 
-Since there are so many people who helped with the "opening" of the procotol i will try my best to name everyone involved. If you want your name on here or deleted then drop me a message.
+Since there are so many people who helped with the "opening" of the protocol i will try my best to name everyone involved. If you want your name on here or deleted then drop me a message.
 
 </div>

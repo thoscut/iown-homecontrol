@@ -46,6 +46,7 @@ nav:
       - Commands: commands.md
       - Parameter: parameter/README.md
       - Security Model: SECURITY-MODEL.md
+      - Radio Setup: RADIO-SETUP.md
   - Parameter Viewer: parameter/database/README.md
   - Reference:
       - Devices: devices.md
@@ -180,7 +181,7 @@ markdown_extensions:
   - pymdownx.snippets     # embed files
   - pymdownx.highlight:   # code block highlighting with SuperFences and InlineHilite
       use_pygments: true        # code block highlighting during build or browser highlighter
-      pygments_lang_class: true # code block CSS class language identifyer
+      pygments_lang_class: true # code block CSS class language identifier
       anchor_linenums: false    # wrap line numbers with anchor links
       auto_title: true          # show code block title (``` $language title="$title")
       line_spans: __span        # wrap code block with span (essential for line highlighting)

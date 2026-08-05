@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 191 host-run unit tests, and hardened against the receive
+`docs/`, covered by 198 host-run unit tests, and hardened against the receive
 path being attacker-controlled. What is *not* verified is behaviour against
 real hardware: nobody has yet confirmed that a physical actuator obeys a frame
 this library produces. Treat every "Complete" below as "complete and tested in
@@ -112,12 +112,16 @@ software".
 | V34 | High | `platformio.ini` | `.clang-tidy` was never applied. PlatformIO appends `--checks=*` unless `check_flags` mentions `--checks` or `--config`, and a command-line `--checks` overrides the file's list completely, so every documented exclusion was ignored and the run reported 1835 defects. Fixed with `--config-file=.clang-tidy`; the count is now ~20, all style. |
 | V35 | Medium | `platformio.ini` | `check_skip_packages = yes` withheld the framework include paths, so clang-tidy could not find `stddef.h` or `Arduino.h` and aborted the parse of most files - the same shape as V19, a linter that reports success without having analysed anything. |
 | V36 | Low | `src/IoHome.h` | Include guard `_IOHOME_H`: a leading underscore followed by a capital is reserved for the implementation. |
+| V37 | High | ESPHome cover | Tilt was sent uninverted. FP1 shares the Main Parameter's scale, which counts closure, while ESPHome counts openness - so a request to open the slats closed them. The position path in the same file inverts in three places. |
+| V38 | Medium | `src/velux/iohome_velux.h` | `create_tilt_frame()` took `tilt_percent` with no direction stated while its sibling takes an explicit `percent_open`; the implementation treated it as closure. That ambiguity is what V37 read the wrong way. It now takes `percent_open` and inverts internally. |
+| V39 | **High** | `platformio.ini`, `.github/workflows/platformio.yml` | `pio run` builds only `default_envs`, so CI had always compiled exactly one board. Four entries in `src/board_pins.h` were keyed on macro names PlatformIO does not define - `ARDUINO_TTGO_LORA32_V21NEW`, `ARDUINO_TTGO_LORA32_V1`, `ARDUINO_TBEAM`, `ARDUINO_HELTEC_WIFI_LORA_32_V3` - and every one of those boards fell through to "unknown board" without a word. There is now an environment per board and a CI job that builds all of them. |
+| V40 | Low | ESPHome component | The CRC and MAC initial value were duplicated from `src/protocol/` with nothing checking they agreed. They did - but so did the 2W key transfer, right up until it did not. Now extracted into a dependency-free header and compared byte for byte by `test_esphome_crypto`. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
 | ID | Severity | Component | Description | Recommended Fix |
 |----|----------|-----------|-------------|-----------------|
-| K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/`. | Test against a physical actuator |
+| K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/`. | Follow [`docs/HARDWARE-BRINGUP.md`](docs/HARDWARE-BRINGUP.md), which lists the experiments that settle K2, K9 and the FP1 tilt direction |
 | K2 | Medium | `src/velux/` | `VELUX_CMD_*` (0x58-0x5D) are undocumented and unverified; they sit in the range the standard uses for naming/info commands. Marked UNVERIFIED in the header. | Confirm with a capture, or remove |
 | K3 | Medium | ESPHome component | The 2W challenge-response handshake is not wired in, so 2W frames are sent unauthenticated. | Port `AuthenticationManager` into the component |
 | K4 | Medium | ESPHome component | `position_feedback` accepts unauthenticated position reports. Off by default, marked experimental. | Verify the MAC before applying |

@@ -71,8 +71,59 @@ static void on_frame(const iohome::frame::IoFrame* frame, int16_t rssi, float sn
   iohome::frame::print_frame(frame, print_line);
 }
 
+/**
+ * Print every packet the radio delivers, before the protocol layer judges it.
+ *
+ * The line is plain hex so it can be pasted - or piped from the serial log -
+ * straight into the decoder:
+ *
+ *   ./scripts/Iown-IoHexFrameParser.py f800 00007f ...
+ *   grep '^\[RAW\]' capture.log | cut -d' ' -f2 > frames.txt
+ *   ./scripts/Iown-IoHexFrameParser.py -f frames.txt
+ *
+ * Frames that fail their CRC, their MAC or the replay check never reach
+ * on_frame(), and those are frequently the interesting ones: traffic from
+ * actuators this controller is not paired with, or commands the library does
+ * not model yet.
+ */
+static void on_raw_frame(const uint8_t* data, size_t len, int16_t rssi, float snr, void* ctx) {
+  (void) ctx;
+  Serial.print(F("[RAW] "));
+  for (size_t i = 0; i < len; i++) {
+    if (data[i] < 0x10) {
+      Serial.print('0');
+    }
+    Serial.print(data[i], HEX);
+  }
+  Serial.printf(" rssi=%d snr=%.1f len=%u\n", rssi, snr, static_cast<unsigned>(len));
+}
+
+/// Report the pin map, so a radio that does not answer points at its own cause.
+static void print_pin_map() {
+  Serial.println(F("[PINS] board: " IOHC_BOARD_NAME));
+  Serial.printf("[PINS] CS=%d RST=%d SCK=%d MISO=%d MOSI=%d\n",
+                IOHC_PIN_CS, IOHC_PIN_RST, IOHC_PIN_SCK, IOHC_PIN_MISO, IOHC_PIN_MOSI);
+#if defined(IOHC_RADIO_SX127X)
+  Serial.printf("[PINS] DIO0=%d DIO1=%d (SX127x)\n", IOHC_PIN_DIO0, IOHC_PIN_DIO1);
+#else
+  Serial.printf("[PINS] BUSY=%d DIO1=%d (SX126x)\n", IOHC_PIN_BUSY, IOHC_PIN_DIO1);
+#endif
+}
+
 static void halt(const char* stage, int state) {
   Serial.printf("[FATAL] %s failed: %d\n", stage, state);
+
+  if (state == RADIOLIB_ERR_CHIP_NOT_FOUND) {
+    // By far the most common first-bring-up failure, and it has exactly one
+    // cause worth checking first.
+    Serial.println(F("[FATAL] The radio did not answer over SPI."));
+    Serial.println(F("[FATAL] Almost always a pin map that does not match this board."));
+    print_pin_map();
+    Serial.println(F("[FATAL] Correct them in src/board_pins.h, or build with"));
+    Serial.println(F("[FATAL] -DIOHC_BOARD_CUSTOM and the IOHC_PIN_* flags."));
+    Serial.println(F("[FATAL] See docs/HARDWARE-BRINGUP.md."));
+  }
+
   while (true) {
     delay(1000);
   }
@@ -83,7 +134,7 @@ void setup() {
   delay(200);
 
   Serial.println(F("iown-homecontrol starting"));
-  Serial.println(F("board: " IOHC_BOARD_NAME));
+  print_pin_map();
 
   // Bind SPI to the radio pins before RadioLib touches the bus.
   iohc_board_spi_begin();
@@ -122,6 +173,9 @@ void setup() {
     halt("configure_radio", state);
   }
 
+  // Install the sniffer before receiving starts, so nothing is missed.
+  controller.set_raw_frame_callback(on_raw_frame);
+
   state = controller.start_receive(on_frame);
   if (state != RADIOLIB_ERR_NONE) {
     halt("start_receive", state);
@@ -145,7 +199,8 @@ void loop() {
   if (now - last_report >= 30000) {
     last_report = now;
     const iohome::RxStats& stats = controller.rx_stats();
-    Serial.printf("[RX] accepted=%lu crc=%lu mac=%lu replay=%lu plain=%lu malformed=%lu\n",
+    Serial.printf("[RX] received=%lu accepted=%lu crc=%lu mac=%lu replay=%lu plain=%lu malformed=%lu\n",
+                  static_cast<unsigned long>(stats.received),
                   static_cast<unsigned long>(stats.accepted),
                   static_cast<unsigned long>(stats.crc_failures),
                   static_cast<unsigned long>(stats.mac_failures),

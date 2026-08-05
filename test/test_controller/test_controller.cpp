@@ -563,6 +563,70 @@ void test_check_received_needs_a_packet(void) {
   TEST_ASSERT_FALSE(controller.check_received(nullptr));
 }
 
+namespace {
+struct SnifferCapture {
+  std::vector<std::vector<uint8_t>> frames;
+  int16_t last_rssi = 0;
+  int calls = 0;
+};
+
+void sniffer_cb(const uint8_t *data, size_t len, int16_t rssi, float snr, void *ctx) {
+  (void) snr;
+  auto *capture = static_cast<SnifferCapture *>(ctx);
+  capture->frames.emplace_back(data, data + len);
+  capture->last_rssi = rssi;
+  capture->calls++;
+}
+}  // namespace
+
+void test_raw_sniffer_sees_every_packet(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  SnifferCapture capture;
+  controller.set_raw_frame_callback(sniffer_cb, &capture);
+  TEST_ASSERT_EQUAL_INT(RADIOLIB_ERR_NONE, controller.start_receive());
+
+  // A frame that passes every check.
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  const std::vector<uint8_t> good = radio.last_transmission;
+
+  radio.deliver(good.data(), good.size());
+  iohome::frame::IoFrame frame;
+  controller.check_received(&frame);
+  TEST_ASSERT_EQUAL_INT(1, capture.calls);
+  TEST_ASSERT_EQUAL_UINT(good.size(), capture.frames[0].size());
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(good.data(), capture.frames[0].data(), good.size());
+
+  // A frame with a broken CRC never reaches the frame callback, but the
+  // sniffer must still see it - that is the whole point of the hook.
+  std::vector<uint8_t> corrupted = good;
+  corrupted[corrupted.size() - 1] ^= 0xFF;
+  radio.deliver(corrupted.data(), corrupted.size());
+  TEST_ASSERT_FALSE(controller.check_received(&frame));
+  TEST_ASSERT_EQUAL_INT(2, capture.calls);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(corrupted.data(), capture.frames[1].data(), corrupted.size());
+
+  // So must a frame too short to parse at all.
+  const uint8_t runt[5] = {0xF8, 0x00, 0x11, 0x22, 0x33};
+  radio.deliver(runt, sizeof(runt));
+  TEST_ASSERT_FALSE(controller.check_received(&frame));
+  TEST_ASSERT_EQUAL_INT(3, capture.calls);
+  TEST_ASSERT_EQUAL_UINT(sizeof(runt), capture.frames[2].size());
+
+  // Every delivered packet is counted, whatever became of it.
+  TEST_ASSERT_EQUAL_UINT32(3, controller.rx_stats().received);
+  TEST_ASSERT_EQUAL_UINT32(1, controller.rx_stats().accepted);
+
+  // Detaching stops the callbacks without disturbing reception.
+  controller.set_raw_frame_callback(nullptr);
+  radio.deliver(good.data(), good.size());
+  controller.check_received(&frame);
+  TEST_ASSERT_EQUAL_INT(3, capture.calls);
+  TEST_ASSERT_EQUAL_UINT32(4, controller.rx_stats().received);
+}
+
 void test_stats_reset(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
@@ -761,6 +825,7 @@ int main(int, char**) {
   RUN_TEST(test_plain_frames_can_be_allowed_explicitly);
   RUN_TEST(test_rejects_garbage);
   RUN_TEST(test_check_received_needs_a_packet);
+  RUN_TEST(test_raw_sniffer_sees_every_packet);
   RUN_TEST(test_stats_reset);
 
   RUN_TEST(test_pair_device_1w_emits_two_frames);

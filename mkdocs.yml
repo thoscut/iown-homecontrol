@@ -47,6 +47,7 @@ nav:
       - Parameter: parameter/README.md
       - Security Model: SECURITY-MODEL.md
       - Radio Setup: RADIO-SETUP.md
+      - Hardware Bring-up: HARDWARE-BRINGUP.md
   - Parameter Viewer: parameter/database/README.md
   - Reference:
       - Devices: devices.md

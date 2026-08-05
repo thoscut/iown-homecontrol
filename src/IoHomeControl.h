@@ -51,6 +51,29 @@ typedef void (*FrameReceivedCallback)(const frame::IoFrame* frame, int16_t rssi,
 typedef int16_t (*PacketLengthCallback)(uint8_t length, void* context);
 
 /**
+ * @brief Callback invoked for every packet the radio hands over, unvalidated
+ *
+ * The normal receive path drops anything that fails its CRC, its MAC or the
+ * replay check, and rightly so. But those are exactly the frames worth looking
+ * at when reverse-engineering: a frame from an unpaired actuator, a command
+ * this library does not model yet, a capture that disagrees with docs/.
+ *
+ * This hook fires before any of that, straight after readData() succeeds, so a
+ * sniffer sees the bytes as they arrived. It does not affect what the receive
+ * path then does with them.
+ *
+ * Called from check_received(), not from the ISR, so it may print.
+ *
+ * @param data Frame bytes as delivered by the radio
+ * @param len Number of bytes
+ * @param rssi Received signal strength, dBm
+ * @param snr Signal-to-noise ratio, dB
+ * @param context Opaque pointer supplied with the callback
+ */
+typedef void (*RawFrameCallback)(const uint8_t* data, size_t len, int16_t rssi, float snr,
+                                 void* context);
+
+/**
  * @brief Why a received frame was discarded
  */
 enum class RxReject : uint8_t {
@@ -67,6 +90,8 @@ enum class RxReject : uint8_t {
  * @brief Receive-path statistics, useful for diagnosing a noisy link
  */
 struct RxStats {
+  /// Packets the radio delivered, whatever became of them afterwards.
+  uint32_t received;
   uint32_t accepted;
   uint32_t radio_errors;
   uint32_t malformed;
@@ -340,6 +365,17 @@ public:
   void set_packet_length_callback(PacketLengthCallback callback, void* context = nullptr);
 
   /**
+   * @brief Install a sniffer that sees every packet before validation
+   *
+   * Use this to capture traffic from actuators that are not paired with this
+   * controller, or frames the protocol layer rejects. See RawFrameCallback.
+   *
+   * @param callback Hook, or nullptr to disable
+   * @param context Passed back to the hook unchanged
+   */
+  void set_raw_frame_callback(RawFrameCallback callback, void* context = nullptr);
+
+  /**
    * @brief Access the replay guard protecting the receive path
    */
   ReplayGuard& replay_guard() { return replay_guard_; }
@@ -457,6 +493,9 @@ protected:
 
   PacketLengthCallback packet_length_callback_;
   void* packet_length_context_;
+
+  RawFrameCallback raw_frame_callback_;
+  void* raw_frame_context_;
 
   // Rolling code persistence
   RollingCodeStore* rolling_code_store_;

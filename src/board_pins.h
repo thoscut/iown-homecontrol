@@ -92,7 +92,7 @@
   #define IOHC_PIN_MISO    19
   #define IOHC_PIN_MOSI    27
 
-#elif defined(ARDUINO_TTGO_LORA32_V1) || defined(ARDUINO_TTGO_LoRa32_v1)
+#elif defined(ARDUINO_TTGO_LoRa32_V1) || defined(ARDUINO_TTGO_LORA32_V1)
   #define IOHC_BOARD_NAME  "TTGO LoRa32 v1"
   #define IOHC_RADIO_SX127X
   #define IOHC_RADIO_CLASS SX1276
@@ -116,7 +116,7 @@
   #define IOHC_PIN_MISO    19
   #define IOHC_PIN_MOSI    27
 
-#elif defined(ARDUINO_TBEAM) || defined(ARDUINO_T_BEAM)
+#elif defined(ARDUINO_T_Beam) || defined(ARDUINO_TBEAM) || defined(ARDUINO_T_BEAM)
   #define IOHC_BOARD_NAME  "LilyGO T-Beam"
   #define IOHC_RADIO_SX127X
   #define IOHC_RADIO_CLASS SX1276
@@ -128,9 +128,33 @@
   #define IOHC_PIN_MISO    19
   #define IOHC_PIN_MOSI    27
 
+#elif defined(ARDUINO_HELTEC_WIRELESS_STICK)
+  #define IOHC_BOARD_NAME  "Heltec Wireless Stick"
+  #define IOHC_RADIO_SX127X
+  #define IOHC_RADIO_CLASS SX1276
+  #define IOHC_PIN_CS      18
+  #define IOHC_PIN_RST     14
+  #define IOHC_PIN_DIO0    26
+  #define IOHC_PIN_DIO1    35
+  #define IOHC_PIN_SCK      5
+  #define IOHC_PIN_MISO    19
+  #define IOHC_PIN_MOSI    27
+
+#elif defined(ARDUINO_HELTEC_WIRELESS_STICK_LITE)
+  #define IOHC_BOARD_NAME  "Heltec Wireless Stick Lite"
+  #define IOHC_RADIO_SX127X
+  #define IOHC_RADIO_CLASS SX1276
+  #define IOHC_PIN_CS      18
+  #define IOHC_PIN_RST     14
+  #define IOHC_PIN_DIO0    26
+  #define IOHC_PIN_DIO1    35
+  #define IOHC_PIN_SCK      5
+  #define IOHC_PIN_MISO    19
+  #define IOHC_PIN_MOSI    27
+
 // SX1262 boards. Untested on hardware for io-homecontrol; the pin map matches
 // the vendor schematics but nobody has confirmed a capture from one of these.
-#elif defined(ARDUINO_HELTEC_WIFI_LORA_32_V3)
+#elif defined(ARDUINO_heltec_wifi_lora_32_V3) || defined(ARDUINO_HELTEC_WIFI_LORA_32_V3)
   #define IOHC_BOARD_NAME  "Heltec WiFi LoRa 32 (V3)"
   #define IOHC_RADIO_SX126X
   #define IOHC_RADIO_CLASS SX1262
@@ -142,6 +166,9 @@
   #define IOHC_PIN_MISO    11
   #define IOHC_PIN_MOSI    10
 
+// Not a board PlatformIO's espressif32 platform defines today, so nothing
+// builds this entry and nothing proves the macro name. Kept for anyone using a
+// board definition that does define it.
 #elif defined(ARDUINO_HELTEC_WIRELESS_STICK_V3)
   #define IOHC_BOARD_NAME  "Heltec Wireless Stick (V3)"
   #define IOHC_RADIO_SX126X

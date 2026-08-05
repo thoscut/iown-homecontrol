@@ -20,6 +20,7 @@ on:
       - "PRODUCTION_READINESS.md"
       - "docs/SECURITY-MODEL.md"
       - "docs/RADIO-SETUP.md"
+      - "docs/HARDWARE-BRINGUP.md"
       - ".codespellrc"
   pull_request:
     paths:
@@ -31,6 +32,7 @@ on:
       - "PRODUCTION_READINESS.md"
       - "docs/SECURITY-MODEL.md"
       - "docs/RADIO-SETUP.md"
+      - "docs/HARDWARE-BRINGUP.md"
       - ".codespellrc"
   workflow_dispatch:
 
@@ -54,3 +56,4 @@ jobs:
             PRODUCTION_READINESS.md
             docs/SECURITY-MODEL.md
             docs/RADIO-SETUP.md
+            docs/HARDWARE-BRINGUP.md

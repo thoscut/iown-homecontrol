@@ -55,6 +55,8 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     acei_(ACEI_DEFAULT),
     packet_length_callback_(nullptr),
     packet_length_context_(nullptr),
+    raw_frame_callback_(nullptr),
+    raw_frame_context_(nullptr),
     rolling_code_store_(nullptr),
     rolling_code_reserved_until_(0),
     rolling_code_reserve_block_(64),
@@ -383,6 +385,15 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
     return false;
   }
 
+  rx_stats_.received++;
+
+  // Hand the raw bytes to the sniffer before the protocol layer forms an
+  // opinion about them - a frame that fails validation is often the one worth
+  // seeing.
+  if (raw_frame_callback_ != nullptr) {
+    raw_frame_callback_(buffer, len, rssi_val, snr_val, raw_frame_context_);
+  }
+
   if (!frame::parse_frame(buffer, len, frame)) {
     rx_stats_.malformed++;
     last_reject_ = RxReject::MALFORMED;
@@ -473,6 +484,11 @@ void IoHomeControl::set_rolling_code_store(RollingCodeStore* store, uint16_t res
 void IoHomeControl::set_packet_length_callback(PacketLengthCallback callback, void* context) {
   packet_length_callback_ = callback;
   packet_length_context_ = context;
+}
+
+void IoHomeControl::set_raw_frame_callback(RawFrameCallback callback, void* context) {
+  raw_frame_callback_ = callback;
+  raw_frame_context_ = context;
 }
 
 bool IoHomeControl::set_acei(uint8_t acei) {

@@ -26,7 +26,9 @@ int fInitializeSPI_Channel( int spiCLK, int spiMOSI, int spiMISO, spi_host_devic
   bus_config.miso_io_num = spiMISO; // MISO
   bus_config.quadwp_io_num = -1; // Not used
   bus_config.quadhd_io_num = -1; // Not used
-  intError = spi_bus_initialize(HSPI_HOST, &bus_config, EnableDMA);
+  // Use the host the caller asked for. This used to be hardcoded to HSPI_HOST,
+  // so passing VSPI_HOST silently initialised the wrong bus.
+  intError = spi_bus_initialize(SPI_Host, &bus_config, EnableDMA);
   return intError;
 }
 

@@ -44,6 +44,65 @@ size_t build_mac_input(const IoFrame* frame, uint8_t out[1 + FRAME_MAX_DATA_SIZE
 } // namespace
 
 // ============================================================================
+// Command metadata
+// ============================================================================
+
+bool is_unauthenticated_command(uint8_t command_id) {
+  switch (command_id) {
+    case CMD_DISCOVER:
+    case CMD_DISCOVER_ANSWER:
+    case CMD_DISCOVER_REMOTE:
+    case CMD_DISCOVER_REMOTE_ANSWER:
+    case CMD_DISCOVER_CONFIRM:
+    case CMD_DISCOVER_CONFIRM_ACK:
+    case CMD_SEND_1W_KEY:
+    case CMD_ASK_CHALLENGE:
+    case CMD_KEY_TRANSFER:
+    case CMD_KEY_TRANSFER_ACK:
+    case CMD_ADDRESS_REQUEST:
+    case CMD_ADDRESS_ANSWER:
+    case CMD_LAUNCH_KEY_TRANSFER:
+    case CMD_REMOVE_1W_CONTROLLER:
+      return true;
+    default:
+      return false;
+  }
+}
+
+int expected_payload_size(uint8_t command_id) {
+  switch (command_id) {
+    // Activate/Execute and Activate Mode: originator, ACEI, 2-byte parameter,
+    // two further bytes.
+    case CMD_EXECUTE:
+    case CMD_ACTIVATE_MODE:
+      return EXECUTE_PAYLOAD_SIZE;
+
+    // Challenge request and response carry the 6-byte challenge.
+    case CMD_CHALLENGE_REQUEST:
+    case CMD_CHALLENGE_RESPONSE:
+      return HMAC_SIZE;
+
+    // Encrypted key, manufacturer, reserved byte, sequence number.
+    case CMD_SEND_1W_KEY:
+      return AES_KEY_SIZE + 4;
+
+    // Encrypted 2W key.
+    case CMD_KEY_TRANSFER:
+      return AES_KEY_SIZE;
+
+    // Commands documented as taking no parameters.
+    case CMD_DISCOVER:
+    case CMD_ASK_CHALLENGE:
+    case CMD_KEY_TRANSFER_ACK:
+    case CMD_REMOVE_1W_CONTROLLER:
+      return 0;
+
+    default:
+      return -1;  // Length varies or is not documented
+  }
+}
+
+// ============================================================================
 // Frame Construction
 // ============================================================================
 
@@ -355,12 +414,24 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame, AuthT
       frame->authenticated = true;
       break;
     case AuthTrailer::AUTO:
-    default:
-      // Authenticated 1W frames append a sequence number and a MAC. 2W frames
-      // seen in the wild (discovery, acks, execute) carry no MAC, so only
-      // assume a trailer for 1W.
-      frame->authenticated = frame->is_1w_mode && (payload_len >= trailer_len);
+    default: {
+      const int expected = expected_payload_size(frame->command_id);
+
+      if (expected >= 0 &&
+          payload_len == static_cast<size_t>(expected) + trailer_len) {
+        // Exactly parameters + trailer: this can only be the authenticated form.
+        frame->authenticated = true;
+      } else if (expected >= 0 && payload_len == static_cast<size_t>(expected)) {
+        // Exactly the documented parameter length: no room for a trailer.
+        frame->authenticated = false;
+      } else {
+        // Unknown or unexpected length: assume a trailer unless the command is
+        // one of the bootstrap commands that never carries one.
+        frame->authenticated =
+          !is_unauthenticated_command(frame->command_id) && (payload_len >= trailer_len);
+      }
       break;
+    }
   }
 
   const size_t data_len = frame->authenticated ? (payload_len - trailer_len) : payload_len;

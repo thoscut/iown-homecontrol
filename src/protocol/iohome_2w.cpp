@@ -225,12 +225,17 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
     return false;
   }
 
+  // Leaving CHALLENGE_SENT is what makes the challenge single-use: a replayed
+  // response is rejected by the state check above. The nonce itself stays, so
+  // commands sent during this session can still be bound to it.
   state_ = ChallengeState::AUTHENTICATED;
   state_timestamp_ms_ = now_ms;
-
-  // The challenge is single-use; forget it so a replayed response fails.
-  crypto::secure_zero(current_challenge_, HMAC_SIZE);
   return true;
+}
+
+bool AuthenticationManager::has_active_challenge(unsigned long now_ms) {
+  const ChallengeState state = get_state(now_ms);
+  return state == ChallengeState::CHALLENGE_SENT || state == ChallengeState::AUTHENTICATED;
 }
 
 ChallengeState AuthenticationManager::get_state(unsigned long now_ms) {

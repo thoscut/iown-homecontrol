@@ -12,7 +12,12 @@
 
 ## Status
 
-> **Current: Experimental / Alpha** — See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for detailed assessment.
+> **Current: Beta** — the protocol layer is verified against the captures in
+> [`docs/linklayer.md`](docs/linklayer.md) and covered by host-run unit tests,
+> but nothing here has been confirmed against a physical actuator yet.
+> See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for the detailed
+> assessment and [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for what the
+> authentication does and does not protect against.
 
 ### Protocol Documentation
 - [X] [Document Layer 1](docs/radio.md) - Physical Layer (RF, modulation, frequencies)
@@ -29,11 +34,12 @@
 ### Library
 - [X] C++ Protocol Library (`src/protocol/`)
   - [X] CRC-16/KERMIT calculation and verification
-  - [X] AES-128 encryption/decryption (mbedTLS)
-  - [X] HMAC generation and verification
-  - [X] Frame construction and parsing (with bounds checking)
-  - [X] Rolling code management (1W mode)
+  - [X] AES-128 (mbedTLS on ESP32, bundled software AES elsewhere)
+  - [X] MAC generation and constant-time verification (1W and 2W)
+  - [X] Frame construction and parsing (bounds checked, sanitizer tested)
+  - [X] Rolling code management and replay protection (`ReplayGuard`)
   - [X] 2W mode features (frequency hopping, challenge-response, beacon handling)
+  - [X] CSPRNG-backed challenge and key generation
 - [X] Protocol constants and command definitions (`src/protocol/iohome_constants.h`)
 - [X] High-level controller (`src/IoHomeControl.h/.cpp`)
 - [X] Velux-specific support (`src/velux/`)
@@ -43,14 +49,15 @@
   - [X] Blind models: DML, RML, FML, MML, SML
 
 ### Integration
-- [X] [ESPHome](#esphome) component for Home Assistant (basic cover control)
+- [X] [ESPHome](#esphome) component for Home Assistant (covers, tilt, diagnostics)
 - [X] RadioLib integration (SX1276, SX1262, RFM69, RFM95)
 - [X] [rtl_433](https://github.com/merbanan/rtl_433/blob/master/src/devices/somfy_iohc.c) - RF decoder
 - [X] Python crypto test suite
-- [ ] ESPHome: Encrypted frame support
-- [ ] ESPHome: Position feedback (2W mode)
-- [ ] Rolling code persistence across reboots
-- [ ] Unit test suite
+- [X] ESPHome: authenticated 1W frames
+- [X] Rolling code persistence across reboots (NVS, batched writes)
+- [X] Unit test suite (`./tools/run_native_tests.sh`)
+- [ ] ESPHome: 2W challenge-response handshake
+- [ ] Verification against physical hardware
 - [ ] Simple [MicroPython](https://micropython.org/) implementation
 - [ ] Expose as ZigBee device for HomeAssistant integration
 - [ ] Expose as HomeKit device (HomeSpan?)
@@ -78,12 +85,42 @@ If you want to port the library to a non-ESP32 platform you should consider the 
 > [!TIP]
 > Got a RTL-SDR? Use [rtl_433](https://github.com/merbanan/rtl_433) to decode io-homecontrol: `rtl_433 -R 189 -f 868.9M -s 1000k -g 42.1`
 
+### Building and testing
+
+The firmware is built with [PlatformIO](https://platformio.org/):
+
+```sh
+pio run                       # build for the default board
+pio run -e ttgo-lora32-v21    # or another board from platformio.ini
+```
+
+The protocol library also runs on the host, which is where the tests live.
+They need nothing but a C++17 compiler and take a couple of seconds:
+
+```sh
+./tools/run_native_tests.sh              # every suite
+./tools/run_native_tests.sh test_frame   # a single suite
+```
+
+AddressSanitizer and UndefinedBehaviorSanitizer are on by default - the frame
+parser eats attacker-controlled bytes, so a sanitizer report there is a real
+finding. Set `IOHOME_NO_SANITIZERS=1` to turn them off.
+
+`pio test -e native` runs the same sources against the upstream Unity
+framework, if you would rather use PlatformIO's runner.
+
 ### ESPHome
 
 An [ESPHome](https://esphome.io) external component is available for integration with [Home Assistant](https://www.home-assistant.io/). This enables controlling io-homecontrol devices (blinds, shutters, etc.) directly from Home Assistant using an ESP32 + LoRa radio module.
 
 > [!WARNING]
-> The ESPHome component is experimental. Basic frame reception and 2W cover commands are supported. The protocol library supports 1W mode with encryption, 2W mode with frequency hopping, and Velux-specific features.
+> The ESPHome component is experimental and has not been verified against a
+> physical actuator. It builds, it validates, and its frames match the
+> documented captures - that is not the same as knowing a blind obeys them.
+
+Frame reception, authenticated 1W cover commands, tilt and diagnostic sensors
+are supported. The 2W challenge-response handshake is not wired in yet, so 2W
+frames go out unauthenticated.
 
 Add this to your ESPHome YAML configuration:
 
@@ -96,6 +133,7 @@ external_components:
     components: [iown_homecontrol]
 
 iown_homecontrol:
+  id: iohc_hub
   cs_pin: 18
   rst_pin: 14
   dio0_pin: 26
@@ -103,13 +141,21 @@ iown_homecontrol:
   radio_type: SX1276
   frequency: 868.95
 
+  # Actuators only obey authenticated frames once paired. Keep the key in
+  # secrets.yaml - anyone holding it can operate every actuator you own.
+  encryption_enabled: true
+  system_key: !secret iohc_system_key
+
 cover:
   - platform: iown_homecontrol
     name: "Living Room Blind"
     target_address: 0x00003F
+    full_open_duration: 30s
+    full_close_duration: 30s
 ```
 
-See [`esphome/example.yaml`](esphome/example.yaml) for a complete configuration example with board-specific pin mappings.
+See [`esphome/example.yaml`](esphome/example.yaml) for a complete configuration
+example with board-specific pin mappings, tilt and diagnostic sensors.
 
 ### Compatible Hardware
 

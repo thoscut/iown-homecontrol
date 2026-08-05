@@ -212,6 +212,39 @@ void test_2w_requires_handshake(void) {
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
 }
 
+void test_2w_commands_work_after_handshake(void) {
+  // Regression: completing the handshake used to invalidate the nonce, so the
+  // commands it authorises were refused.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+
+  TEST_ASSERT_TRUE(controller.send_challenge_request(PEER_NODE));
+
+  // Take the challenge the controller just sent and answer it as the peer.
+  iohome::frame::IoFrame request;
+  TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
+                                              radio.last_transmission.size(), &request,
+                                              iohome::frame::AuthTrailer::PRESENT));
+
+  iohome::mode2w::AuthenticationManager peer;
+  peer.begin(SYSTEM_KEY);
+
+  iohome::frame::IoFrame response;
+  TEST_ASSERT_TRUE(peer.create_challenge_response(&response, OWN_NODE, PEER_NODE, request.data));
+
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(&response, buffer, sizeof(buffer));
+  radio.deliver(buffer, len);
+
+  iohome::frame::IoFrame received;
+  TEST_ASSERT_TRUE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(iohome::mode2w::ChallengeState::AUTHENTICATED, controller.get_auth_state());
+
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+}
+
 // ---------------------------------------------------------------------------
 // Rolling code persistence
 // ---------------------------------------------------------------------------
@@ -544,6 +577,7 @@ int main(int, char**) {
   RUN_TEST(test_rejects_invalid_acei);
   RUN_TEST(test_send_command_rejects_nullptr);
   RUN_TEST(test_2w_requires_handshake);
+  RUN_TEST(test_2w_commands_work_after_handshake);
 
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_writes_are_batched);

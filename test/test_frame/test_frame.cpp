@@ -561,10 +561,76 @@ void test_max_payload_frame_roundtrips(void) {
     const size_t len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
     TEST_ASSERT_EQUAL_UINT(32, len);
 
+    // Command 0x20 has no documented parameter length, so AUTO cannot tell a
+    // plain frame from an authenticated one and errs towards assuming a MAC -
+    // which fails verification rather than passing unauthenticated data off as
+    // authenticated. Tell the parser what this frame is.
     IoFrame parsed;
-    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed, AuthTrailer::NONE));
     TEST_ASSERT_EQUAL_UINT8(sizeof(params), parsed.data_len);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(params, parsed.data, sizeof(params));
+}
+
+void test_auto_trailer_uses_command_metadata(void) {
+    // The wire format carries no "authenticated" flag, so parse_frame has to
+    // deduce it. These are the cases that matter.
+    IoFrame frame;
+
+    // Fixed-length command, payload exactly the parameter length => plain.
+    // This is the 2W execute frame from docs/commands.md: "CMD 0 DATA(6)".
+    iohome::frame::init_frame(&frame, false);
+    TEST_ASSERT_TRUE(iohome::frame::set_execute_command(&frame, iohome::MP_CLOSE));
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
+
+    uint8_t buffer[iohome::FRAME_MAX_SIZE];
+    size_t len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
+
+    IoFrame parsed;
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_FALSE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_SIZE, parsed.data_len);
+
+    // Same command, payload = parameters + MAC => authenticated. A 2W frame
+    // carries a MAC too, so keying only on the protocol mode gets this wrong.
+    const uint8_t key[16] = {0x5A};
+    const uint8_t challenge[6] = {1, 2, 3, 4, 5, 6};
+    iohome::frame::init_frame(&frame, false);
+    TEST_ASSERT_TRUE(iohome::frame::set_execute_command(&frame, iohome::MP_CLOSE));
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame(&frame, key, challenge));
+    len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
+
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_TRUE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_SIZE, parsed.data_len);
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed, key, challenge));
+
+    // A bootstrap command never carries a MAC, however long its payload is.
+    iohome::frame::init_frame(&frame, true);
+    uint8_t key_payload[iohome::AES_KEY_SIZE + 4];
+    memset(key_payload, 0x11, sizeof(key_payload));
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, iohome::CMD_SEND_1W_KEY, key_payload,
+                                                sizeof(key_payload)));
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
+    len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
+
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_FALSE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(sizeof(key_payload), parsed.data_len);
+}
+
+void test_command_metadata(void) {
+    TEST_ASSERT_TRUE(iohome::frame::is_unauthenticated_command(iohome::CMD_DISCOVER));
+    TEST_ASSERT_TRUE(iohome::frame::is_unauthenticated_command(iohome::CMD_SEND_1W_KEY));
+    TEST_ASSERT_TRUE(iohome::frame::is_unauthenticated_command(iohome::CMD_KEY_TRANSFER));
+    TEST_ASSERT_FALSE(iohome::frame::is_unauthenticated_command(iohome::CMD_EXECUTE));
+    TEST_ASSERT_FALSE(iohome::frame::is_unauthenticated_command(iohome::CMD_CHALLENGE_RESPONSE));
+
+    TEST_ASSERT_EQUAL_INT(6, iohome::frame::expected_payload_size(iohome::CMD_EXECUTE));
+    TEST_ASSERT_EQUAL_INT(6, iohome::frame::expected_payload_size(iohome::CMD_CHALLENGE_REQUEST));
+    TEST_ASSERT_EQUAL_INT(20, iohome::frame::expected_payload_size(iohome::CMD_SEND_1W_KEY));
+    TEST_ASSERT_EQUAL_INT(16, iohome::frame::expected_payload_size(iohome::CMD_KEY_TRANSFER));
+    TEST_ASSERT_EQUAL_INT(0, iohome::frame::expected_payload_size(iohome::CMD_DISCOVER));
+    TEST_ASSERT_EQUAL_INT(-1, iohome::frame::expected_payload_size(0x20));
 }
 
 void test_key_transfer_sized_frames_fit(void) {
@@ -672,6 +738,8 @@ int main(int, char **) {
     RUN_TEST(test_validate_detects_tampering);
     RUN_TEST(test_validate_detects_mac_forgery);
     RUN_TEST(test_max_payload_frame_roundtrips);
+    RUN_TEST(test_auto_trailer_uses_command_metadata);
+    RUN_TEST(test_command_metadata);
     RUN_TEST(test_key_transfer_sized_frames_fit);
     RUN_TEST(test_parse_never_overflows_for_any_control_byte);
     RUN_TEST(test_print_frame_handles_nullptr);

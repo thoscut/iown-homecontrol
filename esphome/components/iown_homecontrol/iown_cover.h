@@ -66,7 +66,15 @@ class IOWNCover : public cover::Cover, public Component {
   /** Send a main-parameter command to the target node. */
   bool send_main_param_(uint16_t main_param, uint8_t fp1 = 0x00);
 
-  /** Advance the timed position estimate; returns true if it changed. */
+  /**
+   * @brief Compute the timed position estimate without side effects.
+   *
+   * @param now Current millis()
+   * @param arrived Set to true when the movement has run its full duration
+   */
+  float estimate_position_(uint32_t now, bool *arrived) const;
+
+  /** Advance the timed position estimate; returns true if it should be published. */
   bool update_estimate_(uint32_t now);
 
   /** Stop any movement in progress and settle at `position`. */

@@ -480,7 +480,7 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   frame.is_1w = is_1w;
   frame.rssi = rssi;
 
-  if (cmd == IOHC_CMD_EXECUTE && frame.payload_len >= (IOHC_EXEC_PAYLOAD_SIZE - 1)) {
+  if (cmd == IOHC_CMD_EXECUTE && frame.payload_len >= IOHC_EXEC_PAYLOAD_SIZE) {
     // Payload layout: originator | ACEI | main parameter (2, MSB first) | FP1 | FP2
     const uint8_t originator = data[9];
     const uint8_t acei = data[10];
@@ -505,6 +505,10 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
 
 void IOWNHomeControlComponent::dispatch_to_covers_(const ReceivedFrame &frame) {
   if (!this->position_feedback_) {
+    return;
+  }
+
+  if (frame.payload == nullptr || frame.payload_len < IOHC_EXEC_PAYLOAD_SIZE) {
     return;
   }
 

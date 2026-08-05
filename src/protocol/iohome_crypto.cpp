@@ -13,10 +13,15 @@
 // ESP32 builds use mbedTLS (hardware accelerated). Everything else - including
 // the native unit test build - uses the bundled software AES so the protocol
 // logic is exercised for real instead of being stubbed out.
-#if defined(IOHOME_FORCE_SOFTWARE_AES) || defined(UNIT_TEST) || !defined(ARDUINO)
+//
+// ESP_PLATFORM covers plain ESP-IDF builds, where mbedTLS is present but
+// ARDUINO is not defined.
+#if defined(IOHOME_FORCE_SOFTWARE_AES) || defined(UNIT_TEST)
   #define IOHOME_USE_SOFTWARE_AES 1
-#else
+#elif defined(ARDUINO) || defined(ESP_PLATFORM)
   #define IOHOME_USE_SOFTWARE_AES 0
+#else
+  #define IOHOME_USE_SOFTWARE_AES 1
 #endif
 
 #if IOHOME_USE_SOFTWARE_AES
@@ -29,6 +34,13 @@
 // Random backend selection
 // ---------------------------------------------------------------------------
 #if defined(ESP32) || defined(ESP_PLATFORM) || defined(ARDUINO_ARCH_ESP32)
+  // esp_random() moved from esp_system.h to esp_random.h in ESP-IDF 5, and
+  // both spellings are in the field. Include whichever exists.
+  #if defined(__has_include)
+    #if __has_include(<esp_random.h>)
+      #include <esp_random.h>
+    #endif
+  #endif
   #include <esp_system.h>
   #define IOHOME_HAS_ESP_RANDOM 1
 #else

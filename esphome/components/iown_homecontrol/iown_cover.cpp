@@ -50,7 +50,7 @@ void IOWNCover::loop() {
   }
 }
 
-bool IOWNCover::update_estimate_(uint32_t now) {
+float IOWNCover::estimate_position_(uint32_t now, bool *arrived) const {
   const uint32_t elapsed = now - this->movement_start_ms_;
 
   const bool opening = this->target_position_ > this->start_position_;
@@ -59,8 +59,31 @@ bool IOWNCover::update_estimate_(uint32_t now) {
   const uint32_t expected_duration = static_cast<uint32_t>(duration * travel_distance);
 
   if (elapsed >= expected_duration) {
-    this->position = this->target_position_;
+    if (arrived != nullptr) {
+      *arrived = true;
+    }
+    return this->target_position_;
+  }
 
+  if (arrived != nullptr) {
+    *arrived = false;
+  }
+
+  const float progress = static_cast<float>(elapsed) / static_cast<float>(expected_duration);
+  const float estimate = opening ? (this->start_position_ + progress * travel_distance)
+                                 : (this->start_position_ - progress * travel_distance);
+
+  return clamp(estimate, 0.0f, 1.0f);
+}
+
+bool IOWNCover::update_estimate_(uint32_t now) {
+  bool arrived = false;
+  const float estimate = this->estimate_position_(now, &arrived);
+  const bool changed = std::fabs(estimate - this->position) > 0.001f;
+
+  this->position = estimate;
+
+  if (arrived) {
     // For an intermediate target the actuator is still running: it was told to
     // travel all the way, so it needs an explicit STOP at the right moment.
     if (this->position > 0.01f && this->position < 0.99f) {
@@ -70,15 +93,6 @@ bool IOWNCover::update_estimate_(uint32_t now) {
     this->finish_movement_();
     return true;
   }
-
-  const float progress = static_cast<float>(elapsed) / static_cast<float>(expected_duration);
-  float estimate = opening ? (this->start_position_ + progress * travel_distance)
-                           : (this->start_position_ - progress * travel_distance);
-
-  estimate = clamp(estimate, 0.0f, 1.0f);
-
-  const bool changed = std::fabs(estimate - this->position) > 0.001f;
-  this->position = estimate;
 
   // Publishing on every loop iteration floods the API; once a second while
   // moving is plenty for a cover that takes tens of seconds to travel.
@@ -149,9 +163,11 @@ void IOWNCover::control(const cover::CoverCall &call) {
     ESP_LOGI(TAG, "STOP -> 0x%06X", static_cast<unsigned int>(this->target_address_));
     this->send_main_param_(IOHC_PARAM_STOP);
 
-    // Freeze at the current estimate.
+    // Freeze at the current estimate. Read it without going through
+    // update_estimate_(), which would send a second STOP if the movement
+    // happened to complete on this very call.
     if (this->target_position_ >= 0.0f) {
-      this->update_estimate_(millis());
+      this->position = this->estimate_position_(millis(), nullptr);
     }
     this->finish_movement_();
     this->publish_state();

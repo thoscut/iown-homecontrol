@@ -37,35 +37,6 @@ void IRAM_ATTR packet_isr() {
   g_packet_flag = true;
 }
 
-/**
- * @brief Commands the protocol defines as unauthenticated.
- *
- * These carry no MAC because the peers have not agreed on a key yet, so they
- * are accepted even when authentication is otherwise required. Everything else
- * must be authenticated.
- */
-bool is_plain_bootstrap_command(uint8_t cmd) {
-  switch (cmd) {
-    case CMD_DISCOVER:
-    case CMD_DISCOVER_ANSWER:
-    case CMD_DISCOVER_REMOTE:
-    case CMD_DISCOVER_REMOTE_ANSWER:
-    case CMD_DISCOVER_CONFIRM:
-    case CMD_DISCOVER_CONFIRM_ACK:
-    case CMD_SEND_1W_KEY:
-    case CMD_ASK_CHALLENGE:
-    case CMD_KEY_TRANSFER:
-    case CMD_KEY_TRANSFER_ACK:
-    case CMD_ADDRESS_REQUEST:
-    case CMD_ADDRESS_ANSWER:
-    case CMD_LAUNCH_KEY_TRANSFER:
-    case CMD_REMOVE_1W_CONTROLLER:
-      return true;
-    default:
-      return false;
-  }
-}
-
 } // namespace
 
 IoHomeControl::IoHomeControl(PhysicalLayer* radio)
@@ -320,7 +291,9 @@ RxReject IoHomeControl::screen_frame(const frame::IoFrame* frame) {
   }
 
   if (!frame->authenticated) {
-    if (accept_plain_frames_ || is_plain_bootstrap_command(frame->command_id)) {
+    // Bootstrap commands legitimately carry no MAC: the peers have no shared
+    // key yet. Everything else must be authenticated.
+    if (accept_plain_frames_ || frame::is_unauthenticated_command(frame->command_id)) {
       return RxReject::NONE;
     }
     return RxReject::UNAUTHENTICATED;
@@ -328,7 +301,10 @@ RxReject IoHomeControl::screen_frame(const frame::IoFrame* frame) {
 
   const uint8_t* challenge = nullptr;
   if (!frame->is_1w_mode) {
-    if (auth_manager_ == nullptr) {
+    // Without a live challenge there is no nonce to verify a 2W MAC against,
+    // so the frame cannot be authenticated - do not fall back to the zeroed
+    // buffer, which would check the MAC against an attacker-guessable value.
+    if (auth_manager_ == nullptr || !auth_manager_->has_active_challenge(NOW_MS())) {
       return RxReject::MAC;
     }
     challenge = auth_manager_->get_current_challenge();
@@ -527,9 +503,11 @@ bool IoHomeControl::send_command(
       return false;
     }
 
-    // The 2W MAC is bound to the challenge from the current handshake.
-    if (auth_manager_->get_state(NOW_MS()) != mode2w::ChallengeState::CHALLENGE_SENT) {
-      LOG_PRINT("Error: no outstanding challenge - run the 2W handshake first");
+    // The 2W MAC is bound to the challenge from the current handshake. It
+    // stays usable once the peer has answered, so commands can follow the
+    // handshake without renegotiating a nonce for each one.
+    if (!auth_manager_->has_active_challenge(NOW_MS())) {
+      LOG_PRINT("Error: no active challenge - run the 2W handshake first");
       return false;
     }
 

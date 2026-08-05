@@ -210,9 +210,20 @@ public:
   /**
    * @brief Get the current challenge (6 bytes)
    *
-   * Only meaningful while a handshake is in progress.
+   * Only meaningful while has_active_challenge() is true; the buffer is zeroed
+   * otherwise.
    */
   const uint8_t* get_current_challenge() const { return current_challenge_; }
+
+  /**
+   * @brief Whether a challenge is available to bind MACs to
+   *
+   * True from the moment a challenge is generated until the session expires or
+   * is reset. Expires the state as a side effect, like get_state().
+   *
+   * @param now_ms Current time in milliseconds
+   */
+  bool has_active_challenge(unsigned long now_ms);
 
   /**
    * @brief Get the authentication state, expiring it if it has timed out

@@ -458,6 +458,66 @@ void test_auth_rejects_replayed_response(void) {
     TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 150));
 }
 
+void test_challenge_stays_usable_after_handshake(void) {
+    // Regression: the challenge used to be wiped on a successful handshake, so
+    // the very commands the handshake authorises could no longer be MAC'd.
+    const uint8_t key[16] = {0x42};
+    const uint8_t controller[3] = {0x01, 0x02, 0x03};
+    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+
+    mode2w::AuthenticationManager initiator;
+    mode2w::AuthenticationManager responder;
+    initiator.begin(key);
+    responder.begin(key);
+
+    TEST_ASSERT_FALSE(initiator.has_active_challenge(0));
+
+    iohome::frame::IoFrame request;
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller));
+    TEST_ASSERT_TRUE(initiator.has_active_challenge(0));
+
+    uint8_t nonce[6];
+    memcpy(nonce, initiator.get_current_challenge(), 6);
+
+    iohome::frame::IoFrame response;
+    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
+                                                         request.data));
+    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
+
+    TEST_ASSERT_TRUE(initiator.has_active_challenge(100));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(nonce, initiator.get_current_challenge(), 6);
+
+    // ...and it goes away with the session.
+    TEST_ASSERT_FALSE(initiator.has_active_challenge(1000000));
+}
+
+void test_failed_handshake_clears_challenge(void) {
+    const uint8_t key[16] = {0x42};
+    const uint8_t other_key[16] = {0x24};
+    const uint8_t controller[3] = {0x01, 0x02, 0x03};
+    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+
+    mode2w::AuthenticationManager initiator;
+    mode2w::AuthenticationManager impostor;
+    initiator.begin(key);
+    impostor.begin(other_key);
+
+    iohome::frame::IoFrame request;
+    initiator.create_challenge_request(&request, actuator, controller);
+
+    iohome::frame::IoFrame response;
+    impostor.create_challenge_response(&response, controller, actuator, request.data);
+
+    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 100));
+
+    // A bad answer burns the nonce, so an attacker cannot keep guessing
+    // against one known challenge.
+    TEST_ASSERT_FALSE(initiator.has_active_challenge(100));
+
+    const uint8_t zero[6] = {0, 0, 0, 0, 0, 0};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(zero, initiator.get_current_challenge(), 6);
+}
+
 void test_auth_rejects_wrong_key(void) {
     const uint8_t key[16] = {0x42};
     const uint8_t other_key[16] = {0x24};
@@ -571,6 +631,8 @@ int main(int, char **) {
     RUN_TEST(test_auth_manager_reset);
     RUN_TEST(test_auth_handshake_succeeds);
     RUN_TEST(test_auth_rejects_replayed_response);
+    RUN_TEST(test_challenge_stays_usable_after_handshake);
+    RUN_TEST(test_failed_handshake_clears_challenge);
     RUN_TEST(test_auth_rejects_wrong_key);
     RUN_TEST(test_auth_challenge_times_out);
     RUN_TEST(test_auth_session_expires);

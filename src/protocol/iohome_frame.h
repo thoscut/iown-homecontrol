@@ -63,9 +63,18 @@ struct IoFrame {
  */
 enum class AuthTrailer : uint8_t {
   /**
-   * Infer from the protocol mode: 1W frames carry seq + MAC when the payload
-   * is long enough to hold them, 2W frames are treated as plain. This matches
-   * every capture in docs/ and is the right default for a receive path.
+   * Infer from the command ID and the payload length.
+   *
+   * Nothing on the wire says whether a frame carries an authentication
+   * trailer, so it has to be deduced. Two facts make that possible:
+   *
+   *  - Some commands are defined as unauthenticated because the peers have not
+   *    agreed on a key yet - discovery, key transfer and their acks.
+   *  - Most commands have a fixed parameter length, so a payload that is
+   *    exactly `parameters + trailer` long can only be the authenticated form.
+   *
+   * This resolves every capture in docs/ correctly. Use NONE or PRESENT when
+   * the caller knows better.
    */
   AUTO,
   /// Payload is data only; no sequence number and no MAC.
@@ -73,6 +82,21 @@ enum class AuthTrailer : uint8_t {
   /// Force an authentication trailer appropriate for the frame's mode.
   PRESENT
 };
+
+/**
+ * @brief Whether a command is defined to travel without a MAC
+ *
+ * These are the bootstrap commands: the peers have no shared key yet, so there
+ * is nothing to authenticate with. Every other command should be authenticated.
+ */
+bool is_unauthenticated_command(uint8_t command_id);
+
+/**
+ * @brief Parameter length for commands whose payload has a fixed size
+ *
+ * @return Length in bytes, or -1 when the command's payload length varies
+ */
+int expected_payload_size(uint8_t command_id);
 
 // ============================================================================
 // Frame Construction

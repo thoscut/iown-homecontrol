@@ -30,7 +30,7 @@
 // Packet Elements Length Definitions
 #define IOWN_LEN_CTRL_BYTE_1  1
 #define IOWN_LEN_CTRL_BYTE_2  1
-#define IOWN_LEN_NODEID       3  /*!< Length of ioHC nodeID */
+/* IOWN_LEN_NODEID and IOWN_LEN_HEADER_MAC come from iown_mac.h */
 #define IOWN_LEN_CMD          1
 #define IOWN_LEN_PARAMETER    1  // IOWN_LEN_PARAMETER(cmd_id) (/* TODO calc data based on CommandID */)
 #define IOWN_LEN_ROLLING_CODE 2
@@ -38,7 +38,6 @@
 
 // Header Length Definitions
 #define IOWN_LEN_HEADER_FRAME_CONTROL (IOWN_LEN_CTRL_BYTE_1 + IOWN_LEN_CTRL_BYTE_2)
-#define IOWN_LEN_HEADER_MAC           (IOWN_LEN_NODEID * 2) /*!< Length of ioHC MAC header */
 #define IOWN_LEN_PAYLOAD              (IOWN_LEN_CMD + IOWN_LEN_PARAMETER)
 
 // Packet Length Definitions

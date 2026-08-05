@@ -110,7 +110,8 @@ void ChannelHopper::next_channel() {
 // ============================================================================
 
 AuthenticationManager::AuthenticationManager()
-  : state_(ChallengeState::IDLE),
+  : peer_known_(false),
+    state_(ChallengeState::IDLE),
     state_timestamp_ms_(0),
     challenge_timeout_ms_(DEFAULT_CHALLENGE_TIMEOUT_MS),
     session_timeout_ms_(DEFAULT_SESSION_TIMEOUT_MS),
@@ -118,6 +119,8 @@ AuthenticationManager::AuthenticationManager()
 {
   memset(system_key_, 0, AES_KEY_SIZE);
   memset(current_challenge_, 0, HMAC_SIZE);
+  memset(peer_node_, 0, NODE_ID_SIZE);
+  memset(own_node_, 0, NODE_ID_SIZE);
 }
 
 bool AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
@@ -170,6 +173,11 @@ bool AuthenticationManager::create_challenge_request(
   if (!generate_challenge(challenge, now_ms)) {
     return false;
   }
+
+  // generate_challenge() clears these; record them after it, not before.
+  memcpy(peer_node_, dest_node, NODE_ID_SIZE);
+  memcpy(own_node_, src_node, NODE_ID_SIZE);
+  peer_known_ = true;
 
   if (!frame::set_command(frame, CMD_CHALLENGE_REQUEST, challenge, HMAC_SIZE)) {
     crypto::secure_zero(challenge, sizeof(challenge));
@@ -224,6 +232,15 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
     return false;
   }
 
+  // Only an answer from the node we challenged, addressed to us, is ours to
+  // judge. Anything else belongs to another conversation and must leave this
+  // handshake alone - see the note on the declaration.
+  if (peer_known_ &&
+      (memcmp(frame->src_node, peer_node_, NODE_ID_SIZE) != 0 ||
+       memcmp(frame->dest_node, own_node_, NODE_ID_SIZE) != 0)) {
+    return false;
+  }
+
   if (!frame::validate_frame(frame, system_key_, current_challenge_)) {
     // Consume the challenge on a failed attempt too: leaving it live would
     // let an attacker grind responses against a single known nonce.
@@ -263,6 +280,9 @@ ChallengeState AuthenticationManager::get_state(unsigned long now_ms) {
 }
 
 void AuthenticationManager::reset() {
+  peer_known_ = false;
+  memset(peer_node_, 0, NODE_ID_SIZE);
+  memset(own_node_, 0, NODE_ID_SIZE);
   state_ = ChallengeState::IDLE;
   crypto::secure_zero(current_challenge_, HMAC_SIZE);
   state_timestamp_ms_ = 0;

@@ -337,6 +337,59 @@ void test_rejects_forged_peer_challenge(void) {
   TEST_ASSERT_EQUAL(RxReject::MAC, controller.last_reject_reason());
 }
 
+void test_stray_challenge_response_does_not_break_the_session(void) {
+  // A 0x3D from a node we never challenged must not disturb a handshake in
+  // progress. Two things stop it here, and this pins the order of both: the
+  // receive gate rejects the frame on its MAC before the authentication
+  // manager is offered it at all, and the manager would ignore it anyway
+  // because it is not from the peer we challenged.
+  //
+  // The ESPHome component had only the second of those. It routed 0x3C/0x3D
+  // straight to the manager without waiting for the MAC verdict, so any second
+  // io-homecontrol system in radio range cancelled its handshakes by accident,
+  // and anyone with a radio could on purpose.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+
+  TEST_ASSERT_TRUE(controller.send_challenge_request(PEER_NODE));
+
+  // Recover the nonce we just sent, so the peer can answer it properly later.
+  iohome::frame::IoFrame sent;
+  TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
+                                              radio.last_transmission.size(), &sent));
+  uint8_t nonce[iohome::HMAC_SIZE];
+  memcpy(nonce, sent.data, iohome::HMAC_SIZE);
+
+  // A stranger's 0x3D, properly signed - for its own conversation.
+  const uint8_t STRANGER[3] = {0xEE, 0xEE, 0xEE};
+  iohome::mode2w::AuthenticationManager other;
+  other.begin(SYSTEM_KEY);
+  const uint8_t other_nonce[iohome::HMAC_SIZE] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+  iohome::frame::IoFrame stray;
+  TEST_ASSERT_TRUE(other.create_challenge_response(&stray, STRANGER, STRANGER, other_nonce));
+
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  size_t len = iohome::frame::serialize_frame(&stray, buffer, sizeof(buffer));
+  radio.deliver(buffer, len);
+  iohome::frame::IoFrame received;
+  TEST_ASSERT_FALSE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(RxReject::MAC, controller.last_reject_reason());
+
+  // The genuine answer still completes the handshake.
+  iohome::mode2w::AuthenticationManager peer;
+  peer.begin(SYSTEM_KEY);
+  iohome::frame::IoFrame response;
+  TEST_ASSERT_TRUE(peer.create_challenge_response(&response, OWN_NODE, PEER_NODE, nonce));
+  len = iohome::frame::serialize_frame(&response, buffer, sizeof(buffer));
+  radio.deliver(buffer, len);
+  TEST_ASSERT_TRUE(controller.check_received(&received));
+
+  // Which is what a 2W command needs: without a live session it is refused.
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+}
+
 // ---------------------------------------------------------------------------
 // Rolling code persistence
 // ---------------------------------------------------------------------------
@@ -976,6 +1029,7 @@ int main(int, char**) {
   RUN_TEST(test_2w_commands_work_after_handshake);
   RUN_TEST(test_accepts_peer_initiated_challenge);
   RUN_TEST(test_rejects_forged_peer_challenge);
+  RUN_TEST(test_stray_challenge_response_does_not_break_the_session);
 
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_writes_are_batched);

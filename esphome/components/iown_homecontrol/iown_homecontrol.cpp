@@ -457,6 +457,19 @@ void IOWNHomeControlComponent::handle_challenge_frame_(const iohome::frame::IoFr
       return;
     }
 
+    // The request is signed against the nonce it carries, and that signature
+    // has to hold before we answer. Answering an unverified request meant
+    // anyone in radio range could hand this hub a nonce of their choosing and
+    // read back the MAC computed over it with the system key - a chosen-input
+    // oracle, offered to strangers, on request.
+    if (!this->system_key_set_ ||
+        !iohome::frame::validate_frame(frame, this->system_key_, frame->data)) {
+      ESP_LOGW(TAG, "Unsigned challenge request from 0x%02X%02X%02X - not answering",
+               frame->src_node[0], frame->src_node[1], frame->src_node[2]);
+      this->mac_errors_++;
+      return;
+    }
+
     iohome::frame::IoFrame response;
     if (!this->auth_.create_challenge_response(&response, frame->src_node, frame->dest_node,
                                                frame->data)) {
@@ -567,12 +580,51 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   // state wherever they liked, and a recording of a genuine "closed" report
   // replayed forever. The MAC and the rolling code are what stop that, and the
   // protocol layer already knows how to check both.
-  bool authenticated = false;
   iohome::frame::IoFrame parsed;
-  if (iohome::frame::parse_frame(data, frame_len, &parsed) && parsed.authenticated) {
+  const bool parsed_ok = iohome::frame::parse_frame(data, frame_len, &parsed);
+
+  // 0x3C / 0x3D drive the 2W session and are not covers' business. They are
+  // taken before the generic check below because they verify against a nonce
+  // that generic code cannot know: a 0x3C carries the challenger's own.
+  if (this->two_way_ && (cmd == iohome::CMD_CHALLENGE_REQUEST ||
+                         cmd == iohome::CMD_CHALLENGE_RESPONSE)) {
+    // Only what is addressed to us. A house can hold several io-homecontrol
+    // systems, and answering a challenge meant for a neighbouring hub tells
+    // that hub nothing while announcing this one to anyone listening.
+    if (dest_addr != this->source_address_) {
+      ESP_LOGV(TAG, "2W frame 0x%02X for 0x%06X, not us", cmd,
+               static_cast<unsigned int>(dest_addr));
+      return;
+    }
+    if (parsed_ok) {
+      this->handle_challenge_frame_(&parsed);
+    }
+    return;
+  }
+
+  bool authenticated = false;
+  if (parsed_ok && parsed.authenticated) {
+    // A 2W MAC is bound to the nonce of the session it belongs to, so the
+    // check needs that nonce - without it validate_frame() cannot verify a 2W
+    // frame at all and returns false. Passing nothing meant that with
+    // `two_way: true` no incoming 2W frame could ever authenticate: every one
+    // of them was counted as a MAC error and dropped, so position feedback
+    // never worked in 2W mode.
+    const uint8_t *challenge = nullptr;
+    if (!parsed.is_1w_mode) {
+      if (!this->auth_.has_active_challenge(millis())) {
+        ESP_LOGD(TAG, "2W frame from 0x%06X with no session to check it against",
+                 static_cast<unsigned int>(src_addr));
+        // Fall through: validate_frame() will refuse, which is the right
+        // answer - an unbound 2W MAC proves nothing.
+      } else {
+        challenge = this->auth_.get_current_challenge();
+      }
+    }
+
     if (!this->system_key_set_) {
       ESP_LOGD(TAG, "Frame carries a MAC but no system_key is configured");
-    } else if (!iohome::frame::validate_frame(&parsed, this->system_key_)) {
+    } else if (!iohome::frame::validate_frame(&parsed, this->system_key_, challenge)) {
       ESP_LOGW(TAG, "MAC verification failed for frame from 0x%06X",
                static_cast<unsigned int>(src_addr));
       this->mac_errors_++;
@@ -585,16 +637,6 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
     } else {
       authenticated = true;
     }
-  }
-
-  // 0x3C / 0x3D drive the 2W session and are not covers' business.
-  if (this->two_way_ && (cmd == iohome::CMD_CHALLENGE_REQUEST ||
-                         cmd == iohome::CMD_CHALLENGE_RESPONSE)) {
-    iohome::frame::IoFrame challenge;
-    if (iohome::frame::parse_frame(data, frame_len, &challenge)) {
-      this->handle_challenge_frame_(&challenge);
-    }
-    return;
   }
 
   ReceivedFrame frame{};

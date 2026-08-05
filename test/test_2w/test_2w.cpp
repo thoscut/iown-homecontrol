@@ -539,6 +539,57 @@ void test_failed_handshake_clears_challenge(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(zero, initiator.get_current_challenge(), 6);
 }
 
+void test_stray_response_does_not_cancel_the_handshake(void) {
+    // A 0x3D frame from a node we never challenged must not touch our state.
+    //
+    // It used to: verify_challenge_response() checked the MAC and nothing else,
+    // and burned the nonce on failure. So any 0x3D in radio range cancelled a
+    // pending handshake - a neighbouring pair of io-homecontrol devices doing
+    // their own exchange, or six arbitrary bytes from anyone with a radio. The
+    // genuine answer then arrived to an IDLE state and was rejected, and every
+    // 2W command was dropped for as long as it continued.
+    const uint8_t key[16] = {0x42};
+    const uint8_t controller[3] = {0x01, 0x02, 0x03};
+    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+    const uint8_t stranger[3] = {0xEE, 0xEE, 0xEE};
+
+    mode2w::AuthenticationManager initiator;
+    mode2w::AuthenticationManager responder;
+    initiator.begin(key);
+    responder.begin(key);
+
+    iohome::frame::IoFrame request;
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
+
+    uint8_t nonce[6];
+    memcpy(nonce, initiator.get_current_challenge(), 6);
+
+    // Someone else's 0x3D, correctly signed for a different pair of nodes.
+    iohome::frame::IoFrame stray;
+    const uint8_t other_nonce[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+    TEST_ASSERT_TRUE(responder.create_challenge_response(&stray, stranger, stranger, other_nonce));
+    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&stray, 100));
+
+    // Our challenge is untouched.
+    TEST_ASSERT_TRUE(initiator.has_active_challenge(100));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(nonce, initiator.get_current_challenge(), 6);
+
+    // A response addressed to somebody else is ignored too, even from the node
+    // we did challenge.
+    iohome::frame::IoFrame misaddressed;
+    TEST_ASSERT_TRUE(
+        responder.create_challenge_response(&misaddressed, stranger, actuator, nonce));
+    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&misaddressed, 100));
+    TEST_ASSERT_TRUE(initiator.has_active_challenge(100));
+
+    // And the real answer still completes the handshake.
+    iohome::frame::IoFrame response;
+    TEST_ASSERT_TRUE(
+        responder.create_challenge_response(&response, controller, actuator, request.data));
+    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
+    TEST_ASSERT_TRUE(initiator.is_authenticated(100));
+}
+
 void test_auth_rejects_wrong_key(void) {
     const uint8_t key[16] = {0x42};
     const uint8_t other_key[16] = {0x24};
@@ -708,6 +759,7 @@ int main(int, char **) {
     RUN_TEST(test_auth_rejects_replayed_response);
     RUN_TEST(test_challenge_stays_usable_after_handshake);
     RUN_TEST(test_failed_handshake_clears_challenge);
+    RUN_TEST(test_stray_response_does_not_cancel_the_handshake);
     RUN_TEST(test_auth_rejects_wrong_key);
     RUN_TEST(test_handshake_works_at_realistic_uptime);
     RUN_TEST(test_auth_challenge_times_out);

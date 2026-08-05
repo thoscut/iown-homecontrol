@@ -206,7 +206,18 @@ public:
    * @brief Verify a challenge response
    *
    * On success the challenge is consumed: a replayed response is rejected
-   * because the manager leaves the CHALLENGE_SENT state.
+   * because the manager leaves the CHALLENGE_SENT state. A response from the
+   * node we challenged that fails its MAC consumes the challenge too, so an
+   * attacker cannot grind guesses against one known nonce.
+   *
+   * A frame from any *other* node, or addressed to any other node, is ignored
+   * without touching the state. That distinction matters: burning the nonce on
+   * every failed 0x3D meant a neighbouring pair of devices doing their own
+   * exchange - or six arbitrary bytes from anyone with a radio - cancelled a
+   * handshake in progress, and the genuine answer then arrived to an IDLE
+   * state. The peer is remembered by create_challenge_request(); a challenge
+   * made with generate_challenge() alone has no peer to compare against and is
+   * verified on the MAC only.
    *
    * @param frame Received response frame
    * @param now_ms Current time in milliseconds
@@ -260,6 +271,10 @@ public:
 protected:
   uint8_t system_key_[AES_KEY_SIZE];
   uint8_t current_challenge_[HMAC_SIZE];
+  /// Who we challenged, and as whom - only a response between these two counts.
+  uint8_t peer_node_[NODE_ID_SIZE];
+  uint8_t own_node_[NODE_ID_SIZE];
+  bool peer_known_;
   ChallengeState state_;
   unsigned long state_timestamp_ms_;
   uint32_t challenge_timeout_ms_;

@@ -30,6 +30,8 @@ CXXFLAGS=(
   -DIOHOME_FORCE_SOFTWARE_AES
   "-I${REPO_ROOT}/src"
   "-I${REPO_ROOT}/tools/unity_min"
+  # RadioLib mock, so IoHomeControl can be built and tested on the host.
+  "-I${REPO_ROOT}/test/mocks"
 )
 
 # Enable sanitizers unless explicitly disabled - they are the whole point of
@@ -45,6 +47,8 @@ PROTOCOL_SOURCES=(
   "${REPO_ROOT}/src/protocol/iohome_2w.cpp"
   "${REPO_ROOT}/src/protocol/iohome_rolling_code_store.cpp"
   "${REPO_ROOT}/src/protocol/iohome_replay_guard.cpp"
+  "${REPO_ROOT}/src/velux/iohome_velux.cpp"
+  "${REPO_ROOT}/src/IoHomeControl.cpp"
 )
 
 mkdir -p "${BUILD_DIR}"

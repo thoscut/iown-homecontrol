@@ -45,6 +45,7 @@ nav:
       - Layer 2: linklayer.md
       - Commands: commands.md
       - Parameter: parameter/README.md
+      - Security Model: SECURITY-MODEL.md
   - Parameter Viewer: parameter/database/README.md
   - Reference:
       - Devices: devices.md

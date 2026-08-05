@@ -1,10 +1,11 @@
 # ESPHome configuration example for io-homecontrol
 #
 # This example shows how to use the iown_homecontrol component to
-# control Somfy/Velux blinds and shutters via io-homecontrol protocol.
+# control Somfy/Velux blinds and shutters via the io-homecontrol protocol.
 #
 # IMPORTANT: This is experimental. The io-homecontrol protocol implementation
-# is still work in progress. Use at your own risk.
+# is still work in progress. Use at your own risk, and read
+# docs/SECURITY-MODEL.md before pairing anything you care about.
 #
 # Supported radio modules: SX1276 (default), SX1262
 # Supported boards: Any ESP32 with a compatible LoRa radio module
@@ -37,7 +38,7 @@ esp32:
 external_components:
   - source:
       type: local
-      path: esphome/components
+      path: components
 
 # Option 2: From GitHub (for production use)
 # external_components:
@@ -49,29 +50,77 @@ external_components:
 
 # io-homecontrol hub configuration
 iown_homecontrol:
+  id: iohc_hub
   cs_pin: 18            # SPI Chip Select
   rst_pin: 14           # Radio Reset
   dio0_pin: 26          # Radio DIO0 / IRQ
   dio1_pin: 33          # Radio DIO1
-  # SPI pins (optional, uses board defaults if omitted)
+  # Custom SPI pins are optional, but must be given as a complete set.
   sck_pin: 5            # SPI Clock
   mosi_pin: 27          # SPI MOSI
   miso_pin: 19          # SPI MISO
+
   # Radio configuration
   radio_type: SX1276    # SX1276 or SX1262
-  frequency: 868.95     # Channel 2 (default, used for 1W and 2W)
-  # source_address: 0x1A380B  # 3-byte source node ID (optional)
+  frequency: 868.95     # Channel 2 (used by 1W, and the 2W default)
+
+  # This gateway's own 3-byte node address. Pick something that does not
+  # collide with a device you already own.
+  source_address: 0x1A380B
+
+  # Authentication
+  #
+  # Actuators only obey authenticated frames once they have been paired, so
+  # leaving this off is for sniffing and first experiments only.
+  #
+  # The key must be the 16-byte system key your installation already uses; see
+  # docs/SECURITY-MODEL.md for where it comes from. Keep it in secrets.yaml -
+  # anyone holding it can operate every actuator in the installation.
+  # encryption_enabled: true
+  # system_key: !secret iohc_system_key
+
+  # Command metadata sent with every execute frame.
+  # ACEI bit 0 must be set or actuators discard the frame; 0x61 is
+  # "user priority level 2, valid", which is what a remote control sends.
+  acei: 0x61
+  originator: USER
+
+  # Experimental: update cover positions from frames the actuators send.
+  # Off by default because those frames are not authenticated here, so a
+  # spoofed frame could show a wrong position in Home Assistant.
+  position_feedback: false
 
 # Cover entities for io-homecontrol blinds/shutters
 cover:
   - platform: iown_homecontrol
     name: "Living Room Blind"
-    target_address: 0x00003F  # Broadcast address (controls all devices)
+    # 0x00003F is the broadcast address: every actuator in range reacts to it.
+    # Useful for a first test, but replace it with the real node address.
+    target_address: 0x00003F
+    full_open_duration: 30s
+    full_close_duration: 30s
+    restore_mode: NO_RESTORE
 
-  # Example: Control a specific device by its address
+  # Example: a venetian blind with slat control on a specific address
   # - platform: iown_homecontrol
   #   name: "Bedroom Blind"
-  #   target_address: 0xABCDEF  # Replace with actual device address
+  #   target_address: 0xABCDEF
+  #   supports_tilt: true
+  #   full_open_duration: 22s
+  #   full_close_duration: 20s
+  #   restore_mode: RESTORE
+
+# Diagnostics: link quality and receive-path counters
+sensor:
+  - platform: iown_homecontrol
+    iown_homecontrol_id: iohc_hub
+    update_interval: 60s
+    rssi:
+      name: "io-homecontrol RSSI"
+    frames_received:
+      name: "io-homecontrol Frames Received"
+    crc_errors:
+      name: "io-homecontrol CRC Errors"
 
 # WiFi configuration
 wifi:

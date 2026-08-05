@@ -2,56 +2,102 @@
 
 ## Overview
 
-This document tracks the production readiness status of the iown-homecontrol project,
-including the C++ protocol library (`src/protocol/`), the high-level controller
-(`src/IoHomeControl`), and the ESPHome integration (`esphome/components/iown_homecontrol/`).
+This document tracks the production readiness status of the iown-homecontrol
+project, covering the C++ protocol library (`src/protocol/`), the high-level
+controller (`src/IoHomeControl`), the Velux helpers (`src/velux/`) and the
+ESPHome integration (`esphome/components/iown_homecontrol/`).
 
-**Current Status: EXPERIMENTAL / ALPHA**
+**Current Status: BETA**
 
-The project is functional for basic 1W/2W cover control but requires further hardening
-before deployment in production home automation systems.
+The protocol layer is now verified against the byte-for-byte captures in
+`docs/`, covered by 139 host-run unit tests, and hardened against the receive
+path being attacker-controlled. What is *not* verified is behaviour against
+real hardware: nobody has yet confirmed that a physical actuator obeys a frame
+this library produces. Treat every "Complete" below as "complete and tested in
+software".
 
 ---
 
 ## Issue Tracker
 
-### ✅ FIXED Issues
+### ✅ FIXED
 
-| ID | Severity | Component | Description | Status |
-|----|----------|-----------|-------------|--------|
-| F1 | Critical | `IoHomeControl` | No destructor - memory leak for 2W mode components | ✅ Fixed |
-| F2 | Critical | `iohome_frame.cpp` | Unsigned integer wraparound in `parse_frame()` data_len calculation | ✅ Fixed |
-| F3 | High | `iohome_frame.cpp` | Missing nullptr checks in frame functions | ✅ Fixed |
-| F4 | High | `IoHomeControl.cpp` | No allocation failure checks (`new` without `std::nothrow`) | ✅ Fixed |
-| F5 | High | `IoHomeControl.cpp` | `begin()` doesn't validate input parameters | ✅ Fixed |
-| F6 | High | `IoHomeControl.cpp` | Re-initialization leaks previously allocated 2W components | ✅ Fixed |
-| F7 | Medium | ESPHome component | ISR `packet_flag_` not using atomic operations on ESP32 | ✅ Fixed |
-| F8 | Medium | `parse_frame()` | Missing buffer bounds checks before each `memcpy` | ✅ Fixed |
-| F9 | High | `iohome_velux.cpp` | Missing nullptr checks in VeluxWindow/VeluxBlind constructors and methods | ✅ Fixed |
-| F10 | Medium | `iohome_2w.cpp` | Missing nullptr check in `verify_challenge_response()` | ✅ Fixed |
+#### Protocol conformance
+
+| ID | Severity | Component | Description |
+|----|----------|-----------|-------------|
+| P1 | **Critical** | `iohome_frame.h` | Control Byte 0 bit 5 is `isOneWay` (1 = 1W). The library treated it as "is 2W", so every transmitted frame announced the opposite protocol mode. |
+| P2 | **Critical** | `iohome_frame.h` | `Size` is the frame length excluding Control Byte 0 and the CRC (total = Size + 3). The library used total = Size + 11, so the announced length was wrong by 8 bytes on every frame. |
+| P3 | **Critical** | `iohome_constants.h` | `CMD_SET_POSITION`/`STOP`/`OPEN`/`CLOSE` (0x60-0x63) do not exist. Actuators are driven by command 0x00 with a Main Parameter. Cover control could never have worked. |
+| P4 | **Critical** | ESPHome component | ACEI byte was 0x00. Its bit 0 is "IsValid" and actuators discard frames where it is clear. |
+| P5 | **Critical** | ESPHome component | FSK data rate was passed as 38400/19200 where RadioLib expects kbps/kHz, so `setDataRate` failed and the component marked itself failed at setup. |
+| P6 | High | `iohome_constants.h` | `FRAME_MAX_SIZE` of 32 was below the 34 bytes the 5-bit size field can describe. Both pairing frames failed to serialize, so pairing could never have worked. |
+| P7 | High | `iohome_frame.cpp` | Authenticated and plain frames were not distinguished; every frame was assumed to carry a sequence number and MAC, which no discovery or key-transfer frame does. |
+| P8 | High | Several | Command IDs 0x29/0x2A/0x2B/0x31/0x51/0x52/0x53 were mapped to the wrong meanings; corrected against `docs/commands.md`. |
+| P9 | Medium | Both | Preamble length was divided by 8 before being handed to RadioLib, which takes FSK preamble length in bits: 64 bits instead of 512. |
+| P10 | Medium | `IoHomeControl.cpp` | Sync word was derived from the OTA constant 0xFF33 by shifting, producing `{0x00, 0xFF, 0x33}` instead of the bit-reversed `{0x57, 0xFD, 0x99}` the radio needs. |
+| P11 | Medium | Both | RadioLib's FSK defaults prepend a length byte and append their own CRC; neither is part of an io-homecontrol frame. Now disabled explicitly. |
+
+#### Security
+
+| ID | Severity | Component | Description |
+|----|----------|-----------|-------------|
+| S1 | **Critical** | `iohome_2w.cpp` | 2W challenges came from an unseeded Arduino `random()`. Every device produced the same challenge sequence after every reboot, so an attacker could precompute a valid response. Now backed by the platform CSPRNG, which refuses rather than falling back. |
+| S2 | **Critical** | Receive path | No replay protection. A valid MAC proves authorship, not freshness, so any recorded frame could be replayed off the air. Added `ReplayGuard`. |
+| S3 | High | `IoHomeControl.cpp` | Received 2W frames were validated with a null challenge, dereferencing it inside the IV construction - a remote crash from a single received frame. |
+| S4 | High | `iohome_2w.cpp` | A challenge stayed live after a failed verification, letting an attacker grind responses against one known nonce. Challenges are now single-use. |
+| S5 | Medium | `iohome_2w.cpp` | An authenticated 2W session never expired. Now bounded (30 s default). |
+| S6 | Medium | `IoHomeControl.cpp` | Plain (unauthenticated) frames were accepted unconditionally. Now rejected unless they carry one of the commands the protocol defines as unauthenticated. |
+| S7 | Low | `iohome_crypto.cpp` | Key material was left on the stack. Added `secure_zero()` on every path that touches a key, IV or MAC. |
+| S8 | Low | `iohome_crypto.cpp` | `verify_crc16()` accepted a 2-byte buffer as a valid frame covering no data. |
+
+#### Robustness
+
+| ID | Severity | Component | Description |
+|----|----------|-----------|-------------|
+| R1 | **Critical** | `src/main*.cpp` | `main.cpp` and `main_IoHome.cpp` both defined `setup()`, `loop()`, `radio` and `phy`: the firmware could not link. The legacy sketch moved to `examples/`. |
+| R2 | High | `IoHomeControl.cpp` | Reception used `scanChannel()`, which is LoRa-only and returns `ERR_WRONG_MODEM` in FSK, so no frame was ever received. Now interrupt driven. |
+| R3 | High | `IoHomeControl.cpp` | The rolling code was written to NVS on every single command, wearing out the flash. Now uses block reservation. |
+| R4 | High | ESPHome component | The rolling code was never persisted, so it restarted at 0 after every reboot and receivers rejected everything until it caught up. |
+| R5 | Medium | `iohome_2w.cpp` | Discovery left the `DISCOVERING` state after the first answer, so only one device was ever found; it also accepted any frame as a discovery answer and never honoured its own timeout. |
+| R6 | Medium | `iohome_2w.cpp` | Discovery and key-transfer frames were transmitted without being finalized, so they carried a zero CRC. |
+| R7 | Medium | `iohome_2w.cpp` | Frequency hopping was timed with millisecond resolution, which cannot express the 2.7 ms dwell time. Now microseconds. |
+| R8 | Medium | `IoHome.cpp` | `setPhyProperties()` had an unbounded output-power loop that spins forever on a module that rejects every level. |
+| R9 | Medium | `IoHome.h` | `ntoh`/`hton` template bodies lived in the `.cpp`, so every external use failed to link. Moved to the header. |
+| R10 | Medium | `IoHome.h` | Control Byte 0 macros put the mode bit at 7 and the order field at 5; both are wrong. |
+| R11 | Medium | ESPHome component | Received main parameter was read from bytes 9-10 (originator and ACEI) instead of 11-12. |
+| R12 | Medium | ESPHome cover | `publish_state()` on every loop iteration flooded the API while moving. Now throttled. |
+| R13 | Medium | ESPHome `cover.py` | Used `cover.COVER_SCHEMA`, removed from current ESPHome; the platform failed to load. |
+| R14 | Low | Everywhere | Missing nullptr guards in the frame setters, `is_broadcast()`, `print_frame()`, beacon and discovery handling, `get_rssi()`/`get_snr()`. |
+| R15 | Low | `.github/workflows` | Path filters used bare directory names, which never match, so the PlatformIO workflow effectively never ran. |
+| R16 | Low | `iohome_2w.cpp` | `BeaconHandler` recorded the claimed data length rather than the length it actually copied. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
 | ID | Severity | Component | Description | Recommended Fix |
 |----|----------|-----------|-------------|-----------------|
-| K1 | Medium | `IoHome.cpp` | `begin()` is an empty stub - no initialization performed | Implement or remove |
-| K2 | Medium | `IoHome.cpp` | `crc16()` has no implementation (empty function body) | Implement using `crypto::compute_crc16` |
-| K3 | Medium | `iohome_2w.cpp` | Timer wraparound in `verify_challenge_response()` (~49 days) | Use proper elapsed-time math |
-| K4 | Medium | ESPHome component | `send_frame()` doesn't check `phy_` for nullptr before `clearPacketReceivedAction` | Add nullptr guard |
-| K5 | Low | ESPHome component | Cover defaults to assumed OPEN state - should be configurable | Add config option |
-| K6 | Low | `iohome_crypto.cpp` | CRC verification is not constant-time (minor timing side-channel) | Use constant-time comparison |
-| K7 | Low | Multiple | Logging uses printf-style without structured format | Consider structured logging |
-| K8 | Info | `platformio.ini` | RadioLib dependency uses git ref without version pinning | Pin to specific version |
+| K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/`. | Test against a physical actuator |
+| K2 | Medium | `src/velux/` | `VELUX_CMD_*` (0x58-0x5D) are undocumented and unverified; they sit in the range the standard uses for naming/info commands. Marked UNVERIFIED in the header. | Confirm with a capture, or remove |
+| K3 | Medium | ESPHome component | The 2W challenge-response handshake is not wired in, so 2W frames are sent unauthenticated. | Port `AuthenticationManager` into the component |
+| K4 | Medium | ESPHome component | `position_feedback` accepts unauthenticated position reports. Off by default, marked experimental. | Verify the MAC before applying |
+| K5 | Medium | `IoHomeControl` | Fixed-length FSK mode needs a per-transmission length change, which is not part of the `PhysicalLayer` interface. A hook is provided but the caller must install it. | Document per chip, or template on the radio type |
+| K6 | Low | ESPHome component | Duplicates the CRC and MAC implementation from `src/protocol/` so the component stays self-contained for `external_components`. | Share the sources via a build-time copy |
+| K7 | Low | Logging | Still printf-style rather than structured. | Consider structured logging |
+| K8 | Low | `src/esp32_api*`, `src/iown_mac.cpp` | Older ESP32 helper layer, not covered by tests and not used by `IoHomeControl`. | Fold in or remove |
 
 ### 🔒 Security Considerations
 
+See [`docs/SECURITY-MODEL.md`](docs/SECURITY-MODEL.md) for the full threat
+model. Summary of what remains, by design of the protocol:
+
 | ID | Severity | Description | Status |
 |----|----------|-------------|--------|
-| S1 | Info | Transfer key is hardcoded (protocol requirement - all io-homecontrol devices use same key) | By design |
-| S2 | Medium | System keys stored in plaintext in RAM | Expected for embedded |
-| S3 | Low | No rate limiting for pairing/discovery operations | Future enhancement |
-| S4 | Medium | Rolling code not persisted across reboots (1W mode) | Needs NVS storage |
-| S5 | Info | HMAC verification uses constant-time comparison | ✅ Already implemented |
+| T1 | Info | Frames are authenticated, never encrypted. Addresses, commands and positions are visible to any listener. | Protocol limitation |
+| T2 | **High** | The transfer key is a public constant, so a pairing frame reveals the system key to anyone listening. | Protocol limitation - pair close, pair rarely |
+| T3 | Medium | Keys generated by Overkiz/TaHoma boxes come from a weakly seeded `math.random`, leaving on the order of 2^25 candidates. | Use `crypto::generate_system_key()` for new keys |
+| T4 | Medium | The system key is stored in plaintext in RAM and NVS. | Enable ESP32 flash encryption |
+| T5 | Info | The MAC is truncated to 48 bits. | Protocol limitation |
+| T6 | Low | No rate limiting on pairing or discovery. | Operator-initiated, low risk |
 
 ---
 
@@ -61,50 +107,54 @@ before deployment in production home automation systems.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| CRC-16/KERMIT | ✅ Complete | Verified against protocol docs |
-| AES-128 encryption | ✅ Complete | Uses mbedTLS |
-| HMAC generation (1W) | ✅ Complete | Constant-time verification |
-| HMAC generation (2W) | ✅ Complete | Challenge-response based |
-| Frame construction | ✅ Complete | With bounds checking |
-| Frame parsing | ✅ Complete | With overflow protection |
-| IV construction | ✅ Complete | 1W and 2W modes |
-| Key encryption | ✅ Complete | For pairing |
+| CRC-16/KERMIT | ✅ Complete | Reproduces the CRC of the captured frame in `docs/linklayer.md` exactly |
+| AES-128 | ✅ Complete | mbedTLS on ESP32, bundled software AES elsewhere; both checked against FIPS-197 |
+| MAC generation (1W/2W) | ✅ Complete | Constant-time verification |
+| Frame construction | ✅ Complete | Length encoding verified against three captures |
+| Frame parsing | ✅ Complete | Bounds-checked, swept under ASan over every control-byte combination |
+| Authentication trailer | ✅ Complete | Plain vs. authenticated frames modelled explicitly |
+| IV construction | ✅ Complete | 1W and 2W |
+| Key masking | ✅ Complete | Both directions, with round-trip tests |
+| Replay protection | ✅ Complete | `ReplayGuard`, wraparound-safe, LRU-bounded |
+| CSPRNG | ✅ Complete | Fails closed when no secure source exists |
 
 ### High-Level Controller (`src/IoHomeControl`)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| 1W mode commands | ✅ Complete | Open/Close/Stop/Position |
-| 2W mode commands | ✅ Complete | With challenge-response |
-| Frequency hopping | ✅ Complete | 3-channel FHSS |
-| Device discovery | ✅ Complete | With timeout |
-| Device pairing | ✅ Complete | 1W and 2W key transfer |
-| Beacon handling | ✅ Complete | Sync/discovery/system |
-| Memory management | ✅ Fixed | Destructor + nothrow |
-| Input validation | ✅ Fixed | nullptr checks |
+| 1W commands | ✅ Complete | Command 0x00 with Main Parameter |
+| 2W commands | ✅ Complete | Requires an outstanding challenge |
+| Receive path | ✅ Complete | Interrupt driven, CRC → MAC → replay, with statistics |
+| Frequency hopping | ✅ Complete | Microsecond timing |
+| Device discovery | ✅ Complete | Collects multiple devices, honours its timeout |
+| Device pairing | 🔶 Untested | Frames are correct and validated; not tried against hardware |
+| Beacon handling | ✅ Complete | |
+| Rolling code persistence | ✅ Complete | Block-reserved NVS writes |
+| Memory management | ✅ Complete | Destructor, `nothrow`, non-copyable |
+| Input validation | ✅ Complete | |
 
-### ESPHome Component (`esphome/components/iown_homecontrol/`)
+### ESPHome Component
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Radio initialization | ✅ Complete | SX1276/SX1262 |
-| Frame reception | ✅ Complete | ISR-driven |
-| Frame parsing | ✅ Complete | CRC verified |
-| Cover control | ✅ Basic | Open/Close/Stop only |
-| Thread safety | ✅ Fixed | Atomic ISR flag |
-| Position feedback | ❌ Missing | Needs 2W handshake |
-| Tilt support | ❌ Missing | For venetian blinds |
-| Encryption | ❌ Missing | Sends unencrypted frames |
-| Configuration validation | 🔶 Basic | Pin range only |
+| Radio initialization | ✅ Complete | SX1276/SX1262, CRC and length byte disabled |
+| Frame reception | ✅ Complete | ISR driven, CRC verified, length-field checked |
+| Cover control | ✅ Complete | Open/Close/Stop/Position |
+| Tilt support | ✅ Complete | Via Functional Parameter 1, opt-in |
+| 1W authentication | ✅ Complete | With persisted rolling code |
+| 2W authentication | ❌ Missing | See K3 |
+| Position feedback | 🔶 Experimental | Unauthenticated, off by default |
+| Diagnostic sensors | ✅ Complete | RSSI, frame counters, rolling code |
+| Configuration validation | ✅ Complete | Key, ACEI, frequency, address and SPI-pin checks |
 
 ### Legacy Code (`src/IoHome.cpp`)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `begin()` | ❌ Stub | Empty implementation |
-| `crc16()` | ❌ Stub | No implementation |
-| `setPhyProperties()` | ✅ Complete | Radio configuration |
-| `ntoh()`/`hton()` | ✅ Complete | Byte order conversion |
+| `begin()` | ✅ Complete | Stores configuration and keys |
+| `crc16()` | ✅ Complete | Delegates to `crypto::compute_crc16` |
+| `setPhyProperties()` | ✅ Complete | Bounded power loop, correct preamble |
+| `ntoh()`/`hton()` | ✅ Complete | Now header-defined so they link |
 
 ---
 
@@ -112,54 +162,41 @@ before deployment in production home automation systems.
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ❌ None | No test framework configured |
+| Unit tests | ✅ 139 tests | 6 suites, ASan + UBSan by default |
+| Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
+| Parser robustness | ✅ Complete | Sweep over every control-byte combination under ASan |
+| ESPHome config validation | ✅ Complete | Positive and six negative cases |
+| ESPHome compile | ✅ CI | `esphome compile` on every change |
 | Integration tests | ❌ None | Requires hardware |
-| Protocol conformance | ❌ None | No reference implementation to test against |
-| ESPHome build test | 🔶 CI only | GitHub Actions PlatformIO build |
-| Security audit | ❌ None | Not yet performed |
+| Hardware conformance | ❌ None | See K1 |
+
+Run the tests with:
+
+```sh
+./tools/run_native_tests.sh            # all suites
+./tools/run_native_tests.sh test_frame # one suite
+pio test -e native                     # via PlatformIO
+```
 
 ---
 
-## Recommended Next Steps (Priority Order)
+## Recommended Next Steps
 
-### P0 - Critical (Before any deployment)
-1. Add rolling code persistence (NVS storage) for 1W mode
-2. Add encryption support to ESPHome component
-3. Implement position feedback in ESPHome cover
+### P0 - Before any deployment
+1. Verify against a real actuator (K1). Everything else is downstream of this.
+2. Confirm or remove the unverified Velux command IDs (K2).
 
-### P1 - High Priority
-4. Add unit tests for protocol library (CRC, frame parsing, crypto)
-5. Pin RadioLib dependency to specific version
-6. Fix timer wraparound in 2W challenge timeout
-7. Remove or implement legacy `IoHome.cpp` stubs
+### P1 - High priority
+3. Wire the 2W challenge-response handshake into the ESPHome component (K3).
+4. Authenticate position feedback before applying it (K4).
+5. Document the fixed-length hook per radio chip (K5).
 
-### P2 - Medium Priority
-8. Add structured logging
-9. Improve ESPHome configuration validation
-10. Add ESPHome sensor platform (RSSI, battery, etc.)
-11. Document security model and key management
+### P2 - Medium priority
+6. Share the crypto sources between the library and the ESPHome component (K6).
+7. Add a sensor platform for battery and actuator status.
+8. Structured logging (K7).
 
-### P3 - Nice to Have
-12. Add venetian blind (tilt) support
-13. Add MicroPython implementation
-14. Performance profiling and optimization
-15. Add HomeKit/ZigBee bridge support
-
----
-
-## Branch Integration Status
-
-| Branch | Description | Integration Status |
-|--------|-------------|-------------------|
-| `main` | Stable base with protocol docs | ✅ Base branch |
-| `copilot/create-esphome-component` | ESPHome component + protocol library | ✅ Current PR |
-| `claude/velux-reverse-engineering-analysis-LY97g` | Velux analysis + alternative ESPHome component | 🔶 Partially integrated (protocol lib merged, examples not yet) |
-
-### From `claude/velux-reverse-engineering-analysis-LY97g`:
-- ✅ Protocol library (`src/protocol/`) - integrated and improved
-- ✅ Velux support (`src/velux/`) - integrated
-- ✅ `IoHomeControl` high-level controller - integrated and improved
-- ❌ `ESPHOME_INTEGRATION.md` - not integrated (different approach taken)
-- ❌ `components/iohomecontrol/` - not integrated (uses `esphome/components/iown_homecontrol/` instead)
-- ❌ `examples/` directory - not integrated (single `esphome/example.yaml` used instead)
-- ❌ `PR_DESCRIPTION.md` - not needed (PR description in GitHub)
+### P3 - Nice to have
+9. Fold in or remove the older ESP32 helper layer (K8).
+10. MicroPython implementation.
+11. Performance profiling.

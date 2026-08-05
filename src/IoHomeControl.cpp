@@ -79,6 +79,8 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     accept_plain_frames_(false),
     originator_(Originator::USER),
     acei_(ACEI_DEFAULT),
+    packet_length_callback_(nullptr),
+    packet_length_context_(nullptr),
     rolling_code_store_(nullptr),
     rolling_code_reserved_until_(0),
     rolling_code_reserve_block_(64),
@@ -472,6 +474,11 @@ void IoHomeControl::set_rolling_code_store(RollingCodeStore* store, uint16_t res
   rolling_code_reserve_block_ = (reserve_block == 0) ? 1 : reserve_block;
 }
 
+void IoHomeControl::set_packet_length_callback(PacketLengthCallback callback, void* context) {
+  packet_length_callback_ = callback;
+  packet_length_context_ = context;
+}
+
 bool IoHomeControl::set_acei(uint8_t acei) {
   if (!is_acei_valid(acei)) {
     LOG_PRINT("Error: ACEI bit 0 must be set or actuators reject the frame");
@@ -615,7 +622,21 @@ bool IoHomeControl::transmit_frame(const frame::IoFrame* frame) {
     stop_receive();
   }
 
+  // In fixed-length FSK mode the radio sends exactly the programmed number of
+  // bytes, so narrow it to this frame and widen it again for reception.
+  if (packet_length_callback_ != nullptr) {
+    const int16_t length_state =
+      packet_length_callback_(static_cast<uint8_t>(len), packet_length_context_);
+    if (length_state != RADIOLIB_ERR_NONE) {
+      LOG_PRINTF("Warning: packet length hook failed (%d)\n", length_state);
+    }
+  }
+
   const int16_t state = radio_->transmit(buffer, len);
+
+  if (packet_length_callback_ != nullptr) {
+    packet_length_callback_(FRAME_MAX_SIZE, packet_length_context_);
+  }
 
   if (was_receiving) {
     start_receive(rx_callback_);

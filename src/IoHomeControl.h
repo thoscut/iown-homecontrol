@@ -37,6 +37,20 @@ namespace iohome {
 typedef void (*FrameReceivedCallback)(const frame::IoFrame* frame, int16_t rssi, float snr);
 
 /**
+ * @brief Callback used to program the radio's fixed payload length
+ *
+ * RadioLib's fixed-length FSK mode transmits exactly the programmed number of
+ * bytes, but io-homecontrol frames vary between 11 and 34 bytes. The call that
+ * changes it lives on the concrete radio class (SX1276, SX1262, ...) and is not
+ * part of PhysicalLayer, so the controller asks the application to make it.
+ *
+ * @param length Payload length to program
+ * @param context Opaque pointer supplied with the callback
+ * @return RADIOLIB_ERR_NONE on success
+ */
+typedef int16_t (*PacketLengthCallback)(uint8_t length, void* context);
+
+/**
  * @brief Why a received frame was discarded
  */
 enum class RxReject : uint8_t {
@@ -286,6 +300,26 @@ public:
   void set_accept_plain_frames(bool accept) { accept_plain_frames_ = accept; }
 
   /**
+   * @brief Install the fixed-payload-length hook
+   *
+   * When set, the controller narrows the radio to the exact frame length
+   * before each transmission and widens it back to FRAME_MAX_SIZE afterwards,
+   * so fixed-length FSK mode does not pad or truncate frames. Example:
+   *
+   * @code
+   * controller.set_packet_length_callback(
+   *   [](uint8_t len, void* ctx) -> int16_t {
+   *     return static_cast<SX1276*>(ctx)->fixedPacketLengthMode(len);
+   *   },
+   *   &radio);
+   * @endcode
+   *
+   * @param callback Hook, or nullptr to disable
+   * @param context Passed back to the hook unchanged
+   */
+  void set_packet_length_callback(PacketLengthCallback callback, void* context = nullptr);
+
+  /**
    * @brief Access the replay guard protecting the receive path
    */
   ReplayGuard& replay_guard() { return replay_guard_; }
@@ -400,6 +434,9 @@ protected:
 
   Originator originator_;
   uint8_t acei_;
+
+  PacketLengthCallback packet_length_callback_;
+  void* packet_length_context_;
 
   // Rolling code persistence
   RollingCodeStore* rolling_code_store_;

@@ -94,3 +94,7 @@ $RECYCLE.BIN/
 
 # Native unit test build output
 .build/
+
+# ESPHome local secrets and build output (never commit)
+esphome/secrets.yaml
+esphome/.esphome/

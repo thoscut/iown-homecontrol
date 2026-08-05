@@ -1,0 +1,76 @@
+# yaml-language-server: $schema=https://github.com/SchemaStore/schemastore/raw/master/src/schemas/json/github-workflow.json
+
+# Protocol library unit tests.
+#
+# These run on the host with no PlatformIO toolchain and no radio hardware, so
+# they are fast enough to gate every push. AddressSanitizer and
+# UndefinedBehaviorSanitizer are on: the frame parser eats attacker-controlled
+# bytes, and a sanitizer failure there is a real finding.
+
+name: Unit Tests
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "test/**"
+      - "tools/**"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "test/**"
+      - "tools/**"
+      - ".github/workflows/tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run protocol unit tests
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: ./tools/run_native_tests.sh
+
+  strict-warnings:
+    name: Warnings as errors
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile protocol library with -Werror
+        run: |
+          set -euo pipefail
+          for source in src/protocol/*.cpp; do
+            echo "=== ${source}"
+            g++ -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
+                -Wno-error=conversion -Wno-error=sign-conversion \
+                -Werror -DUNIT_TEST -DIOHOME_FORCE_SOFTWARE_AES \
+                -I src -c "${source}" -o /dev/null
+          done

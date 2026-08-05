@@ -38,7 +38,7 @@ void test_window_uses_execute_command(void) {
 
   // Regression: these helpers used to emit command 0x60, which does not exist.
   TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, frame.command_id);
-  TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_SIZE, frame.data_len);
+  TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, frame.data_len);
   TEST_ASSERT_TRUE(iohome::is_acei_valid(frame.data[1]));
 
   TEST_ASSERT_EQUAL_UINT8_ARRAY(WINDOW_NODE, frame.dest_node, 3);

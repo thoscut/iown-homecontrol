@@ -123,7 +123,7 @@ void test_parse_documented_1w_execute(void) {
     TEST_ASSERT_EQUAL_UINT8(iohome::CMD_EXECUTE, frame.command_id);
 
     // Payload is the 6-byte execute parameter block.
-    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_SIZE, frame.data_len);
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, frame.data_len);
     TEST_ASSERT_EQUAL_UINT8(0x01, frame.data[0]);   // Originator = User
     TEST_ASSERT_EQUAL_UINT8(0x61, frame.data[1]);   // ACEI
     TEST_ASSERT_TRUE(iohome::is_acei_valid(frame.data[1]));
@@ -282,7 +282,7 @@ void test_set_execute_command(void) {
     TEST_ASSERT_TRUE(iohome::frame::set_execute_command(&frame, iohome::MP_STOP));
 
     TEST_ASSERT_EQUAL_UINT8(iohome::CMD_EXECUTE, frame.command_id);
-    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_SIZE, frame.data_len);
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, frame.data_len);
     TEST_ASSERT_EQUAL_UINT8(0x01, frame.data[0]);           // Originator::USER
     TEST_ASSERT_EQUAL_HEX8(0x61, frame.data[1]);            // ACEI_DEFAULT
     TEST_ASSERT_EQUAL_UINT8(0xD2, frame.data[2]);
@@ -589,7 +589,7 @@ void test_auto_trailer_uses_command_metadata(void) {
     IoFrame parsed;
     TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
     TEST_ASSERT_FALSE(parsed.authenticated);
-    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_SIZE, parsed.data_len);
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, parsed.data_len);
 
     // Same command, payload = parameters + MAC => authenticated. A 2W frame
     // carries a MAC too, so keying only on the protocol mode gets this wrong.
@@ -602,7 +602,7 @@ void test_auto_trailer_uses_command_metadata(void) {
 
     TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
     TEST_ASSERT_TRUE(parsed.authenticated);
-    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_SIZE, parsed.data_len);
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, parsed.data_len);
     TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed, key, challenge));
 
     // A bootstrap command never carries a MAC, however long its payload is.

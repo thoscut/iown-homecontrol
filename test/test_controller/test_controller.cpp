@@ -245,6 +245,57 @@ void test_2w_commands_work_after_handshake(void) {
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
 }
 
+void test_accepts_peer_initiated_challenge(void) {
+  // A peer opening a 2W handshake carries its own nonce in the payload. If we
+  // insisted on verifying against a nonce of ours, we could never answer one.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+
+  iohome::mode2w::AuthenticationManager peer;
+  peer.begin(SYSTEM_KEY);
+
+  iohome::frame::IoFrame request;
+  TEST_ASSERT_TRUE(peer.create_challenge_request(&request, OWN_NODE, PEER_NODE));
+
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(&request, buffer, sizeof(buffer));
+  radio.deliver(buffer, len);
+
+  iohome::frame::IoFrame received;
+  TEST_ASSERT_TRUE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(RxReject::NONE, controller.last_reject_reason());
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, received.command_id);
+
+  // The nonce is available to answer with.
+  TEST_ASSERT_EQUAL_UINT8(iohome::HMAC_SIZE, received.data_len);
+  TEST_ASSERT_TRUE(controller.send_challenge_response(PEER_NODE, received.data));
+}
+
+void test_rejects_forged_peer_challenge(void) {
+  // ...but it still has to be signed with the system key.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+
+  const uint8_t attacker_key[16] = {0xBA, 0xDD};
+  iohome::mode2w::AuthenticationManager attacker;
+  attacker.begin(attacker_key);
+
+  iohome::frame::IoFrame request;
+  TEST_ASSERT_TRUE(attacker.create_challenge_request(&request, OWN_NODE, PEER_NODE));
+
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(&request, buffer, sizeof(buffer));
+  radio.deliver(buffer, len);
+
+  iohome::frame::IoFrame received;
+  TEST_ASSERT_FALSE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(RxReject::MAC, controller.last_reject_reason());
+}
+
 // ---------------------------------------------------------------------------
 // Rolling code persistence
 // ---------------------------------------------------------------------------
@@ -578,6 +629,8 @@ int main(int, char**) {
   RUN_TEST(test_send_command_rejects_nullptr);
   RUN_TEST(test_2w_requires_handshake);
   RUN_TEST(test_2w_commands_work_after_handshake);
+  RUN_TEST(test_accepts_peer_initiated_challenge);
+  RUN_TEST(test_rejects_forged_peer_challenge);
 
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_writes_are_batched);

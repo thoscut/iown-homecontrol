@@ -64,13 +64,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile protocol library with -Werror
+      - name: Compile with warnings as errors
         run: |
           set -euo pipefail
-          for source in src/protocol/*.cpp; do
+          FLAGS=(
+            -std=c++17
+            -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion
+            -Werror
+            -DUNIT_TEST -DIOHOME_FORCE_SOFTWARE_AES
+            -I src
+          )
+          for source in src/protocol/*.cpp src/velux/*.cpp; do
             echo "=== ${source}"
-            g++ -std=c++17 -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion \
-                -Wno-error=conversion -Wno-error=sign-conversion \
-                -Werror -DUNIT_TEST -DIOHOME_FORCE_SOFTWARE_AES \
-                -I src -c "${source}" -o /dev/null
+            g++ "${FLAGS[@]}" -c "${source}" -o /dev/null
           done
+          # IoHomeControl needs a RadioLib header; the test mock provides one.
+          echo "=== src/IoHomeControl.cpp"
+          g++ "${FLAGS[@]}" -I test/mocks -c src/IoHomeControl.cpp -o /dev/null

@@ -19,8 +19,11 @@
   #include <time.h>
   #define LOG_PRINT(x) do { if (verbose_) printf("%s\n", x); } while (0)
   #define LOG_PRINTF(fmt, ...) do { if (verbose_) printf(fmt, ##__VA_ARGS__); } while (0)
-  #define NOW_MS() ((unsigned long)(clock() * 1000ULL / CLOCKS_PER_SEC))
-  #define NOW_US() ((unsigned long)(clock() * 1000000ULL / CLOCKS_PER_SEC))
+  // clock() is signed; cast before widening so the division stays well defined.
+  #define NOW_MS() \
+    ((unsigned long)((unsigned long long)(clock()) * 1000ULL / (unsigned long long)(CLOCKS_PER_SEC)))
+  #define NOW_US() \
+    ((unsigned long)((unsigned long long)(clock()) * 1000000ULL / (unsigned long long)(CLOCKS_PER_SEC)))
 #endif
 
 #ifndef IRAM_ATTR
@@ -301,13 +304,22 @@ RxReject IoHomeControl::screen_frame(const frame::IoFrame* frame) {
 
   const uint8_t* challenge = nullptr;
   if (!frame->is_1w_mode) {
-    // Without a live challenge there is no nonce to verify a 2W MAC against,
-    // so the frame cannot be authenticated - do not fall back to the zeroed
-    // buffer, which would check the MAC against an attacker-guessable value.
-    if (auth_manager_ == nullptr || !auth_manager_->has_active_challenge(NOW_MS())) {
+    if (frame->command_id == CMD_CHALLENGE_REQUEST && frame->data_len >= HMAC_SIZE) {
+      // A peer opening a handshake carries its challenge in the payload, and
+      // the MAC is computed over exactly that. Verifying against our own
+      // nonce would reject every peer-initiated handshake.
+      //
+      // This proves the sender holds the key, not that the frame is fresh -
+      // the freshness of the session comes from the nonce we generate in the
+      // response we send back.
+      challenge = frame->data;
+    } else if (auth_manager_ != nullptr && auth_manager_->has_active_challenge(NOW_MS())) {
+      challenge = auth_manager_->get_current_challenge();
+    } else {
+      // No nonce to verify against. Do not fall back to the zeroed buffer,
+      // which would check the MAC against an attacker-guessable value.
       return RxReject::MAC;
     }
-    challenge = auth_manager_->get_current_challenge();
   }
 
   if (!frame::validate_frame(frame, system_key_, challenge)) {

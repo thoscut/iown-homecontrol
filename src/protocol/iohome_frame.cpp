@@ -209,8 +209,8 @@ void set_rolling_code(IoFrame* frame, uint16_t code) {
   if (frame == nullptr) {
     return;
   }
-  frame->rolling_code[0] = code & 0xFF;         // LSB first
-  frame->rolling_code[1] = (code >> 8) & 0xFF;
+  frame->rolling_code[0] = static_cast<uint8_t>(code & 0xFF);         // LSB first
+  frame->rolling_code[1] = static_cast<uint8_t>((code >> 8) & 0xFF);
 }
 
 uint16_t get_rolling_code(const IoFrame* frame) {
@@ -267,8 +267,8 @@ bool finalize_frame(IoFrame* frame, const uint8_t system_key[AES_KEY_SIZE], cons
   }
 
   const uint16_t crc_value = crypto::compute_crc16(temp_buffer, frame_len - CRC_SIZE);
-  frame->crc[0] = crc_value & 0xFF;          // LSB first
-  frame->crc[1] = (crc_value >> 8) & 0xFF;
+  frame->crc[0] = static_cast<uint8_t>(crc_value & 0xFF);          // LSB first
+  frame->crc[1] = static_cast<uint8_t>((crc_value >> 8) & 0xFF);
 
   return true;
 }
@@ -299,8 +299,8 @@ bool finalize_frame_plain(IoFrame* frame) {
   }
 
   const uint16_t crc_value = crypto::compute_crc16(temp_buffer, frame_len - CRC_SIZE);
-  frame->crc[0] = crc_value & 0xFF;
-  frame->crc[1] = (crc_value >> 8) & 0xFF;
+  frame->crc[0] = static_cast<uint8_t>(crc_value & 0xFF);
+  frame->crc[1] = static_cast<uint8_t>((crc_value >> 8) & 0xFF);
 
   return true;
 }
@@ -545,7 +545,13 @@ void print_frame(const IoFrame* frame, void (*print_func)(const char*)) {
     char hex[3 * FRAME_MAX_DATA_SIZE + 1];
     size_t used = 0;
     for (size_t i = 0; i < frame->data_len && i < FRAME_MAX_DATA_SIZE; i++) {
-      used += snprintf(hex + used, sizeof(hex) - used, "%02X ", frame->data[i]);
+      // snprintf reports what it *would* have written, so clamp before using
+      // the result as an offset.
+      const int written = snprintf(hex + used, sizeof(hex) - used, "%02X ", frame->data[i]);
+      if (written <= 0 || static_cast<size_t>(written) >= sizeof(hex) - used) {
+        break;
+      }
+      used += static_cast<size_t>(written);
     }
     snprintf(buf, sizeof(buf), "  Data: %s", hex);
     print_func(buf);
@@ -562,7 +568,12 @@ void print_frame(const IoFrame* frame, void (*print_func)(const char*)) {
     char mac_str[3 * HMAC_SIZE + 1];
     size_t used = 0;
     for (uint8_t i = 0; i < HMAC_SIZE; i++) {
-      used += snprintf(mac_str + used, sizeof(mac_str) - used, "%02X ", frame->hmac[i]);
+      const int written =
+        snprintf(mac_str + used, sizeof(mac_str) - used, "%02X ", frame->hmac[i]);
+      if (written <= 0 || static_cast<size_t>(written) >= sizeof(mac_str) - used) {
+        break;
+      }
+      used += static_cast<size_t>(written);
     }
     snprintf(buf, sizeof(buf), "  MAC:  %s", mac_str);
     print_func(buf);

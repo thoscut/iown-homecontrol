@@ -34,10 +34,25 @@ CXXFLAGS=(
   "-I${REPO_ROOT}/test/mocks"
 )
 
+mkdir -p "${BUILD_DIR}"
+
 # Enable sanitizers unless explicitly disabled - they are the whole point of
 # having a host build for a protocol parser.
+#
+# Some toolchains ship the compiler without the sanitizer runtime, so probe
+# before committing to the flags: failing to link is a worse outcome than
+# running the tests uninstrumented.
 if [[ "${IOHOME_NO_SANITIZERS:-0}" != "1" ]]; then
-  CXXFLAGS+=(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  SANITIZER_FLAGS=(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  probe_source="${BUILD_DIR}/sanitizer-probe.cpp"
+  printf 'int main() { return 0; }\n' > "${probe_source}"
+
+  if "${CXX}" "${SANITIZER_FLAGS[@]}" "${probe_source}" -o "${BUILD_DIR}/sanitizer-probe" \
+      > /dev/null 2>&1; then
+    CXXFLAGS+=("${SANITIZER_FLAGS[@]}")
+  else
+    echo "warning: ${CXX} cannot link the sanitizer runtime; running without it" >&2
+  fi
 fi
 
 PROTOCOL_SOURCES=(
@@ -50,8 +65,6 @@ PROTOCOL_SOURCES=(
   "${REPO_ROOT}/src/velux/iohome_velux.cpp"
   "${REPO_ROOT}/src/IoHomeControl.cpp"
 )
-
-mkdir -p "${BUILD_DIR}"
 
 # Compile the Unity shim once.
 "${CC}" -std=c11 -O1 -g -c "${REPO_ROOT}/tools/unity_min/unity.c" \

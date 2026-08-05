@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 190 host-run unit tests, and hardened against the receive
+`docs/`, covered by 191 host-run unit tests, and hardened against the receive
 path being attacker-controlled. What is *not* verified is behaviour against
 real hardware: nobody has yet confirmed that a physical actuator obeys a frame
 this library produces. Treat every "Complete" below as "complete and tested in

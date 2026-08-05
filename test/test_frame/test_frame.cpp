@@ -860,6 +860,32 @@ void test_execute_command_with_extra_functional_params(void) {
         nullptr, 0, iohome::Originator::USER, 0x61, fps, sizeof(fps)));
 }
 
+void test_unexpected_length_on_a_fixed_command_still_assumes_a_trailer(void) {
+    // A challenge request has a documented 6-byte payload. Give it 10 - neither
+    // 6 nor 6 + trailer - and the parser must fall back to assuming a trailer,
+    // not to "our table says 6, so 10 bytes cannot include one".
+    //
+    // The distinction matters because the table has been wrong before: Execute
+    // was listed as exactly 6 while real frames carry 8. Treating a documented
+    // length as a floor for every command would have turned that kind of gap
+    // into silently rejected authenticated frames.
+    IoFrame frame;
+    iohome::frame::init_frame(&frame, true);
+    uint8_t params[10];
+    memset(params, 0x5A, sizeof(params));
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, iohome::CMD_CHALLENGE_REQUEST,
+                                                params, sizeof(params)));
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
+
+    uint8_t buffer[iohome::FRAME_MAX_SIZE];
+    const size_t len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
+
+    IoFrame parsed;
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_TRUE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(10 - 8, parsed.data_len);
+}
+
 void test_long_execute_payload_without_trailer_is_plain(void) {
     // An 8-byte Execute payload with no authentication trailer. The parser used
     // to call this authenticated because the payload was at least as long as a
@@ -995,6 +1021,7 @@ int main(int, char **) {
     RUN_TEST(test_ksy_capture_frame);
     RUN_TEST(test_execute_command_with_extra_functional_params);
     RUN_TEST(test_long_execute_payload_without_trailer_is_plain);
+    RUN_TEST(test_unexpected_length_on_a_fixed_command_still_assumes_a_trailer);
     RUN_TEST(test_key_transfer_sized_frames_fit);
     RUN_TEST(test_parse_never_overflows_for_any_control_byte);
     RUN_TEST(test_print_frame_handles_nullptr);

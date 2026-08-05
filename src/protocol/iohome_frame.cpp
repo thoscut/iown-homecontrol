@@ -453,7 +453,14 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame, AuthT
     case AuthTrailer::AUTO:
     default: {
       const int expected = expected_payload_size(frame->command_id);
-      const int minimum = min_payload_size(frame->command_id);
+
+      // Only consult the minimum for commands whose length actually varies.
+      // Applying it to a fixed-length command would turn "our table says 6 but
+      // this frame has 10" into "therefore it is plain" - and if the table were
+      // ever incomplete, as it was for Execute, that would reject a valid
+      // authenticated frame. For those, an unexpected length falls through to
+      // the conservative guess at the bottom instead.
+      const int minimum = (expected >= 0) ? -1 : min_payload_size(frame->command_id);
 
       if (expected >= 0 &&
           payload_len == static_cast<size_t>(expected) + trailer_len) {

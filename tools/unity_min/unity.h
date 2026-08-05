@@ -150,6 +150,19 @@ void tearDown(void);
       UNITY_FAIL_AND_RETURN(#actual " should be <= " #threshold);                      \
   } while (0)
 
+#define TEST_ASSERT_EQUAL_STRING(expected, actual)                                    \
+  do {                                                                                \
+    const char* unity_e_ = (expected);                                                 \
+    const char* unity_a_ = (actual);                                                   \
+    if (unity_e_ == NULL || unity_a_ == NULL || strcmp(unity_e_, unity_a_) != 0) {     \
+      char unity_msg_[256];                                                            \
+      snprintf(unity_msg_, sizeof(unity_msg_),                                         \
+               "Strings not equal: expected \"%s\" but was \"%s\"",                     \
+               unity_e_ ? unity_e_ : "(null)", unity_a_ ? unity_a_ : "(null)");         \
+      UNITY_FAIL_AND_RETURN(unity_msg_);                                               \
+    }                                                                                  \
+  } while (0)
+
 #define TEST_ASSERT_EQUAL_MEMORY(expected, actual, len)                               \
   do {                                                                                \
     if (memcmp((expected), (actual), (size_t)(len)) != 0)                              \

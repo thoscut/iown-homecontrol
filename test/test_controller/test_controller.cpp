@@ -11,6 +11,8 @@
 #include "IoHomeControl.h"
 
 #include <string.h>
+#include <string>
+#include <utility>
 #include <vector>
 
 using iohome::IoHomeControl;
@@ -665,6 +667,132 @@ void test_raw_sniffer_sees_every_packet(void) {
   TEST_ASSERT_EQUAL_UINT32(4, controller.rx_stats().received);
 }
 
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+namespace {
+struct LogCapture {
+  std::vector<std::pair<iohome::LogLevel, std::string>> messages;
+
+  bool has(iohome::LogLevel level, const char* fragment) const {
+    for (const auto& entry : messages) {
+      if (entry.first == level && entry.second.find(fragment) != std::string::npos) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  size_t count(iohome::LogLevel level) const {
+    size_t n = 0;
+    for (const auto& entry : messages) {
+      if (entry.first == level) {
+        n++;
+      }
+    }
+    return n;
+  }
+};
+
+void log_cb(iohome::LogLevel level, const char* message, void* ctx) {
+  static_cast<LogCapture*>(ctx)->messages.emplace_back(level, std::string(message));
+}
+}  // namespace
+
+void test_log_sink_receives_messages_with_severity(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+
+  LogCapture capture;
+  controller.set_log_callback(log_cb, &capture);
+
+  // A sink gets the messages whether or not the serial output is on: the
+  // verbose flag governs the built-in printf, not the library's logging.
+  TEST_ASSERT_FALSE(controller.begin(OWN_NODE, nullptr));
+  TEST_ASSERT_TRUE(capture.has(iohome::LogLevel::ERROR, "Invalid parameters"));
+
+  // Severity is a parameter now. It used to be spelled into the text as an
+  // "Error:" prefix, which no caller could filter on.
+  for (const auto& entry : capture.messages) {
+    TEST_ASSERT_TRUE(entry.second.find("Error:") == std::string::npos);
+    TEST_ASSERT_TRUE(entry.second.find("Warning:") == std::string::npos);
+  }
+
+  capture.messages.clear();
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+  TEST_ASSERT_TRUE(capture.has(iohome::LogLevel::INFO, "1W"));
+
+  // The formatted arguments arrive, and no message carries a trailing newline
+  // - the sink is documented to receive a bare line.
+  TEST_ASSERT_TRUE(capture.has(iohome::LogLevel::INFO, "1A 38 0B"));
+  for (const auto& entry : capture.messages) {
+    TEST_ASSERT_TRUE(!entry.second.empty());
+    TEST_ASSERT_NOT_EQUAL('\n', entry.second.back());
+  }
+}
+
+void test_log_level_filters(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+
+  LogCapture capture;
+  controller.set_log_callback(log_cb, &capture, iohome::LogLevel::ERROR);
+  controller.set_verbose(true);
+
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+  TEST_ASSERT_EQUAL_INT(RADIOLIB_ERR_NONE, controller.start_receive());
+
+  // Only errors get through, and there are none on this path.
+  TEST_ASSERT_EQUAL_UINT(0, capture.count(iohome::LogLevel::INFO));
+  TEST_ASSERT_EQUAL_UINT(0, capture.count(iohome::LogLevel::DEBUG));
+
+  // An error does.
+  TEST_ASSERT_FALSE(controller.set_acei(0x60));
+  TEST_ASSERT_EQUAL_UINT(1, capture.count(iohome::LogLevel::ERROR));
+
+  // Widening the filter lets the rest through without reinstalling anything.
+  controller.set_log_callback(log_cb, &capture, iohome::LogLevel::DEBUG);
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  TEST_ASSERT_TRUE(capture.count(iohome::LogLevel::INFO) > 0);
+  // The transmitted bytes are a DEBUG message, one per frame rather than one
+  // per byte: a sink receives whole messages.
+  TEST_ASSERT_TRUE(capture.has(iohome::LogLevel::DEBUG, "Transmitting 25 bytes"));
+
+  // Detaching goes back to the built-in output. set_verbose(true) is still on,
+  // so this deliberately prints one "[iohc ERROR] ..." line to stdout - that
+  // line in the test output is the fallback working, not a stray printf.
+  controller.set_log_callback(nullptr);
+  const size_t before = capture.messages.size();
+  TEST_ASSERT_FALSE(controller.set_acei(0x60));
+  TEST_ASSERT_EQUAL_UINT(before, capture.messages.size());
+}
+
+namespace {
+/// log() is protected; a subclass is how a derived class would reach it.
+struct LoggingController : IoHomeControl {
+  explicit LoggingController(PhysicalLayer* radio) : IoHomeControl(radio) {}
+  using IoHomeControl::log;
+};
+}  // namespace
+
+void test_log_passthrough_does_not_reformat(void) {
+  PhysicalLayer radio;
+  LoggingController controller(&radio);
+
+  LogCapture capture;
+  controller.set_log_callback(log_cb, &capture);
+
+  // log() forwards the caller's string as an argument, not as the format. A
+  // percent sign in it would otherwise read arguments that were never passed.
+  controller.log("100% of %s frames");
+  TEST_ASSERT_EQUAL_UINT(1, capture.messages.size());
+  TEST_ASSERT_EQUAL_STRING("100% of %s frames", capture.messages[0].second.c_str());
+
+  controller.log(nullptr);
+  TEST_ASSERT_EQUAL_UINT(1, capture.messages.size());
+}
+
 void test_stats_reset(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
@@ -866,6 +994,10 @@ int main(int, char**) {
   RUN_TEST(test_packet_length_helper_programs_each_frame);
   RUN_TEST(test_raw_sniffer_sees_every_packet);
   RUN_TEST(test_stats_reset);
+
+  RUN_TEST(test_log_sink_receives_messages_with_severity);
+  RUN_TEST(test_log_level_filters);
+  RUN_TEST(test_log_passthrough_does_not_reformat);
 
   RUN_TEST(test_pair_device_1w_emits_two_frames);
   RUN_TEST(test_pair_rejects_nullptr);

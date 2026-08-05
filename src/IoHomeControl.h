@@ -74,6 +74,38 @@ typedef void (*RawFrameCallback)(const uint8_t* data, size_t len, int16_t rssi, 
                                  void* context);
 
 /**
+ * @brief Severity of a library log message
+ */
+enum class LogLevel : uint8_t {
+  ERROR = 0,   // Something failed and the caller's request did not happen
+  WARN,        // Something unexpected, but the library carried on
+  INFO,        // Normal progress worth recording
+  DEBUG        // Detail only useful while diagnosing
+};
+
+/**
+ * @brief Sink for the library's log messages
+ *
+ * Without one, messages go to `Serial` on Arduino and `stdout` elsewhere, and
+ * only when set_verbose(true) is on. That is fine for a sketch and no use at
+ * all inside a larger application: ESPHome has its own logger with its own
+ * levels and tags, a host test wants to assert on what was logged, and neither
+ * can do anything with a bare printf.
+ *
+ * Install a callback and every message arrives with its severity attached, for
+ * the application to route, filter or drop. Messages are already formatted;
+ * the callback receives a NUL-terminated string it does not own.
+ *
+ * Called from the same context as the operation that logged it - never from
+ * the packet ISR.
+ *
+ * @param level Severity
+ * @param message Formatted message, without a trailing newline
+ * @param context Opaque pointer supplied with the callback
+ */
+typedef void (*LogCallback)(LogLevel level, const char* message, void* context);
+
+/**
  * @brief Why a received frame was discarded
  */
 enum class RxReject : uint8_t {
@@ -376,6 +408,20 @@ public:
   void set_raw_frame_callback(RawFrameCallback callback, void* context = nullptr);
 
   /**
+   * @brief Route log messages to the application instead of the serial port
+   *
+   * See LogCallback. Installing a sink also turns logging on: the verbose flag
+   * only governs the built-in serial output, so a caller that wants the
+   * messages does not have to know that.
+   *
+   * @param callback Sink, or nullptr to go back to the built-in output
+   * @param context Passed back to the sink unchanged
+   * @param min_level Messages below this severity are dropped
+   */
+  void set_log_callback(LogCallback callback, void* context = nullptr,
+                        LogLevel min_level = LogLevel::DEBUG);
+
+  /**
    * @brief Install the packet-length hook for a concrete radio class
    *
    * The hand-written form of set_packet_length_callback() needs a lambda that
@@ -532,6 +578,23 @@ protected:
 
   RawFrameCallback raw_frame_callback_;
   void* raw_frame_context_;
+
+  LogCallback log_callback_;
+  void* log_context_;
+  LogLevel log_min_level_;
+
+  /// True when a message of this severity would reach the sink or the port.
+  bool log_enabled(LogLevel level) const;
+
+  /// Format a message and hand it to the sink, or to the built-in output.
+  ///
+  /// The printf attribute is what keeps the format strings honest. While
+  /// logging went through a macro that forwarded to Serial.printf on one
+  /// platform and printf on the other, no compiler ever checked them.
+#if defined(__GNUC__)
+  __attribute__((format(printf, 3, 4)))
+#endif
+  void emit_log(LogLevel level, const char* format, ...) const;
 
   // Rolling code persistence
   RollingCodeStore* rolling_code_store_;

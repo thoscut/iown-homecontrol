@@ -181,3 +181,35 @@ straight at the cause:
 | `replays` | A retransmission, or someone replaying frames at you |
 | `unauthenticated` | Peer is sending plain frames; it has not been paired |
 | nothing at all | Sync word or frequency wrong, or the radio never entered receive mode |
+
+### Reading the log
+
+By default the library prints to `Serial` when `set_verbose(true)` is on, and
+nothing otherwise. That is enough for a sketch and no use inside a larger
+application: ESPHome has its own logger with its own levels and tags, and a
+host test wants to assert on what was logged rather than watch it scroll past.
+
+`set_log_callback()` routes every message to the application with its severity
+attached, so it can be filtered, tagged or dropped:
+
+```cpp
+void on_log(iohome::LogLevel level, const char *message, void *ctx) {
+  switch (level) {
+    case iohome::LogLevel::ERROR: ESP_LOGE("iohc", "%s", message); break;
+    case iohome::LogLevel::WARN:  ESP_LOGW("iohc", "%s", message); break;
+    case iohome::LogLevel::INFO:  ESP_LOGI("iohc", "%s", message); break;
+    case iohome::LogLevel::DEBUG: ESP_LOGD("iohc", "%s", message); break;
+  }
+}
+
+controller.set_log_callback(on_log, nullptr, iohome::LogLevel::INFO);
+```
+
+The third argument drops anything below that severity before it is formatted,
+so leaving `LogLevel::DEBUG` out of a production build costs nothing. Messages
+arrive already formatted, as a NUL-terminated string with no trailing newline,
+from the same context as the operation that logged them - never from the packet
+ISR. Installing a sink also turns logging on: `set_verbose()` governs only the
+built-in serial output.
+
+The hex dump of each transmitted frame is a `DEBUG` message.

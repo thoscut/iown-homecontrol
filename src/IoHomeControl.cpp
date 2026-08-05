@@ -8,23 +8,30 @@
 #include <string.h>
 #include <new>
 
+#include <stdarg.h>
+#include <stdio.h>
+
 #ifdef ARDUINO
   #include <Arduino.h>
-  #define LOG_PRINT(x) do { if (verbose_) Serial.println(x); } while (0)
-  #define LOG_PRINTF(fmt, ...) do { if (verbose_) Serial.printf(fmt, ##__VA_ARGS__); } while (0)
   #define NOW_MS() millis()
   #define NOW_US() micros()
 #else
-  #include <stdio.h>
   #include <time.h>
-  #define LOG_PRINT(x) do { if (verbose_) printf("%s\n", x); } while (0)
-  #define LOG_PRINTF(fmt, ...) do { if (verbose_) printf(fmt, ##__VA_ARGS__); } while (0)
   // clock() is signed; cast before widening so the division stays well defined.
   #define NOW_MS() \
     ((unsigned long)((unsigned long long)(clock()) * 1000ULL / (unsigned long long)(CLOCKS_PER_SEC)))
   #define NOW_US() \
     ((unsigned long)((unsigned long long)(clock()) * 1000000ULL / (unsigned long long)(CLOCKS_PER_SEC)))
 #endif
+
+// Logging goes through emit_log(), which either hands the formatted message to
+// the application's sink or falls back to the serial port. Severity is part of
+// the call now: it used to live in the message text as an "Error:" prefix,
+// which nothing could filter on.
+#define LOG_ERROR(...)  emit_log(LogLevel::ERROR, __VA_ARGS__)
+#define LOG_WARN(...)   emit_log(LogLevel::WARN, __VA_ARGS__)
+#define LOG_INFO(...)   emit_log(LogLevel::INFO, __VA_ARGS__)
+#define LOG_DEBUG(...)  emit_log(LogLevel::DEBUG, __VA_ARGS__)
 
 #ifndef IRAM_ATTR
   #define IRAM_ATTR
@@ -57,6 +64,9 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     packet_length_context_(nullptr),
     raw_frame_callback_(nullptr),
     raw_frame_context_(nullptr),
+    log_callback_(nullptr),
+    log_context_(nullptr),
+    log_min_level_(LogLevel::DEBUG),
     rolling_code_store_(nullptr),
     rolling_code_reserved_until_(0),
     rolling_code_reserve_block_(64),
@@ -96,12 +106,12 @@ bool IoHomeControl::begin(
   bool is_1w
 ) {
   if (own_node_id == nullptr || system_key == nullptr) {
-    LOG_PRINT("Error: Invalid parameters (nullptr)");
+    LOG_ERROR("Invalid parameters (nullptr)");
     return false;
   }
 
   if (radio_ == nullptr) {
-    LOG_PRINT("Error: Radio not set");
+    LOG_ERROR("Radio not set");
     return false;
   }
 
@@ -109,8 +119,8 @@ bool IoHomeControl::begin(
   memcpy(system_key_, system_key, AES_KEY_SIZE);
   is_1w_mode_ = is_1w;
 
-  LOG_PRINTF("IoHomeControl: Initializing (%s mode)\n", is_1w ? "1W" : "2W");
-  LOG_PRINTF("  Node ID: %02X %02X %02X\n",
+  LOG_INFO("IoHomeControl: Initializing (%s mode)", is_1w ? "1W" : "2W");
+  LOG_INFO("  Node ID: %02X %02X %02X",
              own_node_id_[0], own_node_id_[1], own_node_id_[2]);
 
   // Clean up any existing 2W components before re-initialization.
@@ -119,17 +129,17 @@ bool IoHomeControl::begin(
   // The discovery manager is useful in both modes: 1W pairing also relies on it.
   discovery_manager_ = new (std::nothrow) mode2w::DiscoveryManager();
   if (discovery_manager_ == nullptr) {
-    LOG_PRINT("Error: Failed to allocate DiscoveryManager");
+    LOG_ERROR("Failed to allocate DiscoveryManager");
     return false;
   }
   discovery_manager_->begin(own_node_id_);
 
   if (!is_1w_mode_) {
-    LOG_PRINT("Initializing 2W mode components...");
+    LOG_INFO("Initializing 2W mode components...");
 
     channel_hopper_ = new (std::nothrow) mode2w::ChannelHopper();
     if (channel_hopper_ == nullptr) {
-      LOG_PRINT("Error: Failed to allocate ChannelHopper");
+      LOG_ERROR("Failed to allocate ChannelHopper");
       destroy_2w_components();
       return false;
     }
@@ -137,7 +147,7 @@ bool IoHomeControl::begin(
 
     auth_manager_ = new (std::nothrow) mode2w::AuthenticationManager();
     if (auth_manager_ == nullptr) {
-      LOG_PRINT("Error: Failed to allocate AuthenticationManager");
+      LOG_ERROR("Failed to allocate AuthenticationManager");
       destroy_2w_components();
       return false;
     }
@@ -145,13 +155,13 @@ bool IoHomeControl::begin(
 
     beacon_handler_ = new (std::nothrow) mode2w::BeaconHandler();
     if (beacon_handler_ == nullptr) {
-      LOG_PRINT("Error: Failed to allocate BeaconHandler");
+      LOG_ERROR("Failed to allocate BeaconHandler");
       destroy_2w_components();
       return false;
     }
     beacon_handler_->begin();
 
-    LOG_PRINT("2W mode components initialized");
+    LOG_INFO("2W mode components initialized");
   }
 
   // Restore the persisted rolling code and reserve a fresh block, so a reboot
@@ -159,9 +169,9 @@ bool IoHomeControl::begin(
   if (rolling_code_store_ != nullptr) {
     uint16_t stored = 0;
     if (rolling_code_store_->load(own_node_id_, stored)) {
-      LOG_PRINTF("  Rolling code restored: %u\n", static_cast<unsigned>(stored));
+      LOG_INFO("  Rolling code restored: %u", static_cast<unsigned>(stored));
     } else {
-      LOG_PRINT("  Rolling code not found, starting at 0");
+      LOG_INFO("  Rolling code not found, starting at 0");
     }
     rolling_code_ = stored;
     rolling_code_reserved_until_ = static_cast<uint16_t>(stored + rolling_code_reserve_block_);
@@ -169,7 +179,7 @@ bool IoHomeControl::begin(
   }
 
   if (!crypto::has_secure_random()) {
-    LOG_PRINT("Warning: no secure random source - 2W pairing is disabled");
+    LOG_WARN("no secure random source - 2W pairing is disabled");
   }
 
   initialized_ = true;
@@ -178,15 +188,15 @@ bool IoHomeControl::begin(
 
 int16_t IoHomeControl::configure_radio(float frequency) {
   if (radio_ == nullptr) {
-    LOG_PRINT("Error: Radio not initialized");
+    LOG_ERROR("Radio not initialized");
     return RADIOLIB_ERR_CHIP_NOT_FOUND;
   }
 
-  LOG_PRINTF("Configuring radio on %.2f MHz\n", frequency);
+  LOG_INFO("Configuring radio on %.2f MHz", frequency);
 
   int16_t state = radio_->setFrequency(frequency);
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: setFrequency failed (%d)\n", state);
+    LOG_ERROR("setFrequency failed (%d)", state);
     return state;
   }
 
@@ -197,7 +207,7 @@ int16_t IoHomeControl::configure_radio(float frequency) {
   } while (state == RADIOLIB_ERR_INVALID_OUTPUT_POWER && --power >= -3);
 
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: setOutputPower failed (%d)\n", state);
+    LOG_ERROR("setOutputPower failed (%d)", state);
     return state;
   }
 
@@ -208,19 +218,19 @@ int16_t IoHomeControl::configure_radio(float frequency) {
 
   state = radio_->setDataRate(data_rate);
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: setDataRate failed (%d)\n", state);
+    LOG_ERROR("setDataRate failed (%d)", state);
     return state;
   }
 
   state = radio_->setEncoding(RADIOLIB_ENCODING_NRZ);
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: setEncoding failed (%d)\n", state);
+    LOG_ERROR("setEncoding failed (%d)", state);
     return state;
   }
 
   state = radio_->setDataShaping(RADIOLIB_SHAPING_NONE);
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: setDataShaping failed (%d)\n", state);
+    LOG_ERROR("setDataShaping failed (%d)", state);
     return state;
   }
 
@@ -231,17 +241,17 @@ int16_t IoHomeControl::configure_radio(float frequency) {
 
   state = radio_->setSyncWord(sync_word, SYNC_WORD_LEN);
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: setSyncWord failed (%d)\n", state);
+    LOG_ERROR("setSyncWord failed (%d)", state);
     return state;
   }
 
   state = radio_->setPreambleLength(PREAMBLE_LENGTH);
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: setPreambleLength failed (%d)\n", state);
+    LOG_ERROR("setPreambleLength failed (%d)", state);
     return state;
   }
 
-  LOG_PRINT("Radio configured successfully");
+  LOG_INFO("Radio configured successfully");
   return RADIOLIB_ERR_NONE;
 }
 
@@ -251,7 +261,7 @@ void IoHomeControl::notify_packet_received() {
 
 int16_t IoHomeControl::start_receive(FrameReceivedCallback callback) {
   if (!initialized_ || radio_ == nullptr) {
-    LOG_PRINT("Error: Not initialized");
+    LOG_ERROR("Not initialized");
     return RADIOLIB_ERR_CHIP_NOT_FOUND;
   }
 
@@ -262,13 +272,13 @@ int16_t IoHomeControl::start_receive(FrameReceivedCallback callback) {
 
   const int16_t state = radio_->startReceive();
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: startReceive failed (%d)\n", state);
+    LOG_ERROR("startReceive failed (%d)", state);
     radio_->clearPacketReceivedAction();
     return state;
   }
 
   receiving_ = true;
-  LOG_PRINT("Receiving started");
+  LOG_INFO("Receiving started");
   return RADIOLIB_ERR_NONE;
 }
 
@@ -281,7 +291,7 @@ void IoHomeControl::stop_receive() {
   radio_->standby();
   receiving_ = false;
   g_packet_flag = false;
-  LOG_PRINT("Receiving stopped");
+  LOG_INFO("Receiving stopped");
 }
 
 void IoHomeControl::reset_rx_stats() {
@@ -379,7 +389,7 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
   radio_->startReceive();
 
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: readData failed (%d)\n", state);
+    LOG_ERROR("readData failed (%d)", state);
     rx_stats_.radio_errors++;
     last_reject_ = RxReject::RADIO_ERROR;
     return false;
@@ -408,19 +418,19 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
       break;
     case RxReject::CRC:
       rx_stats_.crc_failures++;
-      LOG_PRINT("Frame dropped: CRC mismatch");
+      LOG_DEBUG("Frame dropped: CRC mismatch");
       return false;
     case RxReject::MAC:
       rx_stats_.mac_failures++;
-      LOG_PRINT("Frame dropped: MAC verification failed");
+      LOG_DEBUG("Frame dropped: MAC verification failed");
       return false;
     case RxReject::REPLAY:
       rx_stats_.replays++;
-      LOG_PRINT("Frame dropped: replayed rolling code");
+      LOG_DEBUG("Frame dropped: replayed rolling code");
       return false;
     case RxReject::UNAUTHENTICATED:
       rx_stats_.unauthenticated++;
-      LOG_PRINT("Frame dropped: authentication required");
+      LOG_DEBUG("Frame dropped: authentication required");
       return false;
     default:
       return false;
@@ -491,9 +501,62 @@ void IoHomeControl::set_raw_frame_callback(RawFrameCallback callback, void* cont
   raw_frame_context_ = context;
 }
 
+void IoHomeControl::set_log_callback(LogCallback callback, void* context, LogLevel min_level) {
+  log_callback_ = callback;
+  log_context_ = context;
+  log_min_level_ = min_level;
+}
+
+bool IoHomeControl::log_enabled(LogLevel level) const {
+  if (log_callback_ != nullptr) {
+    return static_cast<uint8_t>(level) <= static_cast<uint8_t>(log_min_level_);
+  }
+  return verbose_;
+}
+
+void IoHomeControl::emit_log(LogLevel level, const char* format, ...) const {
+  if (format == nullptr || !log_enabled(level)) {
+    return;
+  }
+
+  // Every message the library produces fits well inside this; a longer one is
+  // truncated rather than dropped, because a truncated diagnostic still says
+  // more than silence. No allocation: this runs on a device with 320 KB of RAM
+  // and is called from paths that must not fail for want of a heap block.
+  char message[192];
+  va_list args;
+  va_start(args, format);
+  const int written = vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+
+  if (written < 0) {
+    return;  // Encoding error; there is nothing meaningful to report.
+  }
+
+  if (log_callback_ != nullptr) {
+    log_callback_(level, message, log_context_);
+    return;
+  }
+
+  // No sink: the built-in output, which set_verbose() governs. The severity
+  // that used to be spelled into each message goes back in here, once.
+  static const char* const kLevelNames[] = {"ERROR", "WARN", "INFO", "DEBUG"};
+  const uint8_t index = static_cast<uint8_t>(level);
+  const char* const name =
+    (index < (sizeof(kLevelNames) / sizeof(kLevelNames[0]))) ? kLevelNames[index] : "?";
+#ifdef ARDUINO
+  Serial.print("[iohc ");
+  Serial.print(name);
+  Serial.print("] ");
+  Serial.println(message);
+#else
+  printf("[iohc %s] %s\n", name, message);
+#endif
+}
+
 bool IoHomeControl::set_acei(uint8_t acei) {
   if (!is_acei_valid(acei)) {
-    LOG_PRINT("Error: ACEI bit 0 must be set or actuators reject the frame");
+    LOG_ERROR("ACEI bit 0 must be set or actuators reject the frame");
     return false;
   }
   acei_ = acei;
@@ -507,12 +570,12 @@ bool IoHomeControl::send_command(
   size_t params_len
 ) {
   if (!initialized_) {
-    LOG_PRINT("Error: Not initialized");
+    LOG_ERROR("Not initialized");
     return false;
   }
 
   if (dest_node == nullptr) {
-    LOG_PRINT("Error: dest_node is null");
+    LOG_ERROR("dest_node is null");
     return false;
   }
 
@@ -522,7 +585,7 @@ bool IoHomeControl::send_command(
   frame::set_source(&tx_frame, own_node_id_);
 
   if (!frame::set_command(&tx_frame, cmd_id, params, params_len)) {
-    LOG_PRINT("Error: set_command failed");
+    LOG_ERROR("set_command failed");
     return false;
   }
 
@@ -530,12 +593,12 @@ bool IoHomeControl::send_command(
     frame::set_rolling_code(&tx_frame, consume_rolling_code());
 
     if (!frame::finalize_frame(&tx_frame, system_key_)) {
-      LOG_PRINT("Error: finalize_frame failed");
+      LOG_ERROR("finalize_frame failed");
       return false;
     }
   } else {
     if (auth_manager_ == nullptr) {
-      LOG_PRINT("Error: 2W authentication manager not initialized");
+      LOG_ERROR("2W authentication manager not initialized");
       return false;
     }
 
@@ -543,12 +606,12 @@ bool IoHomeControl::send_command(
     // stays usable once the peer has answered, so commands can follow the
     // handshake without renegotiating a nonce for each one.
     if (!auth_manager_->has_active_challenge(NOW_MS())) {
-      LOG_PRINT("Error: no active challenge - run the 2W handshake first");
+      LOG_ERROR("no active challenge - run the 2W handshake first");
       return false;
     }
 
     if (!frame::finalize_frame(&tx_frame, system_key_, auth_manager_->get_current_challenge())) {
-      LOG_PRINT("Error: finalize_frame failed");
+      LOG_ERROR("finalize_frame failed");
       return false;
     }
   }
@@ -575,7 +638,7 @@ bool IoHomeControl::send_execute_fp(
   // FP1 and FP2 are always on the wire, so anything shorter is not an Execute
   // payload. More may follow - see EXECUTE_PAYLOAD_MIN_SIZE.
   if (fps == nullptr || fp_count < 2 || fp_count > EXECUTE_MAX_FUNCTIONAL_PARAMS) {
-    LOG_PRINT("Error: execute needs 2 to 16 functional parameters");
+    LOG_ERROR("execute needs 2 to 16 functional parameters");
     return false;
   }
 
@@ -596,7 +659,7 @@ bool IoHomeControl::set_position(const uint8_t dest_node[NODE_ID_SIZE], uint8_t 
     percent_open = 100;
   }
 
-  LOG_PRINTF("Setting position to %u%% open\n", static_cast<unsigned>(percent_open));
+  LOG_INFO("Setting position to %u%% open", static_cast<unsigned>(percent_open));
 
   // The wire value counts closure: 0x0000 is fully open, 0xC800 fully closed.
   const uint16_t main_param = mp_from_percent_closed(static_cast<uint8_t>(100 - percent_open));
@@ -604,17 +667,17 @@ bool IoHomeControl::set_position(const uint8_t dest_node[NODE_ID_SIZE], uint8_t 
 }
 
 bool IoHomeControl::open(const uint8_t dest_node[NODE_ID_SIZE]) {
-  LOG_PRINT("Opening actuator");
+  LOG_INFO("Opening actuator");
   return send_execute(dest_node, MP_OPEN);
 }
 
 bool IoHomeControl::close(const uint8_t dest_node[NODE_ID_SIZE]) {
-  LOG_PRINT("Closing actuator");
+  LOG_INFO("Closing actuator");
   return send_execute(dest_node, MP_CLOSE);
 }
 
 bool IoHomeControl::stop(const uint8_t dest_node[NODE_ID_SIZE]) {
-  LOG_PRINT("Stopping actuator");
+  LOG_INFO("Stopping actuator");
   return send_execute(dest_node, MP_STOP);
 }
 
@@ -635,16 +698,22 @@ bool IoHomeControl::transmit_frame(const frame::IoFrame* frame) {
   const size_t len = frame::serialize_frame(frame, buffer, sizeof(buffer));
 
   if (len == 0) {
-    LOG_PRINT("Error: serialize_frame failed");
+    LOG_ERROR("serialize_frame failed");
     return false;
   }
 
-  if (verbose_) {
-    LOG_PRINTF("Transmitting %u bytes:\n", static_cast<unsigned>(len));
-    for (size_t i = 0; i < len; i++) {
-      LOG_PRINTF("%02X ", buffer[i]);
+  // One message, not one per byte: a sink receives whole messages, and the
+  // old byte-at-a-time form relied on the serial port not adding line breaks.
+  // FRAME_MAX_SIZE is 34, so three characters each fits comfortably.
+  if (log_enabled(LogLevel::DEBUG)) {
+    char hex[FRAME_MAX_SIZE * 3 + 1];
+    size_t written = 0;
+    for (size_t i = 0; i < len && written + 3 < sizeof(hex); i++) {
+      written += static_cast<size_t>(snprintf(hex + written, sizeof(hex) - written,
+                                              "%02X ", buffer[i]));
     }
-    LOG_PRINT("");
+    hex[written] = '\0';
+    LOG_DEBUG("Transmitting %u bytes: %s", static_cast<unsigned>(len), hex);
   }
 
   const bool was_receiving = receiving_;
@@ -658,7 +727,7 @@ bool IoHomeControl::transmit_frame(const frame::IoFrame* frame) {
     const int16_t length_state =
       packet_length_callback_(static_cast<uint8_t>(len), packet_length_context_);
     if (length_state != RADIOLIB_ERR_NONE) {
-      LOG_PRINTF("Warning: packet length hook failed (%d)\n", length_state);
+      LOG_WARN("packet length hook failed (%d)", length_state);
     }
   }
 
@@ -673,17 +742,19 @@ bool IoHomeControl::transmit_frame(const frame::IoFrame* frame) {
   }
 
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: transmit failed (%d)\n", state);
+    LOG_ERROR("transmit failed (%d)", state);
     return false;
   }
 
-  LOG_PRINT("Frame transmitted successfully");
+  LOG_INFO("Frame transmitted successfully");
   return true;
 }
 
 void IoHomeControl::log(const char* message) {
   if (message != nullptr) {
-    LOG_PRINT(message);
+    // "%s", not the caller's string as the format: a message containing a
+    // percent sign would otherwise read arguments that were never passed.
+    LOG_INFO("%s", message);
   }
 }
 
@@ -692,7 +763,7 @@ void IoHomeControl::process_received_frame(const frame::IoFrame* frame, int16_t 
 
   if (!is_1w_mode_ && beacon_handler_ != nullptr) {
     if (beacon_handler_->process_beacon(frame, rssi, snr, now)) {
-      LOG_PRINT("Beacon received");
+      LOG_INFO("Beacon received");
     }
   }
 
@@ -702,9 +773,9 @@ void IoHomeControl::process_received_frame(const frame::IoFrame* frame, int16_t 
 
   if (!is_1w_mode_ && auth_manager_ != nullptr && frame->command_id == CMD_CHALLENGE_RESPONSE) {
     if (auth_manager_->verify_challenge_response(frame, now)) {
-      LOG_PRINT("Authentication successful");
+      LOG_INFO("Authentication successful");
     } else {
-      LOG_PRINT("Authentication failed");
+      LOG_INFO("Authentication failed");
     }
   }
 }
@@ -715,18 +786,18 @@ void IoHomeControl::process_received_frame(const frame::IoFrame* frame, int16_t 
 
 bool IoHomeControl::enable_frequency_hopping(bool enable) {
   if (is_1w_mode_) {
-    LOG_PRINT("Warning: Frequency hopping only available in 2W mode");
+    LOG_WARN("Frequency hopping only available in 2W mode");
     return false;
   }
 
   if (channel_hopper_ == nullptr) {
-    LOG_PRINT("Error: Channel hopper not initialized");
+    LOG_ERROR("Channel hopper not initialized");
     return false;
   }
 
   channel_hopper_->reset(NOW_US());
   channel_hopper_->set_enabled(enable);
-  LOG_PRINTF("Frequency hopping %s\n", enable ? "enabled" : "disabled");
+  LOG_INFO("Frequency hopping %s", enable ? "enabled" : "disabled");
   return true;
 }
 
@@ -745,11 +816,11 @@ bool IoHomeControl::update_frequency_hopping() {
   const int16_t state = radio_->setFrequency(new_freq);
 
   if (state != RADIOLIB_ERR_NONE) {
-    LOG_PRINTF("Error: Failed to switch channel (%d)\n", state);
+    LOG_ERROR("Failed to switch channel (%d)", state);
     return false;
   }
 
-  LOG_PRINTF("Switched to channel: %.2f MHz\n", new_freq);
+  LOG_INFO("Switched to channel: %.2f MHz", new_freq);
   return true;
 }
 
@@ -762,44 +833,44 @@ mode2w::ChannelState IoHomeControl::get_current_channel() const {
 
 bool IoHomeControl::send_challenge_request(const uint8_t dest_node[NODE_ID_SIZE]) {
   if (is_1w_mode_) {
-    LOG_PRINT("Error: Challenge-response only available in 2W mode");
+    LOG_ERROR("Challenge-response only available in 2W mode");
     return false;
   }
 
   if (auth_manager_ == nullptr || dest_node == nullptr) {
-    LOG_PRINT("Error: Authentication manager not initialized");
+    LOG_ERROR("Authentication manager not initialized");
     return false;
   }
 
   frame::IoFrame tx_frame;
   if (!auth_manager_->create_challenge_request(&tx_frame, dest_node, own_node_id_, NOW_MS())) {
-    LOG_PRINT("Error: Failed to create challenge request");
+    LOG_ERROR("Failed to create challenge request");
     return false;
   }
 
-  LOG_PRINT("Sending challenge request");
+  LOG_INFO("Sending challenge request");
   return transmit_frame(&tx_frame);
 }
 
 bool IoHomeControl::send_challenge_response(const uint8_t dest_node[NODE_ID_SIZE],
                                             const uint8_t challenge[HMAC_SIZE]) {
   if (is_1w_mode_) {
-    LOG_PRINT("Error: Challenge-response only available in 2W mode");
+    LOG_ERROR("Challenge-response only available in 2W mode");
     return false;
   }
 
   if (auth_manager_ == nullptr || dest_node == nullptr || challenge == nullptr) {
-    LOG_PRINT("Error: Invalid parameters");
+    LOG_ERROR("Invalid parameters");
     return false;
   }
 
   frame::IoFrame tx_frame;
   if (!auth_manager_->create_challenge_response(&tx_frame, dest_node, own_node_id_, challenge)) {
-    LOG_PRINT("Error: Failed to create challenge response");
+    LOG_ERROR("Failed to create challenge response");
     return false;
   }
 
-  LOG_PRINT("Sending challenge response");
+  LOG_INFO("Sending challenge response");
   return transmit_frame(&tx_frame);
 }
 
@@ -812,17 +883,17 @@ mode2w::ChallengeState IoHomeControl::get_auth_state() {
 
 bool IoHomeControl::start_discovery(uint8_t device_type, unsigned long timeout_ms) {
   if (discovery_manager_ == nullptr) {
-    LOG_PRINT("Error: Discovery manager not initialized");
+    LOG_ERROR("Discovery manager not initialized");
     return false;
   }
 
-  LOG_PRINTF("Starting discovery (device type: 0x%02X, timeout: %lu ms)\n",
+  LOG_INFO("Starting discovery (device type: 0x%02X, timeout: %lu ms)",
              device_type, timeout_ms);
   discovery_manager_->start_discovery(device_type, timeout_ms, NOW_MS());
 
   frame::IoFrame tx_frame;
   if (!discovery_manager_->create_discovery_request(&tx_frame, device_type)) {
-    LOG_PRINT("Error: Failed to create discovery request");
+    LOG_ERROR("Failed to create discovery request");
     discovery_manager_->stop_discovery();
     return false;
   }
@@ -833,7 +904,7 @@ bool IoHomeControl::start_discovery(uint8_t device_type, unsigned long timeout_m
 void IoHomeControl::stop_discovery() {
   if (discovery_manager_ != nullptr) {
     discovery_manager_->stop_discovery();
-    LOG_PRINT("Discovery stopped");
+    LOG_INFO("Discovery stopped");
   }
 }
 
@@ -855,16 +926,16 @@ bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE],
                                    const uint8_t new_system_key[AES_KEY_SIZE],
                                    uint8_t manufacturer) {
   if (dest_node == nullptr || new_system_key == nullptr) {
-    LOG_PRINT("Error: Invalid parameters (nullptr)");
+    LOG_ERROR("Invalid parameters (nullptr)");
     return false;
   }
 
   if (discovery_manager_ == nullptr) {
-    LOG_PRINT("Error: Discovery manager not initialized");
+    LOG_ERROR("Discovery manager not initialized");
     return false;
   }
 
-  LOG_PRINT("Pairing device (1W mode)");
+  LOG_INFO("Pairing device (1W mode)");
 
   // docs/linklayer.md "1W Discovery": remove the previous 1W key (0x39), then
   // send the encrypted key (0x30). Both frames are plain.
@@ -875,7 +946,7 @@ bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE],
 
   if (!discovery_manager_->create_key_transfer_1w(&tx_frame, dest_node, own_node_id_,
                                                   new_system_key, manufacturer, rolling_code_)) {
-    LOG_PRINT("Error: Failed to create key transfer frame");
+    LOG_ERROR("Failed to create key transfer frame");
     return false;
   }
 
@@ -885,20 +956,20 @@ bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE],
 bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
                                    const uint8_t new_system_key[AES_KEY_SIZE]) {
   if (dest_node == nullptr || new_system_key == nullptr) {
-    LOG_PRINT("Error: Invalid parameters (nullptr)");
+    LOG_ERROR("Invalid parameters (nullptr)");
     return false;
   }
 
   if (auth_manager_ == nullptr || discovery_manager_ == nullptr) {
-    LOG_PRINT("Error: 2W components not initialized");
+    LOG_ERROR("2W components not initialized");
     return false;
   }
 
-  LOG_PRINT("Pairing device (2W mode)");
+  LOG_INFO("Pairing device (2W mode)");
 
   uint8_t challenge[HMAC_SIZE];
   if (!auth_manager_->generate_challenge(challenge, NOW_MS())) {
-    LOG_PRINT("Error: no secure random source for the pairing challenge");
+    LOG_ERROR("no secure random source for the pairing challenge");
     return false;
   }
 
@@ -920,7 +991,7 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
   crypto::secure_zero(challenge, sizeof(challenge));
 
   if (!built) {
-    LOG_PRINT("Error: Failed to create key transfer frame");
+    LOG_ERROR("Failed to create key transfer frame");
     return false;
   }
 

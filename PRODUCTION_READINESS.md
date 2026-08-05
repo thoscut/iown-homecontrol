@@ -129,6 +129,7 @@ software".
 | V51 | Medium | ESPHome component (K6) | The component carried its own CRC and MAC construction because an `external_components` directory cannot reach `src/protocol/`. It no longer carries a second implementation: `tools/sync_esphome_protocol.py` copies the protocol layer in verbatim and CI fails if the copy drifts. ESPHome skips component subdirectories, so the copies sit alongside the component's own sources. |
 | V52 | Medium | ESPHome component (K3) | 2W frames went out unauthenticated - there was no handshake at all. `two_way: true` now runs the documented exchange: a 0x3C challenge request, the peer's 0x3D answer, and every command after that signed against the nonce the peer chose. A peer-initiated challenge is answered too. The schema refuses `two_way` without a `system_key`. |
 | V53 | Medium | ESPHome component | The hub compiles `iown_cover.cpp` and `iown_sensor.cpp` unconditionally, and those include the cover and sensor components - but `AUTO_LOAD` was empty, so any configuration using only one of the two platforms failed on a missing `esphome/components/sensor/sensor.h`. `example.yaml` uses both, which is why CI never saw it. Both are auto-loaded now and CI compiles a cover-only and a sensor-only configuration. |
+| V54 | Low | `IoHomeControl` (K7) | Logging was two macros that expanded to `Serial.printf` or `printf` behind a `verbose_` flag, with severity spelled into the message text as an "Error:" prefix that nothing could filter on, and no way for an application to see the messages at all. `set_log_callback()` now routes every message to the application with its severity as a parameter and a minimum level that drops the rest before formatting. The transmitted-frame hex dump was one call per byte, which only worked because the serial port added no line breaks; it is one `DEBUG` message now. `log()` passed the caller's string as the format string - a message containing a percent sign read arguments that were never passed. The printf attribute on `emit_log()` means the compiler checks all 80 format strings, which it never could while they went through a macro. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -136,7 +137,6 @@ software".
 |----|----------|-----------|-------------|-----------------|
 | K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/`. | Follow [`docs/HARDWARE-BRINGUP.md`](docs/HARDWARE-BRINGUP.md), which lists the experiments that settle K2, K9 and the FP1 tilt direction |
 | K2 | Medium | `src/velux/` | `VELUX_CMD_*` (0x58-0x5D) are undocumented and unverified; they sit in the range the standard uses for naming/info commands. Marked UNVERIFIED in the header. | Confirm with a capture, or remove |
-| K7 | Low | Logging | Still printf-style rather than structured. | Consider structured logging |
 | K8 | Low | `src/esp32_api_spi.cpp` | The SPI register helpers still have no runtime coverage - they need an ESP-IDF SPI host, so a host test cannot reach them. Everything else in the legacy layer is now tested (`test_legacy_helpers`). | Exercise on hardware, or remove |
 | K9 | **High** | `IoHomeControl::pair_device_2w` | Sends the 0x32 key transfer on its own. The documented exchange also has the controller send a 0x3c challenge request carrying the challenge, so the device knows which one to build its IV from. Pairing therefore works only against a device that already holds that challenge. | Send the 0x3c step, or drive pairing from a received 0x31 |
 
@@ -187,6 +187,7 @@ model. Summary of what remains, by design of the protocol:
 | Rolling code persistence | ✅ Complete | Block-reserved NVS writes |
 | Memory management | ✅ Complete | Destructor, `nothrow`, non-copyable |
 | Input validation | ✅ Complete | |
+| Logging | ✅ Complete | Severity-tagged, routable to the application, filtered before formatting |
 
 ### ESPHome Component
 
@@ -197,8 +198,8 @@ model. Summary of what remains, by design of the protocol:
 | Cover control | ✅ Complete | Open/Close/Stop/Position |
 | Tilt support | ✅ Complete | Via Functional Parameter 1, opt-in |
 | 1W authentication | ✅ Complete | With persisted rolling code |
-| 2W authentication | ❌ Missing | See K3 |
-| Position feedback | 🔶 Experimental | Unauthenticated, off by default |
+| 2W authentication | ✅ Complete | `two_way: true` runs the 0x3C/0x3D handshake and signs every command against the peer's nonce |
+| Position feedback | ✅ Complete | MAC and rolling code verified before anything acts on it; off by default |
 | Diagnostic sensors | ✅ Complete | RSSI, frame counters, rolling code |
 | Configuration validation | ✅ Complete | Key, ACEI, frequency, address and SPI-pin checks |
 
@@ -217,10 +218,10 @@ model. Summary of what remains, by design of the protocol:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ✅ 182 tests | 7 suites, ASan + UBSan by default |
+| Unit tests | ✅ 204 tests | 7 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
 | Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
-| Mutation checks | ✅ Complete | Six deliberate regressions - inverted mode bit, wrong size bias, dropped ACEI check, disabled replay guard, always-true MAC comparison, constant-seeded RNG - are each caught by the suite |
+| Mutation checks | ✅ Complete | Eight deliberate regressions - inverted mode bit, wrong size bias, dropped ACEI check, disabled replay guard, always-true MAC comparison, constant-seeded RNG, ignored log level, log message used as its own format string - are each caught by the suite |
 | ESPHome config validation | ✅ Complete | Positive and six negative cases |
 | ESPHome compile | ✅ CI | `esphome compile` on every change |
 | Integration tests | ❌ None | Requires hardware |
@@ -243,16 +244,15 @@ pio test -e native                     # via PlatformIO
 2. Confirm or remove the unverified Velux command IDs (K2).
 
 ### P1 - High priority
-3. Wire the 2W challenge-response handshake into the ESPHome component (K3).
-4. Authenticate position feedback before applying it (K4).
-5. Document the fixed-length hook per radio chip (K5).
+3. Send the 0x3c challenge request during 2W pairing (K9). Hardware-blocked:
+   the exchange has to be observed before it can be built with any confidence.
 
 ### P2 - Medium priority
-6. Share the crypto sources between the library and the ESPHome component (K6).
-7. Add a sensor platform for battery and actuator status.
-8. Structured logging (K7).
+4. Give the SPI register helpers runtime coverage, or remove them (K8). They
+   need an ESP-IDF SPI host, so a host test cannot reach them.
 
 ### P3 - Nice to have
-9. Fold in or remove the older ESP32 helper layer (K8).
-10. MicroPython implementation.
-11. Performance profiling.
+5. MicroPython implementation.
+6. Performance profiling.
+
+K3, K4, K5, K6, K7 and K10 are closed - see V48 to V54 and V47 above.

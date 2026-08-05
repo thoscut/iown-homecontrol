@@ -75,6 +75,25 @@ static void print_line(const char* line) {
   Serial.println(line);
 }
 
+/**
+ * Route the library's log through the sketch's own output.
+ *
+ * The built-in output would do here, but tagging each line with its severity is
+ * what makes a bring-up log readable afterwards: `grep ERROR` finds the point
+ * where things went wrong without reading the rest.
+ */
+static void on_log(iohome::LogLevel level, const char* message, void* context) {
+  (void) context;
+  const char* tag = "?";
+  switch (level) {
+    case iohome::LogLevel::ERROR: tag = "ERR "; break;
+    case iohome::LogLevel::WARN:  tag = "WARN"; break;
+    case iohome::LogLevel::INFO:  tag = "INFO"; break;
+    case iohome::LogLevel::DEBUG: tag = "DBG "; break;
+  }
+  Serial.printf("[%s] %s\n", tag, message);
+}
+
 static void on_frame(const iohome::frame::IoFrame* frame, int16_t rssi, float snr) {
   Serial.printf("[RX] %s cmd=0x%02X from %02X%02X%02X rssi=%d snr=%.1f\n",
                 frame->is_1w_mode ? "1W" : "2W",
@@ -177,7 +196,9 @@ void setup() {
     halt("radio.fixedPacketLengthMode", state);
   }
 
-  controller.set_verbose(true);
+  // Everything down to DEBUG, which includes the hex dump of each frame sent.
+  // Drop to LogLevel::INFO if the transmit dumps get in the way.
+  controller.set_log_callback(on_log, nullptr, iohome::LogLevel::DEBUG);
 
 #if defined(ARDUINO_ARCH_ESP32)
   // Must be set before begin() so the stored counter is picked up.

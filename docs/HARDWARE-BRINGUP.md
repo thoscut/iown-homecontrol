@@ -58,6 +58,20 @@ iown-homecontrol starting
 **Pass:** it continues to `[PHY] RSSI (dBm): -110` or similar and then
 `Listening for io-homecontrol frames`.
 
+Everything the library itself logs is tagged with its severity, so a long
+bring-up log stays readable:
+
+```
+[INFO] IoHomeControl: Initializing (1W mode)
+[INFO]   Node ID: 1A 38 0B
+[INFO] Configuring radio on 868.95 MHz
+[INFO] Radio configured successfully
+```
+
+`grep ERR` finds where it went wrong without reading the rest. Drop the third
+argument of `set_log_callback()` in `src/main.cpp` from `LogLevel::DEBUG` to
+`LogLevel::INFO` if the per-frame transmit dumps get in the way.
+
 **Fail:** `[FATAL] radio.beginFSK failed: -2`. That is
 `RADIOLIB_ERR_CHIP_NOT_FOUND` - the radio did not answer over SPI at all, which
 is nearly always a pin map that does not match the board. The firmware says so

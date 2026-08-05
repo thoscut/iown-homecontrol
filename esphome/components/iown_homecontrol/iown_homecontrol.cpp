@@ -7,7 +7,6 @@
 #include "iown_cover.h"
 
 #if defined(USE_ESP32)
-#include <mbedtls/aes.h>
 #endif
 
 namespace esphome {
@@ -142,6 +141,10 @@ void IOWNHomeControlComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  ACEI: 0x%02X", this->acei_);
   ESP_LOGCONFIG(TAG, "  Originator: 0x%02X", this->originator_);
   ESP_LOGCONFIG(TAG, "  Position feedback: %s", this->position_feedback_ ? "enabled" : "disabled");
+  if (this->position_feedback_ && !this->system_key_set_) {
+    ESP_LOGW(TAG, "  position_feedback needs system_key: without it no report can be");
+    ESP_LOGW(TAG, "  authenticated, so every one of them will be ignored");
+  }
   if (this->encryption_enabled_) {
     ESP_LOGCONFIG(TAG, "  Rolling code: %u", static_cast<unsigned>(this->rolling_code_));
   }
@@ -258,9 +261,7 @@ int16_t IOWNHomeControlComponent::set_packet_length_(uint8_t len) {
 }
 
 uint16_t IOWNHomeControlComponent::compute_crc(const uint8_t *data, size_t len) {
-  // The implementation lives in iohc_protocol.h, which has no dependencies and
-  // is therefore buildable by test/test_esphome_crypto on the host.
-  return iohc_compute_crc(data, len);
+  return iohome::crypto::compute_crc16(data, len);
 }
 
 uint16_t IOWNHomeControlComponent::main_param_from_percent_closed(uint8_t percent_closed) {
@@ -330,41 +331,11 @@ uint16_t IOWNHomeControlComponent::consume_rolling_code_() {
 
 bool IOWNHomeControlComponent::compute_hmac_(const uint8_t *frame_data, size_t data_len,
                                              const uint8_t rolling_code[2], uint8_t hmac_out[6]) {
-#if defined(USE_ESP32)
-  // The initial value is built in iohc_protocol.h so the host test can check it
-  // against src/protocol/ and against the captures in docs/. Only the AES block
-  // itself needs mbedTLS, which is why it stays here.
-  uint8_t iv[IOHC_IV_SIZE];
-  iohc_build_iv_1w(frame_data, data_len, rolling_code, iv);
-
-  mbedtls_aes_context aes;
-  mbedtls_aes_init(&aes);
-  if (mbedtls_aes_setkey_enc(&aes, this->system_key_, 128) != 0) {
-    mbedtls_aes_free(&aes);
-    return false;
-  }
-  uint8_t encrypted[16];
-  if (mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, iv, encrypted) != 0) {
-    mbedtls_aes_free(&aes);
-    return false;
-  }
-  mbedtls_aes_free(&aes);
-
-  // Truncate to 6 bytes
-  memcpy(hmac_out, encrypted, 6);
-
-  // Do not leave key-derived material on the stack.
-  memset(encrypted, 0, sizeof(encrypted));
-  memset(iv, 0, sizeof(iv));
-  return true;
-#else
-  ESP_LOGE(TAG, "Encryption requires ESP32 (mbedTLS not available)");
-  (void) frame_data;
-  (void) data_len;
-  (void) rolling_code;
-  (void) hmac_out;
-  return false;
-#endif
+  // This was sixty lines of initial-value construction and mbedTLS calls,
+  // duplicating src/protocol/iohome_crypto.cpp. The protocol layer is compiled
+  // into the component now, so there is nothing left to duplicate.
+  return iohome::crypto::create_1w_hmac(frame_data, data_len, rolling_code, this->system_key_,
+                                        hmac_out);
 }
 
 void IOWNHomeControlComponent::receive_frame_() {
@@ -459,7 +430,35 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   }
 #endif
 
+  // Authenticate before anything is allowed to act on this frame.
+  //
+  // `position_feedback` used to apply whatever position a frame claimed, with
+  // no check at all: anyone within radio range could park a cover's reported
+  // state wherever they liked, and a recording of a genuine "closed" report
+  // replayed forever. The MAC and the rolling code are what stop that, and the
+  // protocol layer already knows how to check both.
+  bool authenticated = false;
+  iohome::frame::IoFrame parsed;
+  if (iohome::frame::parse_frame(data, frame_len, &parsed) && parsed.authenticated) {
+    if (!this->system_key_set_) {
+      ESP_LOGD(TAG, "Frame carries a MAC but no system_key is configured");
+    } else if (!iohome::frame::validate_frame(&parsed, this->system_key_)) {
+      ESP_LOGW(TAG, "MAC verification failed for frame from 0x%06X",
+               static_cast<unsigned int>(src_addr));
+      this->mac_errors_++;
+    } else if (parsed.is_1w_mode &&
+               !this->replay_guard_.accept(parsed.src_node,
+                                           iohome::frame::get_rolling_code(&parsed))) {
+      ESP_LOGW(TAG, "Replayed rolling code from 0x%06X",
+               static_cast<unsigned int>(src_addr));
+      this->replay_errors_++;
+    } else {
+      authenticated = true;
+    }
+  }
+
   ReceivedFrame frame{};
+  frame.authenticated = authenticated;
   frame.ctrl0 = ctrl0;
   frame.ctrl1 = ctrl1;
   frame.dest_address = dest_addr;
@@ -502,6 +501,16 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
 
 void IOWNHomeControlComponent::dispatch_to_covers_(const ReceivedFrame &frame) {
   if (!this->position_feedback_) {
+    return;
+  }
+
+  // An unauthenticated frame may be logged; it may not move a cover's state.
+  // Without this, anyone in radio range could park a cover wherever they liked
+  // - and a recording of a genuine report would keep working forever, because
+  // nothing checked the rolling code either.
+  if (!frame.authenticated) {
+    ESP_LOGD(TAG, "Ignoring unauthenticated position report from 0x%06X",
+             static_cast<unsigned int>(frame.src_address));
     return;
   }
 

@@ -34,11 +34,6 @@ CXXFLAGS=(
   "-I${REPO_ROOT}/tools/unity_min"
   # RadioLib mock, so IoHomeControl can be built and tested on the host.
   "-I${REPO_ROOT}/test/mocks"
-  # The ESPHome component keeps its own copy of the CRC and the MAC's initial
-  # value, because an external_components directory has to be self-contained.
-  # test_esphome_crypto builds that copy here and checks it against
-  # src/protocol/, so the two cannot drift apart unnoticed.
-  "-I${REPO_ROOT}/esphome/components/iown_homecontrol"
 )
 
 mkdir -p "${BUILD_DIR}"

@@ -32,8 +32,15 @@
 #include <SPI.h>
 #include <vector>
 
-// CRC and MAC initial value. Dependency-free on purpose - see the header.
-#include "iohc_protocol.h"
+// The protocol layer, copied verbatim from src/protocol/ by
+// tools/sync_esphome_protocol.py. See PROTOCOL-COPY.md.
+//
+// The component used to carry its own CRC and MAC construction because it
+// could not reach src/protocol/. It no longer has to: there is one
+// implementation, and a copy of it that CI keeps identical.
+#include "iohome_crypto.h"
+#include "iohome_frame.h"
+#include "iohome_replay_guard.h"
 
 namespace esphome {
 namespace iown_homecontrol {
@@ -109,6 +116,9 @@ class IOWNCover;
  * @brief A received io-homecontrol frame, already validated.
  */
 struct ReceivedFrame {
+  /// True when the frame carried a MAC this component verified against the
+  /// system key. Anything that acts on a frame must check this first.
+  bool authenticated;
   uint8_t ctrl0;
   uint8_t ctrl1;
   uint32_t dest_address;
@@ -179,6 +189,10 @@ class IOWNHomeControlComponent : public Component {
 
   /** Number of frames dropped because the CRC did not match. */
   uint32_t crc_errors() const { return this->crc_errors_; }
+  /// Frames whose MAC did not verify against the configured system key.
+  uint32_t mac_errors() const { return this->mac_errors_; }
+  /// Authenticated frames whose rolling code had already been seen.
+  uint32_t replay_errors() const { return this->replay_errors_; }
 
   /** Rolling code that will be used for the next authenticated transmission. */
   uint16_t rolling_code() const { return this->rolling_code_; }
@@ -189,6 +203,11 @@ class IOWNHomeControlComponent : public Component {
   int dio0_pin_{-1};
   int dio1_pin_{-1};
   int busy_pin_{-1};
+
+  /// Rejects a replayed rolling code from a node we have already heard from.
+  /// Position reports are authenticated but not fresh without this: a recorded
+  /// "fully closed" frame replays perfectly.
+  iohome::ReplayGuard replay_guard_;
   int sck_pin_{-1};
   int mosi_pin_{-1};
   int miso_pin_{-1};
@@ -223,6 +242,8 @@ class IOWNHomeControlComponent : public Component {
   int16_t last_rssi_{0};
   uint32_t frames_received_{0};
   uint32_t crc_errors_{0};
+  uint32_t mac_errors_{0};
+  uint32_t replay_errors_{0};
 
   // Packet-ready flag, set from the radio interrupt and consumed in loop().
   //

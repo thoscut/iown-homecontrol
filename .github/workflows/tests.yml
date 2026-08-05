@@ -174,6 +174,15 @@ jobs:
           print('every tracked path is unique when lower-cased')
           "
 
+      - name: The ESPHome copy of the protocol layer is current
+        run: |
+          set -euo pipefail
+          # ESPHome compiles a component directory and nothing else, so the
+          # component carries a copy of src/protocol/. It used to carry a second
+          # *implementation* instead, which is how the 2W key transfer came to
+          # use an initial value neither peer computed.
+          python3 tools/sync_esphome_protocol.py --check
+
       - name: Frame parser self-test
         # Checks the decoder against the captures in docs/linklayer.md and
         # scripts/io-homecontrol.ksy: address order, the size-field bias, where

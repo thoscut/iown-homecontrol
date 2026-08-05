@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 205 host-run unit tests, and hardened against the receive
+`docs/`, covered by 199 host-run unit tests, and hardened against the receive
 path being attacker-controlled. What is *not* verified is behaviour against
 real hardware: nobody has yet confirmed that a physical actuator obeys a frame
 this library produces. Treat every "Complete" below as "complete and tested in
@@ -125,6 +125,8 @@ software".
 | V47 | Low | Repository | Three tracked Windows executables (1.7 MB) blocked addition to the Arduino Library Manager index. Removed; the directories they sat in now say what each tool was and where to fetch it. `arduino-lint --library-manager submit` reports no errors or warnings. |
 | V48 | Medium | `IoHomeControl` (K5) | The packet-length hook had to be installed with a lambda that casts `void*` back to the concrete radio type, naming that type twice; getting the cast wrong is undefined behaviour that compiles cleanly. `use_radio_packet_length(radio)` deduces it instead. |
 | V49 | Low | Legacy helpers (K8) | `src/esp32_utils.cpp` and `src/iown_mac.cpp` had no runtime coverage at all. Dropping an unused `<Arduino.h>` made them host-buildable, and `test_legacy_helpers` now checks the frame-length macros against the captures and the protocol layer, the broadcast address, and `iown_crc_calc()` over every length from 1 to 63. |
+| V50 | **High** | ESPHome component (K4) | `position_feedback` applied whatever position a frame claimed, with no check at all - anyone in radio range could park a cover's reported state wherever they liked, and a recording of a genuine report replayed forever. Frames are now verified against the system key and the rolling code before anything acts on them, using the protocol layer's own `validate_frame()` and `ReplayGuard`. |
+| V51 | Medium | ESPHome component (K6) | The component carried its own CRC and MAC construction because an `external_components` directory cannot reach `src/protocol/`. It no longer carries a second implementation: `tools/sync_esphome_protocol.py` copies the protocol layer in verbatim and CI fails if the copy drifts. ESPHome skips component subdirectories, so the copies sit alongside the component's own sources. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -133,8 +135,6 @@ software".
 | K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/`. | Follow [`docs/HARDWARE-BRINGUP.md`](docs/HARDWARE-BRINGUP.md), which lists the experiments that settle K2, K9 and the FP1 tilt direction |
 | K2 | Medium | `src/velux/` | `VELUX_CMD_*` (0x58-0x5D) are undocumented and unverified; they sit in the range the standard uses for naming/info commands. Marked UNVERIFIED in the header. | Confirm with a capture, or remove |
 | K3 | Medium | ESPHome component | The 2W challenge-response handshake is not wired in, so 2W frames are sent unauthenticated. | Port `AuthenticationManager` into the component |
-| K4 | Medium | ESPHome component | `position_feedback` accepts unauthenticated position reports. Off by default, marked experimental. | Verify the MAC before applying |
-| K6 | Low | ESPHome component | Duplicates the CRC and MAC implementation from `src/protocol/` so the component stays self-contained for `external_components`. The duplicate now lives in a dependency-free header and `test_esphome_crypto` proves it agrees byte for byte, so this is a maintenance cost rather than a correctness risk. | Share the sources via a build-time copy |
 | K7 | Low | Logging | Still printf-style rather than structured. | Consider structured logging |
 | K8 | Low | `src/esp32_api_spi.cpp` | The SPI register helpers still have no runtime coverage - they need an ESP-IDF SPI host, so a host test cannot reach them. Everything else in the legacy layer is now tested (`test_legacy_helpers`). | Exercise on hardware, or remove |
 | K9 | **High** | `IoHomeControl::pair_device_2w` | Sends the 0x32 key transfer on its own. The documented exchange also has the controller send a 0x3c challenge request carrying the challenge, so the device knows which one to build its IV from. Pairing therefore works only against a device that already holds that challenge. | Send the 0x3c step, or drive pairing from a received 0x31 |

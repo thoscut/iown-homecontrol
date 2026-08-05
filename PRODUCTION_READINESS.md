@@ -122,6 +122,7 @@ software".
 | V44 | Medium | `library.properties`, `library.json` | The `url` and `homepage` fields pointed at `velocet.github.io/iown-homecontrol`, which 404s - the Pages site is not published. arduino-lint fetches that field, and a dead link blocks Library Manager submission. |
 | V45 | Low | `library.json` | Declared RadioLib as `^7.1.2` - a third declaration of the same dependency, at a third version, none of which matched. All three now name 7.7.1 and CI compares them. |
 | V46 | Low | `.github/workflows/arduino-lint.yml` | Disabled with `on: workflow_dispatch` and a "TODO Remove", like V15 - and configured with `library-manager: update`, which asserts the library is already in the index. It is not, so that mode could never have passed. Enabled with the specification rules; the library now has the `iown-homecontrol.h` the specification asks for. |
+| V47 | Low | Repository | Three tracked Windows executables (1.7 MB) blocked addition to the Arduino Library Manager index. Removed; the directories they sat in now say what each tool was and where to fetch it. `arduino-lint --library-manager submit` reports no errors or warnings. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -136,7 +137,6 @@ software".
 | K7 | Low | Logging | Still printf-style rather than structured. | Consider structured logging |
 | K8 | Low | `src/esp32_api*`, `src/iown_mac.cpp` | Older ESP32 helper layer, not covered by tests and not used by `IoHomeControl`. Its defects are fixed (V24, V25, V29) and the headers now compile as C in CI, but nothing exercises the SPI helpers at runtime. | Fold in or remove |
 | K9 | **High** | `IoHomeControl::pair_device_2w` | Sends the 0x32 key transfer on its own. The documented exchange also has the controller send a 0x3c challenge request carrying the challenge, so the device knows which one to build its IV from. Pairing therefore works only against a device that already holds that challenge. | Send the 0x3c step, or drive pairing from a received 0x31 |
-| K10 | Low | Repository | Three tracked `.exe` files (`docs/reference/SkitterIO/SomfyUsbGwSrv.exe`, `scripts/IDAPro/SVD/SVDConv.exe`, `scripts/LuaJIT/luajit-decompiler.exe`, 1.7 MB) block addition to the Arduino Library Manager index. They are third-party Windows tooling the reverse-engineering notes refer to, so removing them is a call for the maintainer. Until then `arduino-lint` runs with `library-manager: false`. | Decide whether the library should be listed |
 
 ### 🔒 Security Considerations
 

@@ -21,6 +21,11 @@ Use this PowerShell snippet afterwards to decompile the extracted files:
 
     gci -File -Filter "*.lua" |
         % { sleep -Milliseconds 250; .\luajit-decompiler.exe $_.FullName -s }
+
+luajit-decompiler.exe is not shipped with this repository - a tracked Windows
+executable blocks the library from the Arduino Library Manager index. Fetch a
+build from https://github.com/HansWessels/luajit-decompiler (or any LuaJIT 2.0
+bytecode decompiler) and put it next to the extracted files.
 """
 
 

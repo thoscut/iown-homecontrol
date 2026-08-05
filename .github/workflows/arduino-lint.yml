@@ -58,6 +58,8 @@ jobs:
           # strict - enforces best practices, above and beyond the minimum
           #          requirements for specification compliance.
           compliance: strict
-          # See the note at the top of this file for why this is not `submit`.
-          library-manager: false
+          # submit - also applies the rules for addition to the Library
+          #          Manager index. `update` asserts the library is already
+          #          listed, which it is not, so that mode could never pass.
+          library-manager: submit
           project-type: library

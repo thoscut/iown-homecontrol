@@ -70,3 +70,72 @@ jobs:
       - name: Compile example configuration
         working-directory: esphome
         run: esphome compile example.yaml
+
+      - name: Compile a cover-only 2W configuration
+        working-directory: esphome
+        # example.yaml uses both platforms, so it never noticed that the hub
+        # compiles iown_cover.cpp and iown_sensor.cpp unconditionally and those
+        # need the cover and sensor components loaded. A configuration with only
+        # one of them failed on a missing esphome/components/sensor/sensor.h.
+        #
+        # This also compiles the 2W path, which example.yaml does not reach.
+        run: |
+          set -euo pipefail
+          cat > cover-only.yaml <<'EOF'
+          esphome:
+            name: cover-only
+          esp32:
+            board: esp32dev
+            framework:
+              type: arduino
+          logger:
+          external_components:
+            - source:
+                type: local
+                path: components
+          iown_homecontrol:
+            id: hub
+            cs_pin: 18
+            rst_pin: 14
+            dio0_pin: 26
+            dio1_pin: 33
+            two_way: true
+            position_feedback: true
+            system_key: !secret iohc_system_key
+          cover:
+            - platform: iown_homecontrol
+              iown_homecontrol_id: hub
+              name: "Cover"
+              target_address: 0x708758
+          EOF
+          esphome compile cover-only.yaml
+
+      - name: Compile a sensor-only configuration
+        working-directory: esphome
+        run: |
+          set -euo pipefail
+          cat > sensor-only.yaml <<'EOF'
+          esphome:
+            name: sensor-only
+          esp32:
+            board: esp32dev
+            framework:
+              type: arduino
+          logger:
+          external_components:
+            - source:
+                type: local
+                path: components
+          iown_homecontrol:
+            id: hub
+            cs_pin: 18
+            rst_pin: 14
+            dio0_pin: 26
+            dio1_pin: 33
+          sensor:
+            - platform: iown_homecontrol
+              iown_homecontrol_id: hub
+              rssi:
+                name: "RSSI"
+          EOF
+          esphome compile sensor-only.yaml

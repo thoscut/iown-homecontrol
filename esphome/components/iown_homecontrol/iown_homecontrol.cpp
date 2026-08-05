@@ -137,6 +137,7 @@ void IOWNHomeControlComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Frequency: %.2f MHz", this->frequency_);
   ESP_LOGCONFIG(TAG, "  Radio Type: %s", this->radio_type_ == RADIO_SX1276 ? "SX1276" : "SX1262");
   ESP_LOGCONFIG(TAG, "  Source Address: 0x%06X", static_cast<unsigned int>(this->source_address_));
+  ESP_LOGCONFIG(TAG, "  Mode: %s", this->two_way_ ? "2W (challenge-response)" : "1W (rolling code)");
   ESP_LOGCONFIG(TAG, "  Encryption: %s", this->encryption_enabled_ ? "enabled" : "disabled");
   ESP_LOGCONFIG(TAG, "  ACEI: 0x%02X", this->acei_);
   ESP_LOGCONFIG(TAG, "  Originator: 0x%02X", this->originator_);
@@ -289,6 +290,8 @@ void IOWNHomeControlComponent::set_system_key(const std::vector<uint8_t> &key) {
   }
   memcpy(this->system_key_, key.data(), sizeof(this->system_key_));
   this->system_key_set_ = true;
+  // The authentication manager needs the key before any handshake starts.
+  this->auth_.begin(this->system_key_);
 }
 
 void IOWNHomeControlComponent::restore_rolling_code_() {
@@ -336,6 +339,133 @@ bool IOWNHomeControlComponent::compute_hmac_(const uint8_t *frame_data, size_t d
   // into the component now, so there is nothing left to duplicate.
   return iohome::crypto::create_1w_hmac(frame_data, data_len, rolling_code, this->system_key_,
                                         hmac_out);
+}
+
+// ---------------------------------------------------------------------------
+// 2W challenge-response
+//
+// A 1W frame proves itself with a rolling code, which a receiver can only
+// check if it already knows where the counter stands. 2W instead binds each
+// MAC to a nonce the *receiver* chose moments earlier, so a recorded frame is
+// worthless the instant the session ends.
+//
+// The exchange is: we send command 0x3C carrying a random challenge, the peer
+// answers 0x3D with a MAC over it, and from then until the session times out
+// every command we send is MAC'd against that same challenge.
+// ---------------------------------------------------------------------------
+
+bool IOWNHomeControlComponent::send_protocol_frame_(const iohome::frame::IoFrame *frame) {
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(frame, buffer, sizeof(buffer));
+  if (len == 0) {
+    ESP_LOGE(TAG, "Frame did not serialize");
+    return false;
+  }
+  return this->send_frame(buffer, len);
+}
+
+bool IOWNHomeControlComponent::is_2w_authenticated() {
+  return this->two_way_ && this->auth_.is_authenticated(millis());
+}
+
+bool IOWNHomeControlComponent::ensure_2w_session_(uint32_t target_address) {
+  const uint32_t now = millis();
+
+  if (this->auth_.is_authenticated(now)) {
+    return true;
+  }
+
+  if (this->auth_.get_state(now) == iohome::mode2w::ChallengeState::CHALLENGE_SENT) {
+    // A request is already in flight. Saying so beats sending a second one and
+    // invalidating the challenge the peer is answering.
+    ESP_LOGD(TAG, "2W handshake in progress, command not sent");
+    return false;
+  }
+
+  uint8_t dest[iohome::NODE_ID_SIZE];
+  uint8_t src[iohome::NODE_ID_SIZE];
+  address_to_node(target_address, dest);
+  address_to_node(this->source_address_, src);
+
+  iohome::frame::IoFrame request;
+  if (!this->auth_.create_challenge_request(&request, dest, src, now)) {
+    // The only way this fails with valid arguments is no secure random source,
+    // and a predictable challenge is worse than no session at all.
+    ESP_LOGE(TAG, "Could not create a 2W challenge - no secure random source?");
+    return false;
+  }
+
+  ESP_LOGI(TAG, "2W: challenging 0x%06X", static_cast<unsigned int>(target_address));
+  this->send_protocol_frame_(&request);
+  return false;
+}
+
+bool IOWNHomeControlComponent::send_2w_command_(uint32_t target_address, uint16_t main_param,
+                                                uint8_t fp1, uint8_t fp2) {
+  if (!this->ensure_2w_session_(target_address)) {
+    return false;
+  }
+
+  uint8_t dest[iohome::NODE_ID_SIZE];
+  uint8_t src[iohome::NODE_ID_SIZE];
+  address_to_node(target_address, dest);
+  address_to_node(this->source_address_, src);
+
+  iohome::frame::IoFrame frame;
+  iohome::frame::init_frame(&frame, false);  // 2W
+  iohome::frame::set_destination(&frame, dest);
+  iohome::frame::set_source(&frame, src);
+
+  if (!iohome::frame::set_execute_command(
+          &frame, main_param, static_cast<iohome::Originator>(this->originator_),
+          static_cast<uint8_t>(this->acei_ | IOHC_ACEI_VALID_MASK), fp1, fp2)) {
+    ESP_LOGE(TAG, "Rejected execute payload (ACEI 0x%02X?)", this->acei_);
+    return false;
+  }
+
+  // The MAC is bound to the challenge the peer chose, which is what makes a
+  // recorded 2W frame useless after the session ends.
+  if (!iohome::frame::finalize_frame(&frame, this->system_key_,
+                                     this->auth_.get_current_challenge())) {
+    ESP_LOGE(TAG, "Could not sign the 2W frame");
+    return false;
+  }
+
+  ESP_LOGD(TAG, "Sending 2W command: target=0x%06X main=0x%04X",
+           static_cast<unsigned int>(target_address), main_param);
+  return this->send_protocol_frame_(&frame);
+}
+
+void IOWNHomeControlComponent::handle_challenge_frame_(const iohome::frame::IoFrame *frame) {
+  const uint32_t now = millis();
+
+  if (frame->command_id == iohome::CMD_CHALLENGE_RESPONSE) {
+    if (this->auth_.verify_challenge_response(frame, now)) {
+      ESP_LOGI(TAG, "2W session authenticated");
+    } else {
+      ESP_LOGW(TAG, "2W challenge response rejected");
+      this->mac_errors_++;
+    }
+    return;
+  }
+
+  if (frame->command_id == iohome::CMD_CHALLENGE_REQUEST) {
+    // The peer is challenging us. Its nonce travels in the request's own
+    // payload - answering with a challenge of ours would prove nothing.
+    if (frame->data_len < iohome::HMAC_SIZE) {
+      ESP_LOGW(TAG, "Challenge request too short to carry a nonce");
+      return;
+    }
+
+    iohome::frame::IoFrame response;
+    if (!this->auth_.create_challenge_response(&response, frame->src_node, frame->dest_node,
+                                               frame->data)) {
+      ESP_LOGW(TAG, "Could not answer the peer's challenge");
+      return;
+    }
+    ESP_LOGI(TAG, "Answering a peer-initiated 2W challenge");
+    this->send_protocol_frame_(&response);
+  }
 }
 
 void IOWNHomeControlComponent::receive_frame_() {
@@ -455,6 +585,16 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
     } else {
       authenticated = true;
     }
+  }
+
+  // 0x3C / 0x3D drive the 2W session and are not covers' business.
+  if (this->two_way_ && (cmd == iohome::CMD_CHALLENGE_REQUEST ||
+                         cmd == iohome::CMD_CHALLENGE_RESPONSE)) {
+    iohome::frame::IoFrame challenge;
+    if (iohome::frame::parse_frame(data, frame_len, &challenge)) {
+      this->handle_challenge_frame_(&challenge);
+    }
+    return;
   }
 
   ReceivedFrame frame{};
@@ -583,6 +723,17 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address, uint8
   if (this->encryption_enabled_ && !this->system_key_set_) {
     ESP_LOGE(TAG, "Encryption enabled but no system key configured");
     return false;
+  }
+
+  // 2W authenticates against a nonce the peer chose, so it needs a handshake
+  // first and a completely different frame. The hand-rolled builder below is
+  // the 1W path; the protocol layer builds the 2W one.
+  if (this->two_way_) {
+    if (command != IOHC_CMD_EXECUTE) {
+      ESP_LOGW(TAG, "Only command 0x00 is implemented for 2W");
+      return false;
+    }
+    return this->send_2w_command_(target_address, main_param, fp1, fp2);
   }
 
   /*

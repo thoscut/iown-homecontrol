@@ -6,9 +6,9 @@ Somfy, Velux, and other smart home devices in the 868 MHz band.
 It uses RadioLib for radio abstraction and supports SX1276/SX1262 radio modules
 commonly found on LoRa32 boards (Heltec, LilyGo, etc.).
 
-Note: This component is experimental. Frame reception, 1W authenticated cover
-commands and plain 2W commands are supported; the 2W challenge-response
-handshake is not yet wired into this component.
+Note: This component is experimental. It supports frame reception with MAC and
+replay checking, 1W authenticated cover commands, and 2W commands over a
+challenge-response session (`two_way: true`).
 """
 
 import esphome.codegen as cg
@@ -17,7 +17,14 @@ from esphome.const import CONF_ID
 
 CODEOWNERS = ["@thoscut"]
 DEPENDENCIES = []
-AUTO_LOAD = []
+
+# The hub compiles iown_cover.cpp and iown_sensor.cpp unconditionally - ESPHome
+# builds every source in a component directory - and those include
+# esphome/components/{cover,sensor}/*.h. Without this, a configuration that uses
+# only covers, or only sensors, fails with "esphome/components/sensor/sensor.h:
+# No such file or directory". The example config happens to use both, which is
+# why it never showed up.
+AUTO_LOAD = ["cover", "sensor"]
 MULTI_CONF = False
 
 iown_homecontrol_ns = cg.esphome_ns.namespace("iown_homecontrol")
@@ -47,6 +54,7 @@ CONF_ENCRYPTION_ENABLED = "encryption_enabled"
 CONF_ACEI = "acei"
 CONF_ORIGINATOR = "originator"
 CONF_POSITION_FEEDBACK = "position_feedback"
+CONF_TWO_WAY = "two_way"
 
 # The three io-homecontrol channels. 1W traffic only ever uses channel 2.
 IOHC_CHANNELS = (868.25, 868.95, 869.85)
@@ -178,6 +186,14 @@ def _validate_config(config):
     """Cross-field checks that a per-key validator cannot express."""
     _validate_radio_pins(config)
 
+    if config[CONF_TWO_WAY] and CONF_SYSTEM_KEY not in config:
+        raise cv.Invalid(
+            "two_way requires system_key: the challenge-response handshake "
+            "signs every frame with it, and without one no session can be "
+            "established at all",
+            path=[CONF_TWO_WAY],
+        )
+
     if config[CONF_ENCRYPTION_ENABLED] and CONF_SYSTEM_KEY not in config:
         raise cv.Invalid(
             "encryption_enabled requires system_key: authenticated 1W frames "
@@ -224,6 +240,10 @@ CONFIG_SCHEMA = cv.All(
                 ORIGINATORS, upper=True
             ),
             cv.Optional(CONF_POSITION_FEEDBACK, default=False): cv.boolean,
+            # 2W: every frame is signed against a nonce the actuator chose
+            # moments earlier, so a recorded frame stops working when the
+            # session ends. 1W relies on a rolling code instead.
+            cv.Optional(CONF_TWO_WAY, default=False): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_config,
@@ -247,6 +267,7 @@ async def to_code(config):
     cg.add(var.set_acei(config[CONF_ACEI]))
     cg.add(var.set_originator(config[CONF_ORIGINATOR]))
     cg.add(var.set_position_feedback(config[CONF_POSITION_FEEDBACK]))
+    cg.add(var.set_two_way(config[CONF_TWO_WAY]))
 
     if CONF_SCK_PIN in config:
         cg.add(var.set_sck_pin(config[CONF_SCK_PIN]))

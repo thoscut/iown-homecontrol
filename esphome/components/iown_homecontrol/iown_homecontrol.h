@@ -41,6 +41,7 @@
 #include "iohome_crypto.h"
 #include "iohome_frame.h"
 #include "iohome_replay_guard.h"
+#include "iohome_2w.h"
 
 namespace esphome {
 namespace iown_homecontrol {
@@ -162,6 +163,8 @@ class IOWNHomeControlComponent : public Component {
   void set_acei(uint8_t acei) { this->acei_ = acei; }
   void set_originator(uint8_t originator) { this->originator_ = originator; }
   void set_position_feedback(bool enabled) { this->position_feedback_ = enabled; }
+  /// Select 2W (challenge-response authenticated) instead of 1W.
+  void set_two_way(bool enabled) { this->two_way_ = enabled; }
 
   void register_cover(IOWNCover *cover) { this->covers_.push_back(cover); }
 
@@ -193,6 +196,8 @@ class IOWNHomeControlComponent : public Component {
   uint32_t mac_errors() const { return this->mac_errors_; }
   /// Authenticated frames whose rolling code had already been seen.
   uint32_t replay_errors() const { return this->replay_errors_; }
+  /// Whether a 2W session is currently authenticated. Always false in 1W mode.
+  bool is_2w_authenticated();
 
   /** Rolling code that will be used for the next authenticated transmission. */
   uint16_t rolling_code() const { return this->rolling_code_; }
@@ -208,6 +213,32 @@ class IOWNHomeControlComponent : public Component {
   /// Position reports are authenticated but not fresh without this: a recorded
   /// "fully closed" frame replays perfectly.
   iohome::ReplayGuard replay_guard_;
+
+  /// 2W challenge-response state. One session at a time, which is the same
+  /// simplification IoHomeControl makes: the challenge is a property of the
+  /// exchange, and a controller talks to one actuator at a time anyway.
+  iohome::mode2w::AuthenticationManager auth_;
+  bool two_way_{false};
+
+  /// Build a 3-byte node ID from the 24-bit address the configuration uses.
+  static void address_to_node(uint32_t address, uint8_t node[iohome::NODE_ID_SIZE]) {
+    node[0] = static_cast<uint8_t>((address >> 16) & 0xFF);
+    node[1] = static_cast<uint8_t>((address >> 8) & 0xFF);
+    node[2] = static_cast<uint8_t>(address & 0xFF);
+  }
+
+  /// Serialize and transmit a frame the protocol layer built.
+  bool send_protocol_frame_(const iohome::frame::IoFrame *frame);
+
+  /// Make sure a 2W session is authenticated, starting a handshake if not.
+  /// Returns false while the handshake is still in flight.
+  bool ensure_2w_session_(uint32_t target_address);
+
+  /// Send a command 0x00 over an authenticated 2W session.
+  bool send_2w_command_(uint32_t target_address, uint16_t main_param, uint8_t fp1, uint8_t fp2);
+
+  /// Handle 0x3C / 0x3D during reception.
+  void handle_challenge_frame_(const iohome::frame::IoFrame *frame);
   int sck_pin_{-1};
   int mosi_pin_{-1};
   int miso_pin_{-1};

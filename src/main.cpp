@@ -16,14 +16,14 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-#include <LoRa32.h>
 #include <RadioLib.h>
 
 #include "IoHomeControl.h"
+#include "board_pins.h"
 #include "protocol/iohome_nvs_store.h"
 
-// RadioLib: load the module using the LoRa32 board definitions.
-LORA32_RADIO radio = new Module(LORA32_SPI_CS, LORA32_RADIO_IO0, LORA32_RADIO_RST, LORA32_RADIO_IO1);
+// RadioLib: load the module using this board's pin map (src/board_pins.h).
+IOHC_RADIO_CLASS radio = IOHC_MAKE_RADIO();
 
 // RadioLib: common layer pointer shared with the protocol stack.
 PhysicalLayer* phy = static_cast<PhysicalLayer*>(&radio);
@@ -83,6 +83,10 @@ void setup() {
   delay(200);
 
   Serial.println(F("iown-homecontrol starting"));
+  Serial.println(F("board: " IOHC_BOARD_NAME));
+
+  // Bind SPI to the radio pins before RadioLib touches the bus.
+  iohc_board_spi_begin();
 
   int16_t state = radio.beginFSK();
   if (state != RADIOLIB_ERR_NONE) {

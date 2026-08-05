@@ -23,18 +23,27 @@
 
 #include <vector>
 
-#define RADIOLIB_ERR_NONE 0
+// Error codes, copied verbatim from RadioLib 7.x src/TypeDef.h.
+//
+// These MUST match the real values. An earlier version of this mock invented
+// RADIOLIB_ERR_INVALID_RADIO and got two other numbers wrong; the native build
+// happily compiled against it while the firmware build failed, which is the
+// whole failure mode a mock invites. tools/check_radiolib_mock.sh now compares
+// every RADIOLIB_* constant below against the pinned upstream header and fails
+// the test job on any drift. (It checks constants only - drift in the method
+// signatures further down is caught by the PlatformIO build, which compiles
+// IoHomeControl.cpp against the real PhysicalLayer.)
+#define RADIOLIB_ERR_NONE (0)
 #define RADIOLIB_ERR_UNKNOWN (-1)
-#define RADIOLIB_ERR_INVALID_RADIO (-2)
-#define RADIOLIB_ERR_CHIP_NOT_FOUND (-3)
+#define RADIOLIB_ERR_CHIP_NOT_FOUND (-2)
 #define RADIOLIB_ERR_PACKET_TOO_LONG (-4)
 #define RADIOLIB_ERR_TX_TIMEOUT (-5)
 #define RADIOLIB_ERR_RX_TIMEOUT (-6)
 #define RADIOLIB_ERR_INVALID_OUTPUT_POWER (-13)
-#define RADIOLIB_ERR_WRONG_MODEM (-19)
+#define RADIOLIB_ERR_WRONG_MODEM (-20)
 
-#define RADIOLIB_ENCODING_NRZ 0
-#define RADIOLIB_SHAPING_NONE 0
+#define RADIOLIB_ENCODING_NRZ (0x00)
+#define RADIOLIB_SHAPING_NONE (0x00)
 
 #define RADIOLIB_ASSERT(STATEVAR) \
   do {                            \

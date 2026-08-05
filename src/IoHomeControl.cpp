@@ -177,7 +177,7 @@ bool IoHomeControl::begin(
 int16_t IoHomeControl::configure_radio(float frequency) {
   if (radio_ == nullptr) {
     LOG_PRINT("Error: Radio not initialized");
-    return RADIOLIB_ERR_INVALID_RADIO;
+    return RADIOLIB_ERR_CHIP_NOT_FOUND;
   }
 
   LOG_PRINTF("Configuring radio on %.2f MHz\n", frequency);

@@ -14,13 +14,13 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <LoRa32.h>
 #include <RadioLib.h>
 
 #include <IoHome.h>
+#include <board_pins.h>
 
-// RadioLib: Load RadioLib module with help of the LoRa32 definitions
-LORA32_RADIO radio = new Module(LORA32_SPI_CS, LORA32_RADIO_IO0, LORA32_RADIO_RST, LORA32_RADIO_IO1);
+// RadioLib: load the module using this board's pin map (src/board_pins.h)
+IOHC_RADIO_CLASS radio = IOHC_MAKE_RADIO();
 
 // RadioLib: Get common layer pointer "phy"
 PhysicalLayer* phy = (PhysicalLayer*)&radio;
@@ -33,6 +33,8 @@ void setup() { // setup code to run once
   Serial.begin(115200);
 
   int state = 0;
+
+  iohc_board_spi_begin();
 
   state = radio.begin();
   if(state) {Serial.print(F("[RADIO] Init: "));Serial.println(state);while(true);}

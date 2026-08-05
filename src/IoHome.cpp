@@ -42,7 +42,7 @@ bool IoHomeNode::begin(const IoHomeChannel_t* chan,
 
 int16_t IoHomeNode::setPhyProperties() {
   if (phyLayer == nullptr) {
-    return RADIOLIB_ERR_INVALID_RADIO;
+    return RADIOLIB_ERR_CHIP_NOT_FOUND;
   }
 
   // Start at the highest power and step down until the module accepts a value.

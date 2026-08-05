@@ -16,12 +16,14 @@ on:
       - "src/**"
       - "test/**"
       - "tools/**"
+      - "platformio.ini"
       - ".github/workflows/tests.yml"
   pull_request:
     paths:
       - "src/**"
       - "test/**"
       - "tools/**"
+      - "platformio.ini"
       - ".github/workflows/tests.yml"
   workflow_dispatch:
 
@@ -81,3 +83,34 @@ jobs:
           # IoHomeControl needs a RadioLib header; the test mock provides one.
           echo "=== src/IoHomeControl.cpp"
           g++ "${FLAGS[@]}" -I test/mocks -c src/IoHomeControl.cpp -o /dev/null
+
+  radiolib-mock:
+    name: RadioLib mock matches upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # The native build compiles against test/mocks/RadioLib.h. A constant that
+    # exists only in the mock passes here and then breaks the firmware build
+    # minutes later - RADIOLIB_ERR_INVALID_RADIO did exactly that. Comparing
+    # the mock against the pinned upstream catches the drift in seconds.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch the pinned RadioLib
+        run: |
+          set -euo pipefail
+          # Read the pin from platformio.ini so the two cannot disagree.
+          version="$(sed -nE 's#.*jgromes/RadioLib@([0-9]+\.[0-9]+\.[0-9]+).*#\1#p' platformio.ini | head -1)"
+          if [ -z "${version}" ]; then
+            echo "could not read an exact RadioLib version from platformio.ini" >&2
+            exit 1
+          fi
+          echo "RadioLib pin: ${version}"
+          git clone --quiet --depth 1 --branch "${version}" \
+            https://github.com/jgromes/RadioLib.git "${RUNNER_TEMP}/RadioLib"
+          echo "RADIOLIB_DIR=${RUNNER_TEMP}/RadioLib" >> "${GITHUB_ENV}"
+
+      - name: Compare mock against upstream
+        run: ./tools/check_radiolib_mock.sh

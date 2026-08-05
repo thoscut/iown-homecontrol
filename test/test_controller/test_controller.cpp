@@ -616,6 +616,81 @@ void test_frequency_hopping_is_2w_only(void) {
   TEST_ASSERT_TRUE(controller_2w.enable_frequency_hopping(true));
 }
 
+// ---------------------------------------------------------------------------
+// Adversarial input
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Deterministic xorshift, so a failure is reproducible from the seed alone.
+uint32_t next_random(uint32_t &state) {
+  state ^= state << 13;
+  state ^= state >> 17;
+  state ^= state << 5;
+  return state;
+}
+
+}  // namespace
+
+void test_survives_arbitrary_radio_input(void) {
+  // Everything the receive path sees is attacker controlled: anyone can
+  // transmit on 868 MHz. Feed it garbage of every length and make sure it
+  // neither accepts a frame nor trips a sanitizer.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+  controller.start_receive();
+
+  uint32_t state = 0x1A380B01;
+  iohome::frame::IoFrame frame;
+
+  for (int round = 0; round < 4000; round++) {
+    uint8_t buffer[iohome::FRAME_MAX_SIZE];
+    const size_t len = 1 + (next_random(state) % sizeof(buffer));
+
+    for (size_t i = 0; i < len; i++) {
+      buffer[i] = static_cast<uint8_t>(next_random(state) & 0xFF);
+    }
+
+    radio.deliver(buffer, len);
+    // Random bytes should never pass CRC, MAC and the replay check. If one
+    // ever did, that is a 1-in-2^64 fluke or a real hole.
+    TEST_ASSERT_FALSE(controller.check_received(&frame));
+  }
+
+  TEST_ASSERT_EQUAL_UINT32(0, controller.rx_stats().accepted);
+}
+
+void test_survives_corrupted_valid_frames(void) {
+  // Bit flips in an otherwise well-formed frame are the more interesting case:
+  // they get much further into the parser than random noise does.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+  controller.set_accept_plain_frames(true);  // exercise the widest path
+  controller.start_receive();
+
+  const std::vector<uint8_t> valid =
+      make_frame(iohome::CMD_EXECUTE, iohome::MP_CLOSE, 1, SYSTEM_KEY);
+
+  iohome::frame::IoFrame frame;
+  uint32_t state = 0xC0FFEE01;
+
+  for (int round = 0; round < 3000; round++) {
+    std::vector<uint8_t> corrupted = valid;
+
+    const int flips = 1 + static_cast<int>(next_random(state) % 4);
+    for (int i = 0; i < flips; i++) {
+      const size_t index = next_random(state) % corrupted.size();
+      corrupted[index] ^= static_cast<uint8_t>(1u << (next_random(state) % 8));
+    }
+
+    radio.deliver(corrupted.data(), corrupted.size());
+    // Whatever the verdict, it must not crash or read out of bounds.
+    controller.check_received(&frame);
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
 
@@ -653,6 +728,9 @@ int main(int, char**) {
   RUN_TEST(test_discovery_transmits_request);
 
   RUN_TEST(test_frequency_hopping_is_2w_only);
+
+  RUN_TEST(test_survives_arbitrary_radio_input);
+  RUN_TEST(test_survives_corrupted_valid_frames);
 
   return UNITY_END();
 }

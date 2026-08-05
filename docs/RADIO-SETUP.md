@@ -104,6 +104,22 @@ trailing bytes are uninitialised memory.
 The ESPHome component holds the concrete radio pointer itself and does this
 internally; nothing is required of the YAML.
 
+### Why the receive length stays at the maximum
+
+In fixed-length mode the radio does not signal a packet until it has collected
+exactly the programmed number of bytes. A 25-byte frame therefore only
+completes once nine further bytes have been sampled - the next frame's
+preamble, or plain noise. That is deliberate: the parser takes the real length
+from Control Byte 0 and ignores whatever trails it.
+
+The cost is about 1.9 ms of extra latency at 38.4 kbps, and it is why the
+parser must never trust the byte count the radio reports over the length field
+in the frame itself.
+
+Variable-length mode is not an option. RadioLib would read the first byte after
+the sync word as a length, and that byte is Control Byte 0 - whose value is
+order, mode and size packed together, not a byte count.
+
 ---
 
 ## Reception

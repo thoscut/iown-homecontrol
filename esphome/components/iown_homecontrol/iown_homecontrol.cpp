@@ -192,6 +192,13 @@ int16_t IOWNHomeControlComponent::configure_packet_format_() {
   // io-homecontrol frames carry their own length (Control Byte 0) and their own
   // CRC. RadioLib's FSK defaults would prepend a length byte and append a
   // second CRC, corrupting every frame in both directions.
+  //
+  // Receive stays at the maximum frame size. In fixed-length mode the radio
+  // only signals a packet once it has collected that many bytes, so a shorter
+  // frame completes after a few more bytes of the next preamble or of noise;
+  // parse_frame_() takes the real length from Control Byte 0 and ignores the
+  // rest. Variable-length mode cannot work here - RadioLib would read Control
+  // Byte 0 as a byte count, and it is not one. See docs/RADIO-SETUP.md.
   int16_t state = RADIOLIB_ERR_NONE;
 
   if (this->sx1276_ != nullptr) {
@@ -428,7 +435,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
     return;
   }
 
-  // Fixed-length receive mode delivers trailing padding; trust the length field.
+  // Fixed-length receive mode delivers trailing bytes past the frame, so every
+  // field below is taken relative to frame_len, never to the received count.
   const uint32_t dest_addr =
       (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 8) | data[4];
   const uint32_t src_addr =

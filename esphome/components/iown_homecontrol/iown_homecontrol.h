@@ -227,6 +227,10 @@ class IOWNHomeControlComponent : public Component {
     node[2] = static_cast<uint8_t>(address & 0xFF);
   }
 
+  /// Whether an authenticated frame is also *fresh*, by whichever mechanism
+  /// its mode carries. A valid MAC proves authorship, never freshness.
+  bool frame_is_fresh_(const iohome::frame::IoFrame &frame);
+
   /// Serialize and transmit a frame the protocol layer built.
   bool send_protocol_frame_(const iohome::frame::IoFrame *frame);
 

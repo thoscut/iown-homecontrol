@@ -354,6 +354,21 @@ bool IOWNHomeControlComponent::compute_hmac_(const uint8_t *frame_data, size_t d
 // every command we send is MAC'd against that same challenge.
 // ---------------------------------------------------------------------------
 
+bool IOWNHomeControlComponent::frame_is_fresh_(const iohome::frame::IoFrame &frame) {
+  if (frame.is_1w_mode) {
+    return this->replay_guard_.accept(frame.src_node, iohome::frame::get_rolling_code(&frame));
+  }
+
+  // 2W frames carry no sequence number, so the rolling-code check has nothing
+  // to work with - and the component used to simply skip the check for them.
+  // A 2W position report was therefore authenticated but never fresh: record
+  // one and re-transmit it, and it was applied again every time, for as long
+  // as the session lasted. Freshness here comes from the session challenge,
+  // which signs several frames, so what is left to catch is a MAC this node
+  // produced recently - a protocol repeat to act on once, or a replay.
+  return this->replay_guard_.accept_mac(frame.src_node, frame.hmac);
+}
+
 bool IOWNHomeControlComponent::send_protocol_frame_(const iohome::frame::IoFrame *frame) {
   uint8_t buffer[iohome::FRAME_MAX_SIZE];
   const size_t len = iohome::frame::serialize_frame(frame, buffer, sizeof(buffer));
@@ -628,11 +643,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
       ESP_LOGW(TAG, "MAC verification failed for frame from 0x%06X",
                static_cast<unsigned int>(src_addr));
       this->mac_errors_++;
-    } else if (parsed.is_1w_mode &&
-               !this->replay_guard_.accept(parsed.src_node,
-                                           iohome::frame::get_rolling_code(&parsed))) {
-      ESP_LOGW(TAG, "Replayed rolling code from 0x%06X",
-               static_cast<unsigned int>(src_addr));
+    } else if (!this->frame_is_fresh_(parsed)) {
+      ESP_LOGW(TAG, "Replayed frame from 0x%06X", static_cast<unsigned int>(src_addr));
       this->replay_errors_++;
     } else {
       authenticated = true;

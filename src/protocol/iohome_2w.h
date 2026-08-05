@@ -457,6 +457,18 @@ public:
   /**
    * @brief Create a 2W key transfer frame (command 0x32)
    *
+   * The key is masked with an IV derived from the frame that requested the
+   * transfer, not from the challenge alone - see crypto::encrypt_2w_key(). The
+   * peer builds the same IV from the frame it sent, so passing the wrong one
+   * hands it a key that decrypts to noise.
+   *
+   * For the push direction documented in docs/linklayer.md the requesting frame
+   * is the device's command 0x31 (ask challenge), i.e. a single byte with no
+   * parameters. For a pull it is the controller's 0x38 (launch key transfer)
+   * together with its challenge.
+   *
+   * @param request_frame_data Requesting frame: command ID plus parameters
+   * @param request_data_len Length of @p request_frame_data
    * @return true on success
    */
   bool create_key_transfer_2w(
@@ -464,7 +476,9 @@ public:
     const uint8_t dest_node[NODE_ID_SIZE],
     const uint8_t src_node[NODE_ID_SIZE],
     const uint8_t system_key[AES_KEY_SIZE],
-    const uint8_t challenge[HMAC_SIZE]
+    const uint8_t challenge[HMAC_SIZE],
+    const uint8_t* request_frame_data,
+    size_t request_data_len
   );
 
   /**

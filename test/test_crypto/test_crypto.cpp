@@ -331,16 +331,90 @@ void test_1w_key_masking_is_node_specific(void) {
     TEST_ASSERT_FALSE(memcmp(out_a, out_b, 16) == 0);
 }
 
-void test_2w_key_masking_roundtrip(void) {
+void test_2w_key_masking_matches_documented_capture(void) {
+    // docs/linklayer.md, "2-way device key pull":
+    //
+    //   4E 04 FEEFEE F00F00 38 123456789ABC 23B6      <- launch key transfer
+    //   18 04 F00F00 FEEFEE 32 EA425A7A182885D4EAEEFD416D625E01 6379
+    //
+    // with the device key ABCDEF01020304050607080910111213. The mask is built
+    // from the *requesting* frame (0x38 and its challenge), not from the
+    // challenge alone.
+    //
+    // This is the check that matters: a round-trip through our own encrypt and
+    // decrypt passes no matter what IV they agree on, and it did pass while the
+    // IV was wrong in both directions. Only a captured value catches that.
+    const uint8_t device_key[16] = {0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                    0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13};
+    const uint8_t challenge[6] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+    const uint8_t request[7] = {iohome::CMD_LAUNCH_KEY_TRANSFER,
+                                0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+    const uint8_t expected[16] = {0xEA, 0x42, 0x5A, 0x7A, 0x18, 0x28, 0x85, 0xD4,
+                                  0xEA, 0xEE, 0xFD, 0x41, 0x6D, 0x62, 0x5E, 0x01};
+
+    uint8_t encrypted[16];
+    TEST_ASSERT_TRUE(crypto::encrypt_2w_key(device_key, request, sizeof(request),
+                                            challenge, encrypted));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, encrypted, 16);
+
+    uint8_t recovered[16];
+    TEST_ASSERT_TRUE(crypto::decrypt_2w_key(expected, request, sizeof(request),
+                                            challenge, recovered));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(device_key, recovered, 16);
+}
+
+void test_2w_key_mask_is_bound_to_the_requesting_frame(void) {
     const uint8_t system_key[16] = {0xDE, 0xAD, 0xBE, 0xEF};
     const uint8_t challenge[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
 
-    uint8_t encrypted[16];
-    TEST_ASSERT_TRUE(crypto::encrypt_2w_key(system_key, challenge, encrypted));
+    const uint8_t ask[1] = {iohome::CMD_ASK_CHALLENGE};
+    const uint8_t launch[7] = {iohome::CMD_LAUNCH_KEY_TRANSFER, 1, 2, 3, 4, 5, 6};
 
+    uint8_t from_ask[16], from_launch[16];
+    TEST_ASSERT_TRUE(crypto::encrypt_2w_key(system_key, ask, sizeof(ask),
+                                            challenge, from_ask));
+    TEST_ASSERT_TRUE(crypto::encrypt_2w_key(system_key, launch, sizeof(launch),
+                                            challenge, from_launch));
+    TEST_ASSERT_FALSE(memcmp(from_ask, from_launch, 16) == 0);
+
+    // A different challenge with the same requesting frame must also differ.
+    const uint8_t other_challenge[6] = {0x09, 0x08, 0x07, 0x06, 0x05, 0x04};
+    uint8_t other[16];
+    TEST_ASSERT_TRUE(crypto::encrypt_2w_key(system_key, ask, sizeof(ask),
+                                            other_challenge, other));
+    TEST_ASSERT_FALSE(memcmp(from_ask, other, 16) == 0);
+
+    // Masking is an involution, so decrypt undoes encrypt for the same inputs.
     uint8_t recovered[16];
-    TEST_ASSERT_TRUE(crypto::decrypt_2w_key(encrypted, challenge, recovered));
+    TEST_ASSERT_TRUE(crypto::decrypt_2w_key(from_ask, ask, sizeof(ask),
+                                            challenge, recovered));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(system_key, recovered, 16);
+}
+
+void test_1w_key_masking_matches_documented_vector(void) {
+    // scripts/Iown-ioCrypto.py demo, cross-checked against this implementation:
+    // node ABCDEF, controller key 01020304050607080910111213141516.
+    const uint8_t node[3] = {0xAB, 0xCD, 0xEF};
+    const uint8_t key[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                             0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+    const uint8_t expected[16] = {0x7E, 0x60, 0x49, 0x1F, 0x97, 0x6A, 0xDF, 0x65,
+                                  0x3D, 0xB0, 0xED, 0x78, 0x5E, 0x49, 0xA2, 0x01};
+
+    uint8_t encrypted[16];
+    TEST_ASSERT_TRUE(crypto::encrypt_1w_key(key, node, encrypted));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, encrypted, 16);
+
+    // The 1W MAC over the resulting 0x30 frame, sequence 0x1234.
+    uint8_t frame_data[17];
+    frame_data[0] = iohome::CMD_SEND_1W_KEY;
+    memcpy(&frame_data[1], encrypted, 16);
+    const uint8_t sequence[2] = {0x12, 0x34};
+    const uint8_t expected_mac[6] = {0x19, 0xE8, 0x1E, 0xC4, 0x3D, 0x5E};
+
+    uint8_t mac[6];
+    TEST_ASSERT_TRUE(crypto::create_1w_hmac(frame_data, sizeof(frame_data),
+                                            sequence, key, mac));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_mac, mac, 6);
 }
 
 void test_key_masking_rejects_nullptr(void) {
@@ -352,8 +426,14 @@ void test_key_masking_rejects_nullptr(void) {
     TEST_ASSERT_FALSE(crypto::encrypt_1w_key(nullptr, node, out));
     TEST_ASSERT_FALSE(crypto::encrypt_1w_key(key, nullptr, out));
     TEST_ASSERT_FALSE(crypto::encrypt_1w_key(key, node, nullptr));
-    TEST_ASSERT_FALSE(crypto::encrypt_2w_key(nullptr, challenge, out));
-    TEST_ASSERT_FALSE(crypto::encrypt_2w_key(key, nullptr, out));
+    const uint8_t request[1] = {iohome::CMD_ASK_CHALLENGE};
+    TEST_ASSERT_FALSE(crypto::encrypt_2w_key(nullptr, request, sizeof(request),
+                                             challenge, out));
+    TEST_ASSERT_FALSE(crypto::encrypt_2w_key(key, request, sizeof(request),
+                                             nullptr, out));
+    TEST_ASSERT_FALSE(crypto::encrypt_2w_key(key, nullptr, sizeof(request),
+                                             challenge, out));
+    TEST_ASSERT_FALSE(crypto::encrypt_2w_key(key, request, 0, challenge, out));
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +535,9 @@ int main(int, char **) {
 
     RUN_TEST(test_1w_key_masking_roundtrip);
     RUN_TEST(test_1w_key_masking_is_node_specific);
-    RUN_TEST(test_2w_key_masking_roundtrip);
+    RUN_TEST(test_2w_key_masking_matches_documented_capture);
+    RUN_TEST(test_2w_key_mask_is_bound_to_the_requesting_frame);
+    RUN_TEST(test_1w_key_masking_matches_documented_vector);
     RUN_TEST(test_key_masking_rejects_nullptr);
 
     RUN_TEST(test_constant_time_equal);

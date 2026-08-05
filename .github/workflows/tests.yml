@@ -127,6 +127,31 @@ jobs:
           gcc -std=c11 -Wall -Wextra -Werror -I include -c /tmp/c_assert.c -o /dev/null
           echo "frame length macros agree with the captures"
 
+  scripts:
+    name: Analysis scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile every script
+        run: python3 -m compileall -q scripts
+
+      - name: Frame parser self-test
+        # Checks the decoder against the captures in docs/linklayer.md and
+        # scripts/io-homecontrol.ksy: address order, the size-field bias, where
+        # the authentication trailer starts and the CRC. The script had never
+        # run at all - it imported a module name that cannot exist, because the
+        # file it wanted is called Iown-ioCrypto.py.
+        run: python3 scripts/Iown-IoHexFrameParser.py --self-test
+
   radiolib-mock:
     name: RadioLib mock matches upstream
     runs-on: ubuntu-latest

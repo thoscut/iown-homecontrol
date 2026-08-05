@@ -235,13 +235,31 @@ bool decrypt_1w_key(
 /**
  * @brief Encrypt system key for 2-Way mode transfer
  *
+ * The key is masked with AES-128(TRANSFER_KEY, IV), where the IV is the
+ * ordinary 2W one: it is built from the frame that *requested* the transfer,
+ * not from the challenge alone. docs/linklayer.md: "The initial value is always
+ * created using data from the requesting command."
+ *
+ * In practice @p request_frame_data is the command 0x38 (launch key transfer)
+ * frame with its challenge, or the command 0x31 (ask challenge) frame - the
+ * command byte followed by its parameters, exactly as create_2w_hmac() takes
+ * it. Both peers must use the same frame or the masks differ and the key comes
+ * out as noise.
+ *
+ * TRANSFER_KEY is a public protocol constant, so this is obfuscation only; see
+ * docs/SECURITY-MODEL.md.
+ *
  * @param system_key System key to encrypt (16 bytes)
+ * @param request_frame_data Requesting frame: command ID plus parameters
+ * @param request_data_len Length of @p request_frame_data
  * @param challenge Challenge bytes (6 bytes)
  * @param encrypted_out Output buffer (16 bytes)
  * @return true on success, false on error
  */
 bool encrypt_2w_key(
   const uint8_t system_key[AES_KEY_SIZE],
+  const uint8_t* request_frame_data,
+  size_t request_data_len,
   const uint8_t challenge[HMAC_SIZE],
   uint8_t encrypted_out[AES_KEY_SIZE]
 );
@@ -250,12 +268,16 @@ bool encrypt_2w_key(
  * @brief Recover a system key from a 2-Way key transfer frame
  *
  * @param encrypted Encrypted key from the frame (16 bytes)
+ * @param request_frame_data Requesting frame: command ID plus parameters
+ * @param request_data_len Length of @p request_frame_data
  * @param challenge Challenge used during the transfer (6 bytes)
  * @param system_key_out Output buffer (16 bytes)
  * @return true on success, false on error
  */
 bool decrypt_2w_key(
   const uint8_t encrypted[AES_KEY_SIZE],
+  const uint8_t* request_frame_data,
+  size_t request_data_len,
   const uint8_t challenge[HMAC_SIZE],
   uint8_t system_key_out[AES_KEY_SIZE]
 );

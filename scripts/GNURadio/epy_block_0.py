@@ -66,7 +66,7 @@ class blk(gr.sync_block):  # other base classes are basic_block, decim_block, in
 
 
     def work(self, input_items, output_items):
-        """example: multiply with constant"""
+        """Feed the demodulated bit stream to the decoder."""
         self.decodeChannel(input_items[0])
         # output_items[0][:] = input_items[0] * 0.1
         return len(input_items[0])
@@ -117,7 +117,7 @@ class blk(gr.sync_block):  # other base classes are basic_block, decim_block, in
                 if v == 0 and self.last == 1:
                     # high to low
                     delay=i-self.lasttrans
-                    if delay >= 8 and delay <= 10:
+                    if self.unsync_bit_min <= delay <= self.unsync_bit_max:
                         # Valid period
                         self.syncstart = self.lasttrans
                         self.synccount = 1
@@ -128,16 +128,16 @@ class blk(gr.sync_block):  # other base classes are basic_block, decim_block, in
                 if v == 0 and self.last == 1:
                     # high to low 
                     delay=i-self.lasttrans
-                    if delay >= 7 and delay <= 11:
+                    if self.sync_bit_min <= delay <= self.sync_bit_max:
                         self.synccount+=1
                     else:
                         self.mode = 0
                     self.lasttrans = i
                 else:
-                    if i - self.lasttrans >= 13:
+                    if i - self.lasttrans >= self.sync_lost:
                         # lost sync
                         self.mode = 0
-                        if self.synccount >= 200:
+                        if self.synccount >= self.sync_min_cycles:
                             # success
                             self.mode = 2
                             self.nextbit = 0                        
@@ -173,15 +173,16 @@ class blk(gr.sync_block):  # other base classes are basic_block, decim_block, in
                         # done
                         self.mode = 0
                         if self.byts[0] == 0x33:
-                        	length = self.byts[1] & 0x1f
-                        	self.byts = self.byts[:2+length+2] # length of the preamble and length bytes, length of the payload, length of the trailer CRC
-                        	crc = compute_crc_8408(bytes(self.byts[1:-2]))
-                        	if crc == (self.byts[-1] << 8) + self.byts[-2]:
-                        	    crc = True
-                        	else:
-                        	    crc = False
-                        	ms = self.makeMessage(self.syncstart,self.bits,self.byts, crc)
-                        	print(ms)
+                            # Frame length is the 5-bit size field plus three:
+                            # the field excludes Control Byte 0 and the CRC.
+                            # Here byts[0] is the second sync byte, so the slice
+                            # keeps it, the frame and the two CRC bytes.
+                            length = self.byts[1] & 0x1f
+                            self.byts = self.byts[:2+length+2]
+                            crc = compute_crc_8408(bytes(self.byts[1:-2]))
+                            crc = crc == (self.byts[-1] << 8) + self.byts[-2]
+                            ms = self.makeMessage(self.syncstart, self.bits, self.byts, crc)
+                            print(ms)
             
             self.last=v
             self.tick+=1            

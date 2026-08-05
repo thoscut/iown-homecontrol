@@ -354,10 +354,24 @@ bool key_mask_1w(const uint8_t node_address[NODE_ID_SIZE], uint8_t mask_out[AES_
 }
 
 /// Build the AES mask both 2W key transfer directions share.
-bool key_mask_2w(const uint8_t challenge[HMAC_SIZE], uint8_t mask_out[AES_BLOCK_SIZE]) {
+///
+/// The IV is the ordinary 2W one, built from the frame that asked for the key
+/// transfer - command 0x38 (launch key transfer) or 0x31 (ask challenge) - and
+/// the challenge it carried. docs/linklayer.md: "The initial value is always
+/// created using data from the requesting command".
+///
+/// This used to fill bytes 0-9 with 0x55 padding and use only the challenge,
+/// dropping the requesting frame's payload and its checksum. The resulting key
+/// mask was not the one the peer computes, so a device paired this way ended up
+/// with a system key neither side could use - and nothing caught it, because
+/// both directions of our own code made the same mistake and so agreed with
+/// each other.
+bool key_mask_2w(const uint8_t* frame_data,
+                 size_t data_len,
+                 const uint8_t challenge[HMAC_SIZE],
+                 uint8_t mask_out[AES_BLOCK_SIZE]) {
   uint8_t iv[IV_SIZE];
-  memset(iv, IV_PADDING, IV_SIZE);
-  memcpy(&iv[10], challenge, HMAC_SIZE);
+  construct_iv_2w(frame_data, data_len, challenge, iv);
 
   const bool ok = aes128_encrypt(iv, TRANSFER_KEY, mask_out);
   secure_zero(iv, sizeof(iv));
@@ -403,15 +417,20 @@ bool decrypt_1w_key(
 
 bool encrypt_2w_key(
   const uint8_t system_key[AES_KEY_SIZE],
+  const uint8_t* request_frame_data,
+  size_t request_data_len,
   const uint8_t challenge[HMAC_SIZE],
   uint8_t encrypted_out[AES_KEY_SIZE]
 ) {
   if (system_key == nullptr || challenge == nullptr || encrypted_out == nullptr) {
     return false;
   }
+  if (request_frame_data == nullptr || request_data_len == 0) {
+    return false;
+  }
 
   uint8_t mask[AES_BLOCK_SIZE];
-  if (!key_mask_2w(challenge, mask)) {
+  if (!key_mask_2w(request_frame_data, request_data_len, challenge, mask)) {
     return false;
   }
 
@@ -422,10 +441,15 @@ bool encrypt_2w_key(
 
 bool decrypt_2w_key(
   const uint8_t encrypted[AES_KEY_SIZE],
+  const uint8_t* request_frame_data,
+  size_t request_data_len,
   const uint8_t challenge[HMAC_SIZE],
   uint8_t system_key_out[AES_KEY_SIZE]
 ) {
-  return encrypt_2w_key(encrypted, challenge, system_key_out);
+  // XOR masking is an involution, so decryption is the same operation - but
+  // only when both sides derive the mask from the same requesting frame.
+  return encrypt_2w_key(encrypted, request_frame_data, request_data_len,
+                        challenge, system_key_out);
 }
 
 bool generate_system_key(uint8_t key_out[AES_KEY_SIZE]) {

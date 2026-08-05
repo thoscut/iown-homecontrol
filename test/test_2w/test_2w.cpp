@@ -265,15 +265,28 @@ void test_key_transfer_frames_are_valid(void) {
     TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(frame.data, dest, recovered));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(key, recovered, 16);
 
+    // The key mask depends on the frame that requested the transfer, so the
+    // same frame has to be handed to both directions.
     const uint8_t challenge[6] = {1, 2, 3, 4, 5, 6};
-    TEST_ASSERT_TRUE(mgr.create_key_transfer_2w(&frame, dest, node, key, challenge));
+    const uint8_t request[1] = {iohome::CMD_ASK_CHALLENGE};
+    TEST_ASSERT_TRUE(mgr.create_key_transfer_2w(&frame, dest, node, key, challenge,
+                                                request, sizeof(request)));
     TEST_ASSERT_FALSE(frame.is_1w_mode);
     TEST_ASSERT_EQUAL_UINT8(iohome::CMD_KEY_TRANSFER, frame.command_id);
     TEST_ASSERT_EQUAL_UINT8(16, frame.data_len);
     TEST_ASSERT_TRUE(iohome::frame::validate_frame(&frame));
 
-    TEST_ASSERT_TRUE(iohome::crypto::decrypt_2w_key(frame.data, challenge, recovered));
+    TEST_ASSERT_TRUE(iohome::crypto::decrypt_2w_key(frame.data, request, sizeof(request),
+                                                    challenge, recovered));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(key, recovered, 16);
+
+    // A different requesting frame must produce a different mask - otherwise
+    // the frame is not actually bound to the exchange that asked for it.
+    const uint8_t other_request[7] = {iohome::CMD_LAUNCH_KEY_TRANSFER, 1, 2, 3, 4, 5, 6};
+    uint8_t wrong[16];
+    TEST_ASSERT_TRUE(iohome::crypto::decrypt_2w_key(frame.data, other_request,
+                                                    sizeof(other_request), challenge, wrong));
+    TEST_ASSERT_FALSE(memcmp(key, wrong, 16) == 0);
 }
 
 void test_remove_1w_controller_frame(void) {
@@ -303,8 +316,16 @@ void test_discovery_rejects_nullptr(void) {
     TEST_ASSERT_FALSE(mgr.create_key_transfer_1w(nullptr, node, node, key));
     TEST_ASSERT_FALSE(mgr.create_key_transfer_1w(&frame, nullptr, node, key));
     TEST_ASSERT_FALSE(mgr.create_key_transfer_1w(&frame, node, node, nullptr));
-    TEST_ASSERT_FALSE(mgr.create_key_transfer_2w(&frame, node, node, key, nullptr));
-    TEST_ASSERT_FALSE(mgr.create_key_transfer_2w(&frame, node, node, nullptr, challenge));
+    const uint8_t request[1] = {iohome::CMD_ASK_CHALLENGE};
+    TEST_ASSERT_FALSE(mgr.create_key_transfer_2w(&frame, node, node, key, nullptr,
+                                                 request, sizeof(request)));
+    TEST_ASSERT_FALSE(mgr.create_key_transfer_2w(&frame, node, node, nullptr, challenge,
+                                                 request, sizeof(request)));
+    // Without the requesting frame the mask cannot be derived at all.
+    TEST_ASSERT_FALSE(mgr.create_key_transfer_2w(&frame, node, node, key, challenge,
+                                                 nullptr, 1));
+    TEST_ASSERT_FALSE(mgr.create_key_transfer_2w(&frame, node, node, key, challenge,
+                                                 request, 0));
 }
 
 // ---------------------------------------------------------------------------

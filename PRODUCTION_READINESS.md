@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 182 host-run unit tests, and hardened against the receive
+`docs/`, covered by 188 host-run unit tests, and hardened against the receive
 path being attacker-controlled. What is *not* verified is behaviour against
 real hardware: nobody has yet confirmed that a physical actuator obeys a frame
 this library produces. Treat every "Complete" below as "complete and tested in
@@ -95,6 +95,18 @@ software".
 | V17 | Low | `iohome_replay_guard.cpp` | A node taking over an evicted table slot inherited the previous node's sequence number, so its first frames were rejected. |
 | V18 | High | `iohome_2w.cpp` | `generate_challenge()` never stamped the challenge with the current time, so it was timestamped at zero. Every 2W handshake attempted more than the challenge timeout after boot expired instantly - invisible to tests that use timestamps near zero. |
 | V19 | Low | `.clang-tidy` | The config carried `AnalyzeTemporaryDtors`, removed in clang-tidy 16, so the linter aborted with "unknown key" before analysing anything. `pio check` reported success without having checked a single file. |
+| V20 | **Critical** | `iohome_crypto.cpp` | `encrypt_2w_key()`/`decrypt_2w_key()` built the key mask from a constant `0x55` padding plus the challenge, dropping the requesting frame's payload and checksum that `construct_iv_2w()` puts in bytes 0-9. A device paired this way received a key that decrypts to noise. Nothing caught it because both directions made the same mistake, so the round-trip test agreed with itself; it is now checked against the captured value in `docs/linklayer.md`. |
+| V21 | **Critical** | `platformio.ini`, `src/main.cpp` | The firmware did not build. `RADIOLIB_ERR_INVALID_RADIO` does not exist in RadioLib - the native test mock had invented it - and the `LoRa32` dependency ships an example `main.cpp` in its `src/`, so the link step failed with "multiple definition of `setup'". Board pins now live in `src/board_pins.h`. |
+| V22 | High | `iohome_frame.cpp` | Command 0x00's payload was treated as exactly 6 bytes. Captures show 6 and 8 - the minimum plus extra functional parameters - so the longer form missed the parser's precise length test, and a plain 8-byte Execute frame was read as authenticated with two parameter bytes taken for a MAC. |
+| V23 | High | `include/iown_frame.h` | The length macros contradicted the protocol layer: a two-byte sync word (it is three), a 2W packet with no HMAC, a flat one-byte parameter, and no macro for the size-field bias. |
+| V24 | Medium | `src/esp32_api_spi.cpp` | `fReadSPIdata16bits()` clocked three bytes out of a two-byte buffer and read the answer from the wrong offset; `fInitializeSPI_Devices()` hardcoded `HSPI_HOST`; `GetHighBits()` returned `int8_t` for a `uint8_t`. |
+| V25 | Medium | `src/esp32_utils.cpp` | `iown_crc_calc()` had its whole body commented out and returned `-1` from a `uint16_t`, so every caller got 0xFFFF and could not tell it from a checksum. |
+| V26 | Medium | `scripts/` | The Python toolchain could not start: `Iown-ioCrypto.py` did `import aes` and `Iown-IoHexFrameParser.py` did `from ioCrypto import ...`, but the files are `Iown-AES.py` and `Iown-ioCrypto.py` - hyphens cannot appear in a module name. |
+| V27 | Medium | `Iown-IoHexFrameParser.py` | Source and destination addresses were swapped, the order field was read as two "first/last frame" flags, the size field was compared against the buffer length without the +3 bias, and the authentication trailer was never split off. |
+| V28 | Low | `Iown-ioCrypto.py` | The 1W key-push demo appended a MAC to a frame whose own size field says there is none, making it 37 bytes - two more than the 5-bit field can express. Command 0x30 is a bootstrap command and travels plain. |
+| V29 | Low | `include/` | `iown_node_types.h` used a C++ `enum class` inside an `extern "C"` block, so the headers could not be compiled as C despite advertising it. `iown_defs.h` used the reserved identifier `_IOWN_DEFS_H` and defined `IOWN_MODE_1W` after the header that uses it. |
+| V30 | Low | `platformio.ini` | The firmware built with no warning flags at all, and RadioLib was pinned with a caret range that had drifted from 7.1.2 to 7.7.1. |
+| V31 | Low | `src/board_pins.h` | The old board table keyed TTGO v2.1 on `ARDUINO_TTGO_LORA32_V21NEW` while PlatformIO defines `ARDUINO_TTGO_LoRa32_v21new`, so that board never compiled; and SX126x boards got BUSY passed as the interrupt line. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -107,7 +119,8 @@ software".
 | K5 | Medium | `IoHomeControl` | Fixed-length FSK mode needs a per-transmission length change, which is not part of the `PhysicalLayer` interface. A hook is provided but the caller must install it. | Document per chip, or template on the radio type |
 | K6 | Low | ESPHome component | Duplicates the CRC and MAC implementation from `src/protocol/` so the component stays self-contained for `external_components`. | Share the sources via a build-time copy |
 | K7 | Low | Logging | Still printf-style rather than structured. | Consider structured logging |
-| K8 | Low | `src/esp32_api*`, `src/iown_mac.cpp` | Older ESP32 helper layer, not covered by tests and not used by `IoHomeControl`. | Fold in or remove |
+| K8 | Low | `src/esp32_api*`, `src/iown_mac.cpp` | Older ESP32 helper layer, not covered by tests and not used by `IoHomeControl`. Its defects are fixed (V24, V25, V29) and the headers now compile as C in CI, but nothing exercises the SPI helpers at runtime. | Fold in or remove |
+| K9 | **High** | `IoHomeControl::pair_device_2w` | Sends the 0x32 key transfer on its own. The documented exchange also has the controller send a 0x3c challenge request carrying the challenge, so the device knows which one to build its IV from. Pairing therefore works only against a device that already holds that challenge. | Send the 0x3c step, or drive pairing from a received 0x31 |
 
 ### 🔒 Security Considerations
 

@@ -886,9 +886,21 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
     return false;
   }
 
+  // The key mask is derived from the frame that asked for the transfer. In the
+  // push direction documented in docs/linklayer.md that is the device's command
+  // 0x31 (ask challenge), which carries no parameters.
+  //
+  // NOTE: this sends the 0x32 key transfer on its own. The documented exchange
+  // also has the controller send a 0x3c challenge request carrying `challenge`
+  // so the device knows which challenge to build its IV from. Until that step
+  // exists, pairing works only against a device that already holds this
+  // challenge. See PRODUCTION_READINESS.md.
+  const uint8_t request_frame[1] = {CMD_ASK_CHALLENGE};
+
   frame::IoFrame tx_frame;
   const bool built = discovery_manager_->create_key_transfer_2w(
-    &tx_frame, dest_node, own_node_id_, new_system_key, challenge);
+    &tx_frame, dest_node, own_node_id_, new_system_key, challenge,
+    request_frame, sizeof(request_frame));
   crypto::secure_zero(challenge, sizeof(challenge));
 
   if (!built) {

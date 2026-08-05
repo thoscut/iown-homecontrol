@@ -517,10 +517,15 @@ bool DiscoveryManager::create_key_transfer_2w(
   const uint8_t dest_node[NODE_ID_SIZE],
   const uint8_t src_node[NODE_ID_SIZE],
   const uint8_t system_key[AES_KEY_SIZE],
-  const uint8_t challenge[HMAC_SIZE]
+  const uint8_t challenge[HMAC_SIZE],
+  const uint8_t* request_frame_data,
+  size_t request_data_len
 ) {
   if (frame == nullptr || dest_node == nullptr || src_node == nullptr ||
       system_key == nullptr || challenge == nullptr) {
+    return false;
+  }
+  if (request_frame_data == nullptr || request_data_len == 0) {
     return false;
   }
 
@@ -529,7 +534,8 @@ bool DiscoveryManager::create_key_transfer_2w(
   frame::set_source(frame, src_node);
 
   uint8_t encrypted_key[AES_KEY_SIZE];
-  if (!crypto::encrypt_2w_key(system_key, challenge, encrypted_key)) {
+  if (!crypto::encrypt_2w_key(system_key, request_frame_data, request_data_len,
+                              challenge, encrypted_key)) {
     return false;
   }
 

@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 139 host-run unit tests, and hardened against the receive
+`docs/`, covered by 173 host-run unit tests, and hardened against the receive
 path being attacker-controlled. What is *not* verified is behaviour against
 real hardware: nobody has yet confirmed that a physical actuator obeys a frame
 this library produces. Treat every "Complete" below as "complete and tested in
@@ -71,6 +71,26 @@ software".
 | R14 | Low | Everywhere | Missing nullptr guards in the frame setters, `is_broadcast()`, `print_frame()`, beacon and discovery handling, `get_rssi()`/`get_snr()`. |
 | R15 | Low | `.github/workflows` | Path filters used bare directory names, which never match, so the PlatformIO workflow effectively never ran. |
 | R16 | Low | `iohome_2w.cpp` | `BeaconHandler` recorded the claimed data length rather than the length it actually copied. |
+
+#### Found while reviewing the fixes
+
+| ID | Severity | Component | Description |
+|----|----------|-----------|-------------|
+| V1 | **Critical** | ESPHome component | The packet ISR was an inline `IRAM_ATTR` function storing to a `std::atomic`. On ESP32 that needs a literal-pool load, which the linker rejects: "dangerous relocation: l32r: literal placed after use". The firmware would not link. |
+| V2 | **Critical** | ESPHome `__init__.py` | RadioLib's `Module.h` includes `<SPI.h>`, which ESPHome does not put on the include path unless the library is declared. The component did not compile. |
+| V3 | High | `iohome_frame.cpp` | Deciding whether a frame carries an authentication trailer from the protocol mode alone is wrong: 2W frames carry a MAC too. Authenticated 2W frames were parsed with the MAC folded into the payload and then rejected. Now decided by command ID and payload length. |
+| V4 | High | `iohome_2w.cpp` | Wiping the challenge on a successful handshake left the commands it authorises unable to be MAC'd, and inbound 2W frames verified against a zeroed nonce. |
+| V5 | High | `IoHomeControl.cpp` | A peer-initiated 2W handshake could never be answered: command 0x3C carries the peer's nonce in its own payload, but verification insisted on a nonce of ours. |
+| V6 | High | `include/iown_mac.h` | `iown_mac.h` and `iown_frame.h` included each other; `#pragma once` resolved the cycle by expanding the MAC header first, so the size macros it used were undefined. |
+| V7 | Medium | `include/iown_mac.h` | `IOWN_IS_BROADCAST_ADDR` referenced a symbol that never existed and used `memcmp` without `<string.h>`, so any use failed to compile. The address was also sized with `IOWN_LEN_HEADER_MAC` - two node IDs - so the comparison read past the caller's buffer. |
+| V8 | Medium | `library.properties` | Written as `key = "value"`. The Arduino spec requires `key=value` with no spaces or quotes, so the Library Manager would reject the library. `includes` also named a header that does not exist. |
+| V9 | Medium | `library.json` | Not valid JSON - it carried a commented-out block written with `//`, so PlatformIO could not parse the manifest. |
+| V10 | Medium | `src/esp32_api_spi.cpp` | `fInitializeSPI_Channel()` ignored its SPI host argument and always initialised `HSPI_HOST`. |
+| V11 | Medium | `scripts/LuaJIT/` | `luajit-convertNested.py` did not parse: unescaped quotes in a `print`, and it opened a bare identifier instead of a filename. |
+| V12 | Low | `iohome_frame.cpp` | `print_frame()` accumulated `snprintf`'s return value into a `size_t` offset unchecked, which would have underflowed the remaining-space argument had the buffer filled. |
+| V13 | Low | ESPHome cover | Pressing stop mid-movement could send a second STOP if the timed estimate completed on that same call. |
+| V14 | Low | `iohome_crypto.cpp` | The software AES fallback was selected on plain ESP-IDF builds, where mbedTLS is available; `esp_random()` moved out of `esp_system.h` in ESP-IDF 5. |
+| V15 | Low | `.github/workflows` | CodeQL and the spell check were both disabled with `on: workflow_dispatch`. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -162,9 +182,9 @@ model. Summary of what remains, by design of the protocol:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ✅ 139 tests | 6 suites, ASan + UBSan by default |
+| Unit tests | ✅ 173 tests | 7 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
-| Parser robustness | ✅ Complete | Sweep over every control-byte combination under ASan |
+| Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
 | ESPHome config validation | ✅ Complete | Positive and six negative cases |
 | ESPHome compile | ✅ CI | `esphome compile` on every change |
 | Integration tests | ❌ None | Requires hardware |

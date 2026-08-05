@@ -35,6 +35,7 @@ CONF_CS_PIN = "cs_pin"
 CONF_RST_PIN = "rst_pin"
 CONF_DIO0_PIN = "dio0_pin"
 CONF_DIO1_PIN = "dio1_pin"
+CONF_BUSY_PIN = "busy_pin"
 CONF_FREQUENCY = "frequency"
 CONF_RADIO_TYPE = "radio_type"
 CONF_SOURCE_ADDRESS = "source_address"
@@ -125,8 +126,58 @@ def _validate_node_address(value):
     return value
 
 
+def _validate_radio_pins(config):
+    """Each radio family needs a different set of pins.
+
+    RadioLib takes Module(cs, irq, rst, gpio), and the two families put
+    different physical lines in those slots: an SX127x interrupts on DIO0 and
+    uses DIO1 as its second GPIO, while an SX126x has no DIO0 at all - it
+    interrupts on DIO1 and needs its BUSY line.
+
+    The component used to pass `dio0_pin` as the interrupt for both, so an
+    SX1262 only worked if you put its DIO1 in `dio0_pin` and its BUSY in
+    `dio1_pin`. Filling the fields in with what the pins are actually called
+    produced a radio whose interrupt never fired, with nothing to say why.
+    """
+    # cv.enum keeps the key from RADIO_TYPES and hangs the codegen expression
+    # off it as .enum_value, so the value compares equal to the string the user
+    # wrote. Comparing against the C++ enum name instead silently never matched.
+    is_sx1262 = config[CONF_RADIO_TYPE] == "SX1262"
+
+    if is_sx1262:
+        if CONF_BUSY_PIN not in config:
+            raise cv.Invalid(
+                "radio_type SX1262 requires busy_pin. On a Heltec V3 the radio "
+                "is CS=8, RST=12, BUSY=13, DIO1=14.",
+                path=[CONF_RADIO_TYPE],
+            )
+        if CONF_DIO0_PIN in config:
+            raise cv.Invalid(
+                "SX126x modules have no DIO0. Earlier versions of this component "
+                "wanted DIO1 in dio0_pin and BUSY in dio1_pin; give them as "
+                "dio1_pin and busy_pin now.",
+                path=[CONF_DIO0_PIN],
+            )
+    else:
+        if CONF_DIO0_PIN not in config:
+            raise cv.Invalid(
+                "radio_type SX1276 requires dio0_pin - that is the line the "
+                "radio raises when a packet has arrived.",
+                path=[CONF_RADIO_TYPE],
+            )
+        if CONF_BUSY_PIN in config:
+            raise cv.Invalid(
+                "SX127x modules have no BUSY line.",
+                path=[CONF_BUSY_PIN],
+            )
+
+    return config
+
+
 def _validate_config(config):
     """Cross-field checks that a per-key validator cannot express."""
+    _validate_radio_pins(config)
+
     if config[CONF_ENCRYPTION_ENABLED] and CONF_SYSTEM_KEY not in config:
         raise cv.Invalid(
             "encryption_enabled requires system_key: authenticated 1W frames "
@@ -153,8 +204,11 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(IOWNHomeControlComponent),
             cv.Required(CONF_CS_PIN): cv.int_range(min=0, max=48),
             cv.Required(CONF_RST_PIN): cv.int_range(min=0, max=48),
-            cv.Required(CONF_DIO0_PIN): cv.int_range(min=0, max=48),
+            # Which of these is required depends on radio_type; see
+            # _validate_radio_pins().
+            cv.Optional(CONF_DIO0_PIN): cv.int_range(min=0, max=48),
             cv.Required(CONF_DIO1_PIN): cv.int_range(min=0, max=48),
+            cv.Optional(CONF_BUSY_PIN): cv.int_range(min=0, max=48),
             cv.Optional(CONF_FREQUENCY, default=868.95): _validate_frequency,
             cv.Optional(CONF_RADIO_TYPE, default="SX1276"): cv.enum(
                 RADIO_TYPES, upper=True
@@ -182,8 +236,11 @@ async def to_code(config):
 
     cg.add(var.set_cs_pin(config[CONF_CS_PIN]))
     cg.add(var.set_rst_pin(config[CONF_RST_PIN]))
-    cg.add(var.set_dio0_pin(config[CONF_DIO0_PIN]))
     cg.add(var.set_dio1_pin(config[CONF_DIO1_PIN]))
+    if CONF_DIO0_PIN in config:
+        cg.add(var.set_dio0_pin(config[CONF_DIO0_PIN]))
+    if CONF_BUSY_PIN in config:
+        cg.add(var.set_busy_pin(config[CONF_BUSY_PIN]))
     cg.add(var.set_frequency(config[CONF_FREQUENCY]))
     cg.add(var.set_radio_type(config[CONF_RADIO_TYPE]))
     cg.add(var.set_source_address(config[CONF_SOURCE_ADDRESS]))
@@ -210,4 +267,9 @@ async def to_code(config):
 
     # Pin the radio library: an unpinned dependency makes the build depend on
     # whatever upstream published most recently.
-    cg.add_library("jgromes/RadioLib", "7.1.2")
+    #
+    # This must match the pin in platformio.ini. It said 7.1.2 while the
+    # firmware built against 7.7.1, so the two halves of this repository were
+    # compiled against different versions of the same library and only one of
+    # them was covered by tools/check_radiolib_mock.sh. CI now compares them.
+    cg.add_library("jgromes/RadioLib", "7.7.1")

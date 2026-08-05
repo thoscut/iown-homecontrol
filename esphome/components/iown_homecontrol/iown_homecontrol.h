@@ -139,6 +139,8 @@ class IOWNHomeControlComponent : public Component {
   void set_rst_pin(int pin) { this->rst_pin_ = pin; }
   void set_dio0_pin(int pin) { this->dio0_pin_ = pin; }
   void set_dio1_pin(int pin) { this->dio1_pin_ = pin; }
+  /// SX126x only: the BUSY line. SX127x modules do not have one.
+  void set_busy_pin(int pin) { this->busy_pin_ = pin; }
   void set_frequency(float freq) { this->frequency_ = freq; }
   void set_radio_type(RadioType type) { this->radio_type_ = type; }
   void set_source_address(uint32_t addr) { this->source_address_ = addr; }
@@ -186,6 +188,7 @@ class IOWNHomeControlComponent : public Component {
   int rst_pin_{-1};
   int dio0_pin_{-1};
   int dio1_pin_{-1};
+  int busy_pin_{-1};
   int sck_pin_{-1};
   int mosi_pin_{-1};
   int miso_pin_{-1};

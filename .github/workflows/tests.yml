@@ -16,6 +16,7 @@ on:
       - "src/**"
       - "test/**"
       - "tools/**"
+      - "esphome/**"
       - "platformio.ini"
       - ".github/workflows/tests.yml"
   pull_request:
@@ -23,6 +24,7 @@ on:
       - "src/**"
       - "test/**"
       - "tools/**"
+      - "esphome/**"
       - "platformio.ini"
       - ".github/workflows/tests.yml"
   workflow_dispatch:
@@ -182,3 +184,27 @@ jobs:
 
       - name: Compare mock against upstream
         run: ./tools/check_radiolib_mock.sh
+
+      - name: The ESPHome component must pin the same RadioLib
+        run: |
+          set -euo pipefail
+          # The component declares its own dependency, because an
+          # external_components directory is copied on its own and cannot read
+          # platformio.ini. It said 7.1.2 while the firmware built against
+          # 7.7.1, so the two halves of this repository compiled against
+          # different versions of the same library - and only the firmware side
+          # was covered by the mock check above.
+          pio_version="$(sed -nE 's#.*jgromes/RadioLib@([0-9]+\.[0-9]+\.[0-9]+).*#\1#p' platformio.ini | head -1)"
+          esphome_version="$(sed -nE 's#.*add_library\("jgromes/RadioLib", "([0-9]+\.[0-9]+\.[0-9]+)"\).*#\1#p' \
+                             esphome/components/iown_homecontrol/__init__.py | head -1)"
+          echo "platformio.ini: ${pio_version:-<none>}"
+          echo "ESPHome:        ${esphome_version:-<none>}"
+          if [ -z "${pio_version}" ] || [ -z "${esphome_version}" ]; then
+            echo "could not read one of the pins - did the declaration change shape?" >&2
+            exit 1
+          fi
+          if [ "${pio_version}" != "${esphome_version}" ]; then
+            echo "RadioLib pins disagree. Both must name the same version." >&2
+            exit 1
+          fi
+          echo "OK: both pin RadioLib ${pio_version}"

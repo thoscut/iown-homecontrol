@@ -41,7 +41,22 @@ void IOWNHomeControlComponent::setup() {
              this->mosi_pin_);
   }
 
-  this->radio_module_ = new Module(this->cs_pin_, this->dio0_pin_, this->rst_pin_, this->dio1_pin_);
+  // RadioLib's Module constructor is Module(cs, irq, rst, gpio), but the two
+  // families disagree about which physical pin plays which role:
+  //
+  //   SX127x: irq = DIO0 (PayloadReady), gpio = DIO1
+  //   SX126x: irq = DIO1 (the only interrupt line broken out), gpio = BUSY
+  //
+  // This used to pass dio0_pin_ as irq for both. An SX1262 therefore had to be
+  // configured with its DIO1 in `dio0_pin` and its BUSY in `dio1_pin` to work
+  // at all - which is what the example config quietly told people to do. Two
+  // errors cancelling is not the same as being right: anyone who filled the
+  // fields in honestly got a radio whose interrupt never fired.
+  if (this->radio_type_ == RADIO_SX1262) {
+    this->radio_module_ = new Module(this->cs_pin_, this->dio1_pin_, this->rst_pin_, this->busy_pin_);
+  } else {
+    this->radio_module_ = new Module(this->cs_pin_, this->dio0_pin_, this->rst_pin_, this->dio1_pin_);
+  }
 
   int16_t state = RADIOLIB_ERR_UNKNOWN;
 
@@ -106,8 +121,15 @@ void IOWNHomeControlComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "io-homecontrol:");
   ESP_LOGCONFIG(TAG, "  CS Pin: %d", this->cs_pin_);
   ESP_LOGCONFIG(TAG, "  RST Pin: %d", this->rst_pin_);
-  ESP_LOGCONFIG(TAG, "  DIO0 Pin: %d", this->dio0_pin_);
-  ESP_LOGCONFIG(TAG, "  DIO1 Pin: %d", this->dio1_pin_);
+  // Name the pins by what they are on this radio, so a mis-wired board is
+  // visible in the log rather than only in its silence.
+  if (this->radio_type_ == RADIO_SX1262) {
+    ESP_LOGCONFIG(TAG, "  DIO1 Pin (IRQ): %d", this->dio1_pin_);
+    ESP_LOGCONFIG(TAG, "  BUSY Pin: %d", this->busy_pin_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  DIO0 Pin (IRQ): %d", this->dio0_pin_);
+    ESP_LOGCONFIG(TAG, "  DIO1 Pin: %d", this->dio1_pin_);
+  }
   if (this->sck_pin_ >= 0) {
     ESP_LOGCONFIG(TAG, "  SCK Pin: %d", this->sck_pin_);
     ESP_LOGCONFIG(TAG, "  MOSI Pin: %d", this->mosi_pin_);

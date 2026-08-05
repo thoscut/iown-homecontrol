@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 173 host-run unit tests, and hardened against the receive
+`docs/`, covered by 182 host-run unit tests, and hardened against the receive
 path being attacker-controlled. What is *not* verified is behaviour against
 real hardware: nobody has yet confirmed that a physical actuator obeys a frame
 this library produces. Treat every "Complete" below as "complete and tested in
@@ -93,6 +93,8 @@ software".
 | V15 | Low | `.github/workflows` | CodeQL and the spell check were both disabled with `on: workflow_dispatch`. |
 | V16 | Medium | Receive path | 2W frames had no replay protection at all: they carry no sequence number, and one session challenge signs several frames. Added a recent-MAC history per node. |
 | V17 | Low | `iohome_replay_guard.cpp` | A node taking over an evicted table slot inherited the previous node's sequence number, so its first frames were rejected. |
+| V18 | High | `iohome_2w.cpp` | `generate_challenge()` never stamped the challenge with the current time, so it was timestamped at zero. Every 2W handshake attempted more than the challenge timeout after boot expired instantly - invisible to tests that use timestamps near zero. |
+| V19 | Low | `.clang-tidy` | The config carried `AnalyzeTemporaryDtors`, removed in clang-tidy 16, so the linter aborted with "unknown key" before analysing anything. `pio check` reported success without having checked a single file. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -184,7 +186,7 @@ model. Summary of what remains, by design of the protocol:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ✅ 173 tests | 7 suites, ASan + UBSan by default |
+| Unit tests | ✅ 182 tests | 7 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
 | Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
 | ESPHome config validation | ✅ Complete | Positive and six negative cases |

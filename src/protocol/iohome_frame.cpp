@@ -567,9 +567,8 @@ void print_frame(const IoFrame* frame, void (*print_func)(const char*)) {
 
     char mac_str[3 * HMAC_SIZE + 1];
     size_t used = 0;
-    for (uint8_t i = 0; i < HMAC_SIZE; i++) {
-      const int written =
-        snprintf(mac_str + used, sizeof(mac_str) - used, "%02X ", frame->hmac[i]);
+    for (const uint8_t byte : frame->hmac) {
+      const int written = snprintf(mac_str + used, sizeof(mac_str) - used, "%02X ", byte);
       if (written <= 0 || static_cast<size_t>(written) >= sizeof(mac_str) - used) {
         break;
       }

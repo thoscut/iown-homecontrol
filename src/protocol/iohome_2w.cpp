@@ -130,7 +130,8 @@ bool AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
   return true;
 }
 
-bool AuthenticationManager::generate_challenge(uint8_t challenge_out[HMAC_SIZE]) {
+bool AuthenticationManager::generate_challenge(uint8_t challenge_out[HMAC_SIZE],
+                                              unsigned long now_ms) {
   if (challenge_out == nullptr) {
     return false;
   }
@@ -144,13 +145,18 @@ bool AuthenticationManager::generate_challenge(uint8_t challenge_out[HMAC_SIZE])
 
   memcpy(current_challenge_, challenge_out, HMAC_SIZE);
   state_ = ChallengeState::CHALLENGE_SENT;
+
+  // Start the timeout now. Leaving the timestamp at zero made every handshake
+  // attempted more than challenge_timeout_ms_ after boot expire immediately.
+  state_timestamp_ms_ = now_ms;
   return true;
 }
 
 bool AuthenticationManager::create_challenge_request(
   frame::IoFrame* frame,
   const uint8_t dest_node[NODE_ID_SIZE],
-  const uint8_t src_node[NODE_ID_SIZE]
+  const uint8_t src_node[NODE_ID_SIZE],
+  unsigned long now_ms
 ) {
   if (frame == nullptr || dest_node == nullptr || src_node == nullptr || !key_set_) {
     return false;
@@ -161,7 +167,7 @@ bool AuthenticationManager::create_challenge_request(
   frame::set_source(frame, src_node);
 
   uint8_t challenge[HMAC_SIZE];
-  if (!generate_challenge(challenge)) {
+  if (!generate_challenge(challenge, now_ms)) {
     return false;
   }
 
@@ -239,11 +245,17 @@ bool AuthenticationManager::has_active_challenge(unsigned long now_ms) {
 }
 
 ChallengeState AuthenticationManager::get_state(unsigned long now_ms) {
+  // Wrap-safe: unsigned subtraction stays correct past the millis() rollover.
   const unsigned long elapsed = now_ms - state_timestamp_ms_;
 
-  if (state_ == ChallengeState::CHALLENGE_SENT && elapsed > challenge_timeout_ms_) {
-    reset();
-  } else if (state_ == ChallengeState::AUTHENTICATED && elapsed > session_timeout_ms_) {
+  // A pending challenge and an established session expire on different clocks;
+  // both simply drop back to IDLE.
+  const bool challenge_expired =
+    state_ == ChallengeState::CHALLENGE_SENT && elapsed > challenge_timeout_ms_;
+  const bool session_expired =
+    state_ == ChallengeState::AUTHENTICATED && elapsed > session_timeout_ms_;
+
+  if (challenge_expired || session_expired) {
     reset();
   }
 

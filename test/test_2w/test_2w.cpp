@@ -384,17 +384,17 @@ void test_auth_manager_generates_unpredictable_challenges(void) {
     auth.begin(key);
 
     uint8_t first[6], second[6];
-    TEST_ASSERT_TRUE(auth.generate_challenge(first));
+    TEST_ASSERT_TRUE(auth.generate_challenge(first, 0));
     TEST_ASSERT_EQUAL(mode2w::ChallengeState::CHALLENGE_SENT, auth.peek_state());
     TEST_ASSERT_EQUAL_UINT8_ARRAY(first, auth.get_current_challenge(), 6);
 
-    TEST_ASSERT_TRUE(auth.generate_challenge(second));
+    TEST_ASSERT_TRUE(auth.generate_challenge(second, 0));
 
     // Regression: challenges used to come from an unseeded Arduino PRNG, so
     // every device produced the same sequence after every reboot.
     TEST_ASSERT_FALSE(memcmp(first, second, 6) == 0);
 
-    TEST_ASSERT_FALSE(auth.generate_challenge(nullptr));
+    TEST_ASSERT_FALSE(auth.generate_challenge(nullptr, 0));
 }
 
 void test_auth_manager_reset(void) {
@@ -403,7 +403,7 @@ void test_auth_manager_reset(void) {
     auth.begin(key);
 
     uint8_t challenge[6];
-    TEST_ASSERT_TRUE(auth.generate_challenge(challenge));
+    TEST_ASSERT_TRUE(auth.generate_challenge(challenge, 0));
     TEST_ASSERT_EQUAL(mode2w::ChallengeState::CHALLENGE_SENT, auth.peek_state());
 
     auth.reset();
@@ -422,7 +422,7 @@ void test_auth_handshake_succeeds(void) {
     responder.begin(key);
 
     iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller));
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
     TEST_ASSERT_EQUAL_UINT8(iohome::CMD_CHALLENGE_REQUEST, request.command_id);
     TEST_ASSERT_TRUE(request.authenticated);
 
@@ -446,7 +446,7 @@ void test_auth_rejects_replayed_response(void) {
     responder.begin(key);
 
     iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller));
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
 
     iohome::frame::IoFrame response;
     TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
@@ -473,7 +473,7 @@ void test_challenge_stays_usable_after_handshake(void) {
     TEST_ASSERT_FALSE(initiator.has_active_challenge(0));
 
     iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller));
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
     TEST_ASSERT_TRUE(initiator.has_active_challenge(0));
 
     uint8_t nonce[6];
@@ -503,7 +503,7 @@ void test_failed_handshake_clears_challenge(void) {
     impostor.begin(other_key);
 
     iohome::frame::IoFrame request;
-    initiator.create_challenge_request(&request, actuator, controller);
+    initiator.create_challenge_request(&request, actuator, controller, 0);
 
     iohome::frame::IoFrame response;
     impostor.create_challenge_response(&response, controller, actuator, request.data);
@@ -530,7 +530,7 @@ void test_auth_rejects_wrong_key(void) {
     impostor.begin(other_key);
 
     iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller));
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
 
     iohome::frame::IoFrame response;
     TEST_ASSERT_TRUE(impostor.create_challenge_response(&response, controller, actuator,
@@ -538,6 +538,36 @@ void test_auth_rejects_wrong_key(void) {
 
     TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 100));
     TEST_ASSERT_FALSE(initiator.is_authenticated(100));
+}
+
+void test_handshake_works_at_realistic_uptime(void) {
+    // Regression: generate_challenge() did not stamp the challenge with the
+    // current time, so it was timestamped at zero. Every handshake attempted
+    // more than challenge_timeout_ms_ after boot expired instantly - which
+    // tests using timestamps near zero cannot see.
+    const uint8_t key[16] = {0x42};
+    const uint8_t controller[3] = {0x01, 0x02, 0x03};
+    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+
+    mode2w::AuthenticationManager initiator;
+    mode2w::AuthenticationManager responder;
+    initiator.begin(key);
+    responder.begin(key);
+
+    // A device that has been up for a day.
+    const unsigned long uptime_ms = 86400000UL;
+
+    iohome::frame::IoFrame request;
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller,
+                                                        uptime_ms));
+    TEST_ASSERT_TRUE(initiator.has_active_challenge(uptime_ms));
+
+    iohome::frame::IoFrame response;
+    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
+                                                          request.data));
+
+    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, uptime_ms + 200));
+    TEST_ASSERT_TRUE(initiator.is_authenticated(uptime_ms + 200));
 }
 
 void test_auth_challenge_times_out(void) {
@@ -552,15 +582,39 @@ void test_auth_challenge_times_out(void) {
     initiator.set_challenge_timeout_ms(5000);
 
     iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller));
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 1000));
 
     iohome::frame::IoFrame response;
     TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
                                                          request.data));
 
-    // Answer arrives after the challenge expired.
-    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 6000));
+    // The timeout runs from the moment the challenge was generated (1000), not
+    // from boot - before the timestamp was recorded this test passed for the
+    // wrong reason.
+    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 1000 + 5001));
     TEST_ASSERT_EQUAL(mode2w::ChallengeState::IDLE, initiator.peek_state());
+}
+
+void test_auth_challenge_survives_up_to_the_timeout(void) {
+    const uint8_t key[16] = {0x42};
+    const uint8_t controller[3] = {0x01, 0x02, 0x03};
+    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+
+    mode2w::AuthenticationManager initiator;
+    mode2w::AuthenticationManager responder;
+    initiator.begin(key);
+    responder.begin(key);
+    initiator.set_challenge_timeout_ms(5000);
+
+    iohome::frame::IoFrame request;
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 1000));
+
+    iohome::frame::IoFrame response;
+    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
+                                                         request.data));
+
+    // Exactly at the timeout is still inside the window.
+    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 1000 + 5000));
 }
 
 void test_auth_session_expires(void) {
@@ -575,7 +629,7 @@ void test_auth_session_expires(void) {
     initiator.set_session_timeout_ms(30000);
 
     iohome::frame::IoFrame request;
-    initiator.create_challenge_request(&request, actuator, controller);
+    initiator.create_challenge_request(&request, actuator, controller, 0);
     iohome::frame::IoFrame response;
     responder.create_challenge_response(&response, controller, actuator, request.data);
 
@@ -593,8 +647,8 @@ void test_auth_rejects_nullptr(void) {
     auth.begin(key);
 
     iohome::frame::IoFrame frame;
-    TEST_ASSERT_FALSE(auth.create_challenge_request(nullptr, node, node));
-    TEST_ASSERT_FALSE(auth.create_challenge_request(&frame, nullptr, node));
+    TEST_ASSERT_FALSE(auth.create_challenge_request(nullptr, node, node, 0));
+    TEST_ASSERT_FALSE(auth.create_challenge_request(&frame, nullptr, node, 0));
     TEST_ASSERT_FALSE(auth.create_challenge_response(&frame, node, node, nullptr));
     TEST_ASSERT_FALSE(auth.verify_challenge_response(nullptr, 0));
 }
@@ -634,7 +688,9 @@ int main(int, char **) {
     RUN_TEST(test_challenge_stays_usable_after_handshake);
     RUN_TEST(test_failed_handshake_clears_challenge);
     RUN_TEST(test_auth_rejects_wrong_key);
+    RUN_TEST(test_handshake_works_at_realistic_uptime);
     RUN_TEST(test_auth_challenge_times_out);
+    RUN_TEST(test_auth_challenge_survives_up_to_the_timeout);
     RUN_TEST(test_auth_session_expires);
     RUN_TEST(test_auth_rejects_nullptr);
 

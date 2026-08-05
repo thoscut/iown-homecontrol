@@ -166,20 +166,27 @@ public:
   /**
    * @brief Generate a new random challenge
    *
+   * Starts the challenge timeout, so the caller must pass the current time -
+   * without it the challenge is timestamped at zero and every handshake
+   * attempted more than challenge_timeout_ms_ after boot expires instantly.
+   *
    * @param challenge_out Output buffer (6 bytes)
+   * @param now_ms Current time in milliseconds
    * @return false when no secure random source is available, or on bad input
    */
-  bool generate_challenge(uint8_t challenge_out[HMAC_SIZE]);
+  bool generate_challenge(uint8_t challenge_out[HMAC_SIZE], unsigned long now_ms);
 
   /**
    * @brief Create a challenge request frame (command 0x3C)
    *
+   * @param now_ms Current time in milliseconds; starts the challenge timeout
    * @return true on success
    */
   bool create_challenge_request(
     frame::IoFrame* frame,
     const uint8_t dest_node[NODE_ID_SIZE],
-    const uint8_t src_node[NODE_ID_SIZE]
+    const uint8_t src_node[NODE_ID_SIZE],
+    unsigned long now_ms
   );
 
   /**

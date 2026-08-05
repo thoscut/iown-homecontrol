@@ -740,7 +740,7 @@ bool IoHomeControl::send_challenge_request(const uint8_t dest_node[NODE_ID_SIZE]
   }
 
   frame::IoFrame tx_frame;
-  if (!auth_manager_->create_challenge_request(&tx_frame, dest_node, own_node_id_)) {
+  if (!auth_manager_->create_challenge_request(&tx_frame, dest_node, own_node_id_, NOW_MS())) {
     LOG_PRINT("Error: Failed to create challenge request");
     return false;
   }
@@ -865,7 +865,7 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
   LOG_PRINT("Pairing device (2W mode)");
 
   uint8_t challenge[HMAC_SIZE];
-  if (!auth_manager_->generate_challenge(challenge)) {
+  if (!auth_manager_->generate_challenge(challenge, NOW_MS())) {
     LOG_PRINT("Error: no secure random source for the pairing challenge");
     return false;
   }

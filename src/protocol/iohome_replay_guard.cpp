@@ -18,18 +18,18 @@ ReplayGuard::ReplayGuard()
 }
 
 ReplayGuard::Entry* ReplayGuard::find(const uint8_t node_id[NODE_ID_SIZE]) {
-  for (size_t i = 0; i < MAX_NODES; i++) {
-    if (entries_[i].used && memcmp(entries_[i].node_id, node_id, NODE_ID_SIZE) == 0) {
-      return &entries_[i];
+  for (Entry& entry : entries_) {
+    if (entry.used && memcmp(entry.node_id, node_id, NODE_ID_SIZE) == 0) {
+      return &entry;
     }
   }
   return nullptr;
 }
 
 const ReplayGuard::Entry* ReplayGuard::find(const uint8_t node_id[NODE_ID_SIZE]) const {
-  for (size_t i = 0; i < MAX_NODES; i++) {
-    if (entries_[i].used && memcmp(entries_[i].node_id, node_id, NODE_ID_SIZE) == 0) {
-      return &entries_[i];
+  for (const Entry& entry : entries_) {
+    if (entry.used && memcmp(entry.node_id, node_id, NODE_ID_SIZE) == 0) {
+      return &entry;
     }
   }
   return nullptr;
@@ -37,12 +37,12 @@ const ReplayGuard::Entry* ReplayGuard::find(const uint8_t node_id[NODE_ID_SIZE])
 
 ReplayGuard::Entry* ReplayGuard::allocate(const uint8_t node_id[NODE_ID_SIZE]) {
   // Prefer a free slot.
-  for (size_t i = 0; i < MAX_NODES; i++) {
-    if (!entries_[i].used) {
-      memset(&entries_[i], 0, sizeof(Entry));
-      memcpy(entries_[i].node_id, node_id, NODE_ID_SIZE);
-      entries_[i].used = true;
-      return &entries_[i];
+  for (Entry& entry : entries_) {
+    if (!entry.used) {
+      memset(&entry, 0, sizeof(Entry));
+      memcpy(entry.node_id, node_id, NODE_ID_SIZE);
+      entry.used = true;
+      return &entry;
     }
   }
 
@@ -194,8 +194,8 @@ void ReplayGuard::reset() {
 
 size_t ReplayGuard::tracked_count() const {
   size_t count = 0;
-  for (size_t i = 0; i < MAX_NODES; i++) {
-    if (entries_[i].used) {
+  for (const Entry& entry : entries_) {
+    if (entry.used) {
       count++;
     }
   }

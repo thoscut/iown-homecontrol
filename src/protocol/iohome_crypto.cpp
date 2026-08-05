@@ -64,7 +64,7 @@ namespace crypto {
 uint16_t compute_crc16_byte(uint8_t data, uint16_t crc) {
   crc ^= data;
   for (int i = 0; i < 8; i++) {
-    uint16_t remainder = (crc & 1) ? CRC_POLYNOMIAL : 0;
+    const uint16_t remainder = (crc & 1) ? CRC_POLYNOMIAL : 0;
     crc = (crc >> 1) ^ remainder;
   }
   return crc;
@@ -175,7 +175,7 @@ bool random_bytes(uint8_t* out, size_t length) {
 // ============================================================================
 
 void compute_checksum(uint8_t frame_byte, uint8_t& chksum1, uint8_t& chksum2) {
-  uint8_t tmpchksum = frame_byte ^ chksum2;
+  const uint8_t tmpchksum = frame_byte ^ chksum2;
   chksum2 = ((chksum1 & 0x7F) << 1) & 0xFF;
 
   if ((chksum1 & 0x80) == 0) {

@@ -9,9 +9,9 @@
 namespace iohome {
 
 bool MemoryRollingCodeStore::load(const uint8_t node_id[NODE_ID_SIZE], uint16_t& code) {
-  for (size_t i = 0; i < MAX_ENTRIES; i++) {
-    if (entries_[i].used && memcmp(entries_[i].node_id, node_id, NODE_ID_SIZE) == 0) {
-      code = entries_[i].code;
+  for (const Entry& entry : entries_) {
+    if (entry.used && memcmp(entry.node_id, node_id, NODE_ID_SIZE) == 0) {
+      code = entry.code;
       return true;
     }
   }
@@ -21,19 +21,19 @@ bool MemoryRollingCodeStore::load(const uint8_t node_id[NODE_ID_SIZE], uint16_t&
 
 bool MemoryRollingCodeStore::save(const uint8_t node_id[NODE_ID_SIZE], uint16_t code) {
   // Update existing entry
-  for (size_t i = 0; i < MAX_ENTRIES; i++) {
-    if (entries_[i].used && memcmp(entries_[i].node_id, node_id, NODE_ID_SIZE) == 0) {
-      entries_[i].code = code;
+  for (Entry& entry : entries_) {
+    if (entry.used && memcmp(entry.node_id, node_id, NODE_ID_SIZE) == 0) {
+      entry.code = code;
       return true;
     }
   }
 
   // Find a free slot
-  for (size_t i = 0; i < MAX_ENTRIES; i++) {
-    if (!entries_[i].used) {
-      memcpy(entries_[i].node_id, node_id, NODE_ID_SIZE);
-      entries_[i].code = code;
-      entries_[i].used = true;
+  for (Entry& entry : entries_) {
+    if (!entry.used) {
+      memcpy(entry.node_id, node_id, NODE_ID_SIZE);
+      entry.code = code;
+      entry.used = true;
       return true;
     }
   }

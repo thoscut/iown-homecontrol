@@ -77,8 +77,8 @@ void key_expansion(RoundKey round_key, const uint8_t key[KEY_SIZE]) {
       temp[3] = t;
 
       // SubWord
-      for (int j = 0; j < 4; j++) {
-        temp[j] = SBOX[temp[j]];
+      for (uint8_t& byte : temp) {
+        byte = SBOX[byte];
       }
 
       temp[0] ^= RCON[i / NK];

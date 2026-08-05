@@ -257,7 +257,7 @@ void test_accepts_peer_initiated_challenge(void) {
   peer.begin(SYSTEM_KEY);
 
   iohome::frame::IoFrame request;
-  TEST_ASSERT_TRUE(peer.create_challenge_request(&request, OWN_NODE, PEER_NODE));
+  TEST_ASSERT_TRUE(peer.create_challenge_request(&request, OWN_NODE, PEER_NODE, 0));
 
   uint8_t buffer[iohome::FRAME_MAX_SIZE];
   const size_t len = iohome::frame::serialize_frame(&request, buffer, sizeof(buffer));
@@ -285,7 +285,7 @@ void test_rejects_forged_peer_challenge(void) {
   attacker.begin(attacker_key);
 
   iohome::frame::IoFrame request;
-  TEST_ASSERT_TRUE(attacker.create_challenge_request(&request, OWN_NODE, PEER_NODE));
+  TEST_ASSERT_TRUE(attacker.create_challenge_request(&request, OWN_NODE, PEER_NODE, 0));
 
   uint8_t buffer[iohome::FRAME_MAX_SIZE];
   const size_t len = iohome::frame::serialize_frame(&request, buffer, sizeof(buffer));

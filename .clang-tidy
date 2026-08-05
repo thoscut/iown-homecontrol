@@ -1,4 +1,34 @@
 ---
+# Checks disabled after this list was first written:
+#
+#   misc-include-cleaner wants every transitively-used symbol's header included
+#   directly. The protocol headers deliberately re-export the constants they
+#   build on, so it fires on nearly every line and buries the real findings.
+#
+#   modernize-deprecated-headers prefers <cstring> over <string.h>. This is
+#   embedded C++ and uses the C spellings throughout; churning them would be a
+#   large diff for no behavioural change.
+#
+#   modernize-use-trailing-return-type is a pure style preference the codebase
+#   does not follow.
+#
+#   google-runtime-int wants uint64_t instead of `unsigned long`. Timestamps
+#   here mirror Arduino's millis()/micros(), which return `unsigned long`;
+#   widening them would silently change the wraparound arithmetic the timing
+#   code depends on.
+#
+#   cppcoreguidelines-avoid-do-while fires on the `do { } while (0)` wrapper
+#   every multi-statement macro needs.
+#
+#   cppcoreguidelines-avoid-non-const-global-variables fires on the packet flag
+#   an ISR sets. RadioLib's callback takes no user context, so it has to be a
+#   file-scope variable.
+#
+#   cppcoreguidelines-owning-memory wants gsl::owner annotations, which are not
+#   available on an embedded toolchain.
+#
+# NOTE: the value below is a YAML folded block. Comment lines indented under it
+# become part of the check list and break parsing - keep notes up here.
 Checks: >-
   *,
   -abseil-*,
@@ -85,9 +115,18 @@ Checks: >-
   -readability-redundant-string-init,
   -readability-uppercase-literal-suffix,
   -readability-use-anyofallof,
+  -cppcoreguidelines-avoid-do-while,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-owning-memory,
+  -google-runtime-int,
+  -misc-include-cleaner,
+  -modernize-deprecated-headers,
+  -modernize-use-trailing-return-type,
 WarningsAsErrors: '*'
-AnalyzeTemporaryDtors: false
-FormatStyle:     google
+# NOTE: AnalyzeTemporaryDtors was removed in clang-tidy 16. Leaving it here made
+# clang-tidy abort with "unknown key" before analysing anything, so `pio check`
+# reported success without having checked a single file.
+FormatStyle:     file
 CheckOptions:
   - key:             google-readability-function-size.StatementThreshold
     value:           '800'

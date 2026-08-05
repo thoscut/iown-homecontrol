@@ -146,6 +146,30 @@ jobs:
       - name: Byte-compile every script
         run: python3 -m compileall -q scripts
 
+      - name: No two tracked paths collide when lower-cased
+        run: |
+          set -euo pipefail
+          # docs/devices/ carried both Velux/ and velux/ - 46 files each, 57 MB
+          # duplicated, seven pairs not byte-identical. macOS and Windows use
+          # case-insensitive filesystems by default, so git cannot check both
+          # out side by side: one silently overwrites the other and the working
+          # tree reads as permanently modified for the pairs that differ.
+          git ls-files | python3 -c "
+          import sys, collections
+          seen = collections.defaultdict(set)
+          for line in sys.stdin:
+              path = line.rstrip('\n')
+              seen[path.lower()].add(path)
+          collisions = {k: v for k, v in seen.items() if len(v) > 1}
+          for _, paths in sorted(collisions.items()):
+              print('COLLIDES:', ', '.join(sorted(paths)))
+          if collisions:
+              print(f'{len(collisions)} path(s) differ only in case; a checkout on '
+                    'macOS or Windows cannot represent them.')
+              sys.exit(1)
+          print('every tracked path is unique when lower-cased')
+          "
+
       - name: Frame parser self-test
         # Checks the decoder against the captures in docs/linklayer.md and
         # scripts/io-homecontrol.ksy: address order, the size-field bias, where

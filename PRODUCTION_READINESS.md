@@ -108,6 +108,10 @@ software".
 | V30 | Low | `platformio.ini` | The firmware built with no warning flags at all, and RadioLib was pinned with a caret range that had drifted from 7.1.2 to 7.7.1. |
 | V31 | Low | `src/board_pins.h` | The old board table keyed TTGO v2.1 on `ARDUINO_TTGO_LORA32_V21NEW` while PlatformIO defines `ARDUINO_TTGO_LoRa32_v21new`, so that board never compiled; and SX126x boards got BUSY passed as the interrupt line. |
 | V32 | Medium | `iohome_constants.h` | `CMD_SERVICE_RESET` sat at 0xF1. Reboot is 0xF2; 0xF1 is "read groups" / service ACK, so the constant named one command and addressed another. Found by diffing our table against `docs/commands.md` and the enum in `scripts/io-homecontrol.ksy`, which agree with each other. The whole command table, the Main Parameter values, the originators and the ACEI layout are now pinned by tests. |
+| V33 | **High** | `platformio.ini` | `check_flags` carried `--fix-errors`, so `pio check` rewrote the source tree in place. Combined with V34 it produced code that does not compile - `namespace iohome;` followed by `{`, and `static` on functions declared in headers - across 30 files. A command that checks must not edit. |
+| V34 | High | `platformio.ini` | `.clang-tidy` was never applied. PlatformIO appends `--checks=*` unless `check_flags` mentions `--checks` or `--config`, and a command-line `--checks` overrides the file's list completely, so every documented exclusion was ignored and the run reported 1835 defects. Fixed with `--config-file=.clang-tidy`; the count is now ~20, all style. |
+| V35 | Medium | `platformio.ini` | `check_skip_packages = yes` withheld the framework include paths, so clang-tidy could not find `stddef.h` or `Arduino.h` and aborted the parse of most files - the same shape as V19, a linter that reports success without having analysed anything. |
+| V36 | Low | `src/IoHome.h` | Include guard `_IOHOME_H`: a leading underscore followed by a capital is reserved for the implementation. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 

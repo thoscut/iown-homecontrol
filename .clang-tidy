@@ -27,6 +27,36 @@
 #   cppcoreguidelines-owning-memory wants gsl::owner annotations, which are not
 #   available on an embedded toolchain.
 #
+#
+#   portability-avoid-pragma-once wants include guards everywhere. This project
+#   uses `#pragma once` deliberately and consistently; swapping them all out
+#   would be a large diff for no behavioural change.
+#
+#   readability-use-concise-preprocessor-directives rewrites
+#   `#if defined(X)` as `#ifdef X`. Several of those conditions are written the
+#   long way because the neighbouring branches test more than one macro, and
+#   reading them uniformly is worth more than the shorter spelling.
+#
+#   readability-identifier-naming fires across the legacy ESP32 helper layer
+#   (`src/esp32_api*`, `src/IoHome.h`), which keeps the vendor's spellings so it
+#   stays recognisable against the datasheets it was transcribed from.
+#
+#
+#   llvm-prefer-static-over-anonymous-namespace and misc-use-anonymous-namespace
+#   contradict each other: one wants file-local helpers marked `static`, the
+#   other wants them in an anonymous namespace. The codebase uses the anonymous
+#   namespace, which is the C++ idiom, so the LLVM-house-style check is the one
+#   that goes.
+#
+#   readability-math-missing-parentheses wants `(i * 4) + j` for the row/column
+#   indexing in the AES implementation. The precedence is standard and the
+#   unparenthesised form is how FIPS-197 writes it.
+#
+#   bugprone-branch-clone fires on the authentication-trailer decision in
+#   iohome_frame.cpp, where four distinct conditions map onto two outcomes. Each
+#   branch carries its own reason in a comment; collapsing them would hide why
+#   each case is decided the way it is.
+#
 # NOTE: the value below is a YAML folded block. Comment lines indented under it
 # become part of the check list and break parsing - keep notes up here.
 Checks: >-
@@ -122,6 +152,12 @@ Checks: >-
   -misc-include-cleaner,
   -modernize-deprecated-headers,
   -modernize-use-trailing-return-type,
+  -portability-avoid-pragma-once,
+  -readability-use-concise-preprocessor-directives,
+  -readability-identifier-naming,
+  -llvm-prefer-static-over-anonymous-namespace,
+  -readability-math-missing-parentheses,
+  -bugprone-branch-clone,
 WarningsAsErrors: '*'
 # NOTE: AnalyzeTemporaryDtors was removed in clang-tidy 16. Leaving it here made
 # clang-tidy abort with "unknown key" before analysing anything, so `pio check`

@@ -59,8 +59,8 @@ int fInitializeSPI_Devices( spi_device_handle_t &h, int csPin, spi_host_device_t
   dev_config.spics_io_num     = csPin;
   dev_config.flags            = 0;
   dev_config.queue_size       = 1;
-  dev_config.pre_cb           = NULL;
-  dev_config.post_cb          = NULL;
+  dev_config.pre_cb           = nullptr;
+  dev_config.post_cb          = nullptr;
   // Attach to the host the caller initialised. Hardcoding HSPI_HOST here meant
   // fInitializeSPI_Channel(VSPI_HOST, ...) brought up one bus and this added
   // the device to another.
@@ -116,7 +116,7 @@ int fWriteSPIdata8bits(spi_device_handle_t &h, int _address, int _sendData) {
   trans_desc.length = (8 * 2); // total data bits
   trans_desc.tx_buffer = txData;
   trans_desc.rxlength = 0 ; // Number of bits NOT number of bytes
-  trans_desc.rx_buffer = NULL;
+  trans_desc.rx_buffer = nullptr;
   txData[0] = address  & 0x7F;
   txData[1] = sendData;
   intError = spi_device_transmit( h, &trans_desc);

@@ -12,8 +12,11 @@
  * directly.
  */
 
-#if !defined(_IOHOME_H)
-#define _IOHOME_H
+// The guard was _IOHOME_H. A leading underscore followed by a capital is
+// reserved for the implementation in both C and C++, so that name belongs to
+// the compiler, not to us.
+#ifndef IOHOME_H
+#define IOHOME_H
 
 #include <RadioLib.h>
 #include <stddef.h>

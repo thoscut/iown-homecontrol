@@ -332,6 +332,14 @@ RxReject IoHomeControl::screen_frame(const frame::IoFrame* frame) {
     if (!replay_guard_.accept(frame->src_node, frame::get_rolling_code(frame))) {
       return RxReject::REPLAY;
     }
+  } else {
+    // 2W frames have no sequence number - freshness comes from the session
+    // challenge, which signs several frames. Reject a MAC this node produced
+    // recently, which is either a protocol repeat we should act on once or a
+    // replay.
+    if (!replay_guard_.accept_mac(frame->src_node, frame->hmac)) {
+      return RxReject::REPLAY;
+    }
   }
 
   return RxReject::NONE;

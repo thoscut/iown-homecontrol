@@ -22,7 +22,18 @@
 namespace iohome {
 
 /**
- * @brief Per-node rolling-code replay protection
+ * @brief Per-node replay protection
+ *
+ * Two mechanisms, because the two protocol modes carry different freshness
+ * material:
+ *
+ *  - 1W frames carry a 16-bit sequence number, so accept() enforces forward
+ *    progress within a bounded window.
+ *  - 2W frames carry no sequence number; their freshness comes from the
+ *    challenge negotiated at the start of a session. While that session is
+ *    open the same challenge signs several frames, so an attacker who records
+ *    one can re-transmit it and the MAC still verifies. accept_mac() closes
+ *    that by remembering the MACs recently accepted from each node.
  *
  * Tracking is per source node ID and bounded by MAX_NODES; the least recently
  * used entry is evicted when the table is full.
@@ -31,6 +42,14 @@ class ReplayGuard {
 public:
   /// Number of source nodes tracked simultaneously.
   static constexpr size_t MAX_NODES = 16;
+
+  /**
+   * @brief Number of recent MACs remembered per node.
+   *
+   * io-homecontrol repeats each frame several times per packet, so the
+   * history has to be deep enough to cover a burst and then some.
+   */
+  static constexpr size_t MAC_HISTORY = 4;
 
   /**
    * @brief Default forward window.
@@ -60,6 +79,25 @@ public:
    * Useful when a frame still has to pass other checks before being accepted.
    */
   bool would_accept(const uint8_t node_id[NODE_ID_SIZE], uint16_t sequence) const;
+
+  /**
+   * @brief Check a received MAC against the recent history and record it
+   *
+   * For 2W frames, which have no sequence number. Rejects a MAC this node has
+   * produced within the last MAC_HISTORY accepted frames - that is either a
+   * protocol-level repeat, which should only be acted on once, or a replay.
+   *
+   * This does not make 2W frames as fresh as 1W ones: an attacker who records
+   * a frame and re-transmits it after MAC_HISTORY other frames from the same
+   * node, within the same session, still gets through. The real bound is the
+   * session timeout, after which the challenge changes and the MAC no longer
+   * verifies. See docs/SECURITY-MODEL.md.
+   *
+   * @param node_id Source node ID of the frame (3 bytes)
+   * @param mac MAC taken from the frame (6 bytes)
+   * @return true if the MAC has not been seen recently
+   */
+  bool accept_mac(const uint8_t node_id[NODE_ID_SIZE], const uint8_t mac[HMAC_SIZE]);
 
   /**
    * @brief Seed or override the last known sequence number for a node
@@ -101,6 +139,11 @@ private:
     uint16_t last_sequence;
     uint32_t last_use;   // monotonic tick for LRU eviction
     bool used;
+
+    // Ring of recently accepted MACs, for 2W frames.
+    uint8_t mac_history[MAC_HISTORY][HMAC_SIZE];
+    uint8_t mac_count;   // how many slots hold a MAC
+    uint8_t mac_next;    // next slot to overwrite
   };
 
   Entry* find(const uint8_t node_id[NODE_ID_SIZE]);

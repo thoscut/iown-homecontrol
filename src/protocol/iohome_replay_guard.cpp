@@ -39,6 +39,7 @@ ReplayGuard::Entry* ReplayGuard::allocate(const uint8_t node_id[NODE_ID_SIZE]) {
   // Prefer a free slot.
   for (size_t i = 0; i < MAX_NODES; i++) {
     if (!entries_[i].used) {
+      memset(&entries_[i], 0, sizeof(Entry));
       memcpy(entries_[i].node_id, node_id, NODE_ID_SIZE);
       entries_[i].used = true;
       return &entries_[i];
@@ -53,8 +54,11 @@ ReplayGuard::Entry* ReplayGuard::allocate(const uint8_t node_id[NODE_ID_SIZE]) {
     }
   }
 
+  // Wipe the evicted node's state; the newcomer must not inherit its sequence
+  // number or its MAC history.
+  memset(victim, 0, sizeof(Entry));
   memcpy(victim->node_id, node_id, NODE_ID_SIZE);
-  victim->last_sequence = 0;
+  victim->used = true;
   return victim;
 }
 
@@ -102,6 +106,36 @@ bool ReplayGuard::accept(const uint8_t node_id[NODE_ID_SIZE], uint16_t sequence)
   }
 
   entry->last_sequence = sequence;
+  entry->last_use = ++tick_;
+  return true;
+}
+
+bool ReplayGuard::accept_mac(const uint8_t node_id[NODE_ID_SIZE], const uint8_t mac[HMAC_SIZE]) {
+  if (node_id == nullptr || mac == nullptr) {
+    return false;
+  }
+
+  Entry* entry = find(node_id);
+  if (entry == nullptr) {
+    entry = allocate(node_id);
+    if (entry == nullptr) {
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < entry->mac_count; i++) {
+    if (memcmp(entry->mac_history[i], mac, HMAC_SIZE) == 0) {
+      rejected_count_++;
+      return false;
+    }
+  }
+
+  memcpy(entry->mac_history[entry->mac_next], mac, HMAC_SIZE);
+  entry->mac_next = static_cast<uint8_t>((entry->mac_next + 1) % MAC_HISTORY);
+  if (entry->mac_count < MAC_HISTORY) {
+    entry->mac_count++;
+  }
+
   entry->last_use = ++tick_;
   return true;
 }

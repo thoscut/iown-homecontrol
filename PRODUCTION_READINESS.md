@@ -91,6 +91,8 @@ software".
 | V13 | Low | ESPHome cover | Pressing stop mid-movement could send a second STOP if the timed estimate completed on that same call. |
 | V14 | Low | `iohome_crypto.cpp` | The software AES fallback was selected on plain ESP-IDF builds, where mbedTLS is available; `esp_random()` moved out of `esp_system.h` in ESP-IDF 5. |
 | V15 | Low | `.github/workflows` | CodeQL and the spell check were both disabled with `on: workflow_dispatch`. |
+| V16 | Medium | Receive path | 2W frames had no replay protection at all: they carry no sequence number, and one session challenge signs several frames. Added a recent-MAC history per node. |
+| V17 | Low | `iohome_replay_guard.cpp` | A node taking over an evicted table slot inherited the previous node's sequence number, so its first frames were rejected. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 

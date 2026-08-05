@@ -58,6 +58,17 @@ recorded long ago lands outside it and is rejected.
 `IoHomeControl` applies the guard automatically to every authenticated 1W frame
 it accepts, and reports rejections through `rx_stats().replays`.
 
+**2W frames have no sequence number.** Their freshness comes from the challenge
+negotiated at the start of a session, and while that session is open the same
+challenge signs several frames - so an attacker who records one and re-sends it
+gets a MAC that still verifies. `ReplayGuard::accept_mac()` narrows the window
+by remembering the last few MACs accepted from each node, which stops both the
+protocol's own frame repeats and an immediate replay. It does not close the
+window entirely: a frame replayed after four other frames from the same node,
+still inside the session, gets through. The real bound is the session timeout
+(30 s by default), after which the challenge changes and the recorded MAC stops
+verifying. Shorten it with `set_session_timeout_ms()` if that matters for you.
+
 ---
 
 ## What the protocol does *not* protect
@@ -121,7 +132,8 @@ for exactly that reason. It cannot cause an actuator to move.
 | Challenge lifetime | Single use. Consumed on the first verification attempt, success or failure, so an attacker cannot grind responses against a known nonce. |
 | Session lifetime | An authenticated 2W session expires after 30 s by default (`set_session_timeout_ms`). |
 | MAC comparison | Constant time (`crypto::constant_time_equal`), so a timing side channel cannot leak the expected MAC byte by byte. |
-| Replay | `ReplayGuard`, per source node, wraparound-safe, with a configurable window. |
+| Replay (1W) | `ReplayGuard`, per source node, wraparound-safe, with a configurable window. |
+| Replay (2W) | Recent-MAC history per node, bounded by the session timeout. |
 | Rolling code persistence | Stored in NVS with block reservation, so a reboot resumes past every counter value that could have been transmitted. Without this, a receiver rejects everything until the counter catches up — and an attacker's recording becomes replayable again. |
 | Key material | Zeroed with `crypto::secure_zero()` when it leaves scope. |
 | Receive policy | CRC, then MAC, then replay. Frames without a MAC are rejected unless they carry one of the commands the protocol defines as unauthenticated (discovery, key transfer and their acks). |
@@ -144,7 +156,9 @@ for exactly that reason. It cannot cause an actuator to move.
 | ------ | ---------- | ------- |
 | Neighbour's remote operates your blinds | Yes | System key + MAC |
 | Attacker forges a command without the key | Yes | 48-bit MAC |
-| Attacker records and replays a command | Yes | `ReplayGuard` + persisted rolling code |
+| Attacker records and replays a 1W command | Yes | `ReplayGuard` + persisted rolling code |
+| Attacker replays a 2W command immediately | Yes | Recent-MAC history |
+| Attacker replays a 2W command later in the same session | **Partly** | Bounded by the session timeout, not eliminated |
 | Attacker replays after you power-cycle the controller | Yes | Rolling code persistence with block reservation |
 | Attacker learns the MAC by timing your receiver | Yes | Constant-time comparison |
 | Attacker predicts a 2W challenge | Yes | CSPRNG-backed challenges |

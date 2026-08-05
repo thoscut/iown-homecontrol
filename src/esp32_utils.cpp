@@ -2,44 +2,38 @@
   * @file    esp32_utils.cpp
   * @author  iown-homecontrol
   * @brief   ESP32 helper functions
-  *
-  * #include <LibraryFile.h>
-  * #include "LocalFile.h"
-  *
   */
 
 #include <Arduino.h>
 
-#if defined(ESP32)
-  #include "esp32_api.h"
-  #include "esp_crc.h"
-  #include "esp_rom_crc.h"
-#endif
+#include "iown_frame.h"  // declares iown_crc_calc (and gives it C linkage)
+#include "protocol/iohome_crypto.h"
 
 #pragma region ESP32_CRC
 
-/* Calculates the CRC if the packet has none.
-   CRC-16/CCITT (KERMIT)
-*/
-uint16_t iown_crc_calc(uint8_t *iown_packet, uint8_t iown_packet_len) {
-    // iown_packet_t *packet = (iown_packet_t *)iown_packet;
-
-    // uint16_t crc, crc_cal = 0;
-    // uint8_t len = 0;
-
-    // len = packet->len + 1;
-
-    // crc = esp_crc16_le(UINT16_MAX, (uint8_t const *)packet, len);
-
-    // if(packet->crc == 0){ // Calculate CRC
-    //   packet->crc = crc;
-    //   return true;
-    // }
-
-    // else {  // Verify CRC
-    //   return (packet->crc == crc) ? true : false;
-    // }
-
-    return -1;
+/**
+ * @brief CRC-16/CCITT (KERMIT) over an io-homecontrol packet.
+ *
+ * The body of this function was entirely commented out and it ended in
+ * `return -1;` from a `uint16_t` return type, so every caller got 0xFFFF with
+ * no way to tell that apart from a real checksum. Both parameters went unused.
+ *
+ * It now delegates to the implementation the protocol stack uses, which the
+ * unit tests check against the captured frames in docs/linklayer.md.
+ *
+ * The ESP-IDF `esp_crc16_le()` the commented-out code reached for is not a
+ * drop-in replacement: it seeds with ~init and reflects the result, so it does
+ * not reproduce the captured checksums.
+ *
+ * @param iown_packet     frame bytes, excluding the CRC itself
+ * @param iown_packet_len number of bytes at @p iown_packet
+ * @return the CRC, or 0 for a null or empty input
+ */
+uint16_t iown_crc_calc(const uint8_t *iown_packet, uint8_t iown_packet_len) {
+  if (iown_packet == nullptr || iown_packet_len == 0) {
+    return 0;
+  }
+  return iohome::crypto::compute_crc16(iown_packet, iown_packet_len);
 }
+
 #pragma endregion ESP32_CRC

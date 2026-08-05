@@ -157,6 +157,45 @@ void test_execute_frame_shape(void) {
   TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed, SYSTEM_KEY));
 }
 
+void test_execute_with_extra_functional_params(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  // Four functional parameters, the shape seen in scripts/io-homecontrol.ksy.
+  const uint8_t fps[4] = {0x80, 0xC8, 0x00, 0x00};
+  TEST_ASSERT_TRUE(controller.send_execute_fp(PEER_NODE, 0xD400, fps, sizeof(fps)));
+
+  const std::vector<uint8_t>& tx = radio.last_transmission;
+
+  // header(9) + execute payload(8) + seq(2) + mac(6) + crc(2)
+  TEST_ASSERT_EQUAL_UINT(27, tx.size());
+  TEST_ASSERT_EQUAL_UINT8(27 - 3, tx[0] & iohome::CTRL0_LENGTH_MASK);
+
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, tx[8]);
+  TEST_ASSERT_EQUAL_HEX8(0xD4, tx[11]);  // main parameter high byte
+  TEST_ASSERT_EQUAL_HEX8(0x00, tx[12]);
+  TEST_ASSERT_EQUAL_HEX8(0x80, tx[13]);  // FP1
+  TEST_ASSERT_EQUAL_HEX8(0xC8, tx[14]);  // FP2
+  TEST_ASSERT_EQUAL_HEX8(0x00, tx[15]);  // FP3
+  TEST_ASSERT_EQUAL_HEX8(0x00, tx[16]);  // FP4
+
+  // The longer payload must still parse back and authenticate; the parser has
+  // to tell eight parameter bytes from parameters plus a trailer.
+  iohome::frame::IoFrame parsed;
+  TEST_ASSERT_TRUE(iohome::frame::parse_frame(tx.data(), tx.size(), &parsed));
+  TEST_ASSERT_TRUE(parsed.authenticated);
+  TEST_ASSERT_EQUAL_UINT8(8, parsed.data_len);
+  TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed, SYSTEM_KEY));
+
+  // Argument checking.
+  TEST_ASSERT_FALSE(controller.send_execute_fp(PEER_NODE, 0, nullptr, 2));
+  TEST_ASSERT_FALSE(controller.send_execute_fp(PEER_NODE, 0, fps, 1));
+  uint8_t too_many[iohome::EXECUTE_MAX_FUNCTIONAL_PARAMS + 1] = {0};
+  TEST_ASSERT_FALSE(
+      controller.send_execute_fp(PEER_NODE, 0, too_many, sizeof(too_many)));
+}
+
 void test_position_mapping(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
@@ -699,6 +738,7 @@ int main(int, char**) {
   RUN_TEST(test_configure_radio_programs_correct_parameters);
 
   RUN_TEST(test_execute_frame_shape);
+  RUN_TEST(test_execute_with_extra_functional_params);
   RUN_TEST(test_position_mapping);
   RUN_TEST(test_rejects_invalid_acei);
   RUN_TEST(test_send_command_rejects_nullptr);

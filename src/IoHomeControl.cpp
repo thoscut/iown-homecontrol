@@ -546,17 +546,33 @@ bool IoHomeControl::send_execute(
   uint8_t fp1,
   uint8_t fp2
 ) {
-  // Command 0x00 payload: originator | ACEI | main parameter | FP1 | FP2
-  const uint8_t params[EXECUTE_PAYLOAD_SIZE] = {
-    static_cast<uint8_t>(originator_),
-    acei_,
-    static_cast<uint8_t>((main_param >> 8) & 0xFF),
-    static_cast<uint8_t>(main_param & 0xFF),
-    fp1,
-    fp2
-  };
+  const uint8_t fps[2] = {fp1, fp2};
+  return send_execute_fp(dest_node, main_param, fps, sizeof(fps));
+}
 
-  return send_command(dest_node, CMD_EXECUTE, params, sizeof(params));
+bool IoHomeControl::send_execute_fp(
+  const uint8_t dest_node[NODE_ID_SIZE],
+  uint16_t main_param,
+  const uint8_t* fps,
+  size_t fp_count
+) {
+  // FP1 and FP2 are always on the wire, so anything shorter is not an Execute
+  // payload. More may follow - see EXECUTE_PAYLOAD_MIN_SIZE.
+  if (fps == nullptr || fp_count < 2 || fp_count > EXECUTE_MAX_FUNCTIONAL_PARAMS) {
+    LOG_PRINT("Error: execute needs 2 to 16 functional parameters");
+    return false;
+  }
+
+  // Command 0x00 payload: originator | ACEI | main parameter | FP1 | FP2 | ...
+  uint8_t params[EXECUTE_PAYLOAD_PREFIX_SIZE + EXECUTE_MAX_FUNCTIONAL_PARAMS];
+  params[0] = static_cast<uint8_t>(originator_);
+  params[1] = acei_;
+  params[2] = static_cast<uint8_t>((main_param >> 8) & 0xFF);
+  params[3] = static_cast<uint8_t>(main_param & 0xFF);
+  memcpy(&params[EXECUTE_PAYLOAD_PREFIX_SIZE], fps, fp_count);
+
+  return send_command(dest_node, CMD_EXECUTE,
+                      params, EXECUTE_PAYLOAD_PREFIX_SIZE + fp_count);
 }
 
 bool IoHomeControl::set_position(const uint8_t dest_node[NODE_ID_SIZE], uint8_t percent_open) {

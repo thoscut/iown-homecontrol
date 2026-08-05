@@ -212,6 +212,26 @@ public:
                     uint8_t fp2 = 0x00);
 
   /**
+   * @brief Send command 0x00 with an arbitrary number of functional parameters
+   *
+   * Most actuators only need FP1 and FP2, which send_execute() covers. Some
+   * carry more - the capture in scripts/io-homecontrol.ksy has four - and
+   * multi-channel actuator types address their channels through the extra
+   * parameters.
+   *
+   * @param dest_node  Destination node ID (3 bytes)
+   * @param main_param Main parameter
+   * @param fps        Functional parameters
+   * @param fp_count   Number of functional parameters, 2 to
+   *                   EXECUTE_MAX_FUNCTIONAL_PARAMS
+   * @return true on success, false on error
+   */
+  bool send_execute_fp(const uint8_t dest_node[NODE_ID_SIZE],
+                       uint16_t main_param,
+                       const uint8_t* fps,
+                       size_t fp_count);
+
+  /**
    * @brief Move an actuator to a position
    *
    * @param dest_node Destination node ID (3 bytes)

@@ -71,11 +71,15 @@ bool is_unauthenticated_command(uint8_t command_id) {
 
 int expected_payload_size(uint8_t command_id) {
   switch (command_id) {
-    // Activate/Execute and Activate Mode: originator, ACEI, 2-byte parameter,
-    // two further bytes.
+    // Activate/Execute and Activate Mode carry originator, ACEI, a 2-byte main
+    // parameter and at least two functional parameters - but more functional
+    // parameters may follow, so the length is not fixed. Captures show both 6
+    // and 8 payload bytes for command 0x00 (see EXECUTE_PAYLOAD_MIN_SIZE).
+    // Reporting 6 here as if it were exact made the 8-byte form miss the
+    // parser's precise length test.
     case CMD_EXECUTE:
     case CMD_ACTIVATE_MODE:
-      return EXECUTE_PAYLOAD_SIZE;
+      return -1;
 
     // Challenge request and response carry the 6-byte challenge.
     case CMD_CHALLENGE_REQUEST:
@@ -99,6 +103,21 @@ int expected_payload_size(uint8_t command_id) {
 
     default:
       return -1;  // Length varies or is not documented
+  }
+}
+
+int min_payload_size(uint8_t command_id) {
+  switch (command_id) {
+    // Variable-length: originator, ACEI, main parameter and two functional
+    // parameters are always present; further functional parameters may follow.
+    case CMD_EXECUTE:
+    case CMD_ACTIVATE_MODE:
+      return EXECUTE_PAYLOAD_MIN_SIZE;
+
+    default:
+      // Everything else is either fixed-length or undocumented; fall back to
+      // whatever the exact table knows.
+      return expected_payload_size(command_id);
   }
 }
 
@@ -184,7 +203,27 @@ bool set_execute_command(IoFrame* frame,
                          uint8_t acei,
                          uint8_t fp1,
                          uint8_t fp2) {
+  const uint8_t fps[2] = {fp1, fp2};
+  return set_execute_command_fp(frame, main_param, originator, acei, fps, sizeof(fps));
+}
+
+bool set_execute_command_fp(IoFrame* frame,
+                            uint16_t main_param,
+                            Originator originator,
+                            uint8_t acei,
+                            const uint8_t* fps,
+                            size_t fp_count) {
   if (frame == nullptr) {
+    return false;
+  }
+
+  // FP1 and FP2 are always present, so a shorter payload is not a valid
+  // Execute command however the caller got there.
+  if (fp_count < 2 || fp_count > EXECUTE_MAX_FUNCTIONAL_PARAMS) {
+    return false;
+  }
+
+  if (fps == nullptr) {
     return false;
   }
 
@@ -193,16 +232,14 @@ bool set_execute_command(IoFrame* frame,
     return false;
   }
 
-  const uint8_t params[EXECUTE_PAYLOAD_SIZE] = {
-    static_cast<uint8_t>(originator),
-    acei,
-    static_cast<uint8_t>((main_param >> 8) & 0xFF),
-    static_cast<uint8_t>(main_param & 0xFF),
-    fp1,
-    fp2
-  };
+  uint8_t params[EXECUTE_PAYLOAD_PREFIX_SIZE + EXECUTE_MAX_FUNCTIONAL_PARAMS];
+  params[0] = static_cast<uint8_t>(originator);
+  params[1] = acei;
+  params[2] = static_cast<uint8_t>((main_param >> 8) & 0xFF);
+  params[3] = static_cast<uint8_t>(main_param & 0xFF);
+  memcpy(&params[EXECUTE_PAYLOAD_PREFIX_SIZE], fps, fp_count);
 
-  return set_command(frame, CMD_EXECUTE, params, sizeof(params));
+  return set_command(frame, CMD_EXECUTE, params, EXECUTE_PAYLOAD_PREFIX_SIZE + fp_count);
 }
 
 void set_rolling_code(IoFrame* frame, uint16_t code) {
@@ -416,6 +453,7 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame, AuthT
     case AuthTrailer::AUTO:
     default: {
       const int expected = expected_payload_size(frame->command_id);
+      const int minimum = min_payload_size(frame->command_id);
 
       if (expected >= 0 &&
           payload_len == static_cast<size_t>(expected) + trailer_len) {
@@ -423,6 +461,17 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame, AuthT
         frame->authenticated = true;
       } else if (expected >= 0 && payload_len == static_cast<size_t>(expected)) {
         // Exactly the documented parameter length: no room for a trailer.
+        frame->authenticated = false;
+      } else if (minimum >= 0 &&
+                 payload_len >= static_cast<size_t>(minimum) + trailer_len) {
+        // Variable-length command, long enough to hold its minimum parameter
+        // block and a trailer. This is the case the 8-byte Execute payload in
+        // scripts/io-homecontrol.ksy lands in.
+        frame->authenticated = true;
+      } else if (minimum >= 0 && payload_len >= static_cast<size_t>(minimum)) {
+        // Variable-length command, too short for both its parameters and a
+        // trailer, so there is no trailer. Guessing "authenticated" here used
+        // to make the parser read parameter bytes as a MAC.
         frame->authenticated = false;
       } else {
         // Unknown or unexpected length: assume a trailer unless the command is

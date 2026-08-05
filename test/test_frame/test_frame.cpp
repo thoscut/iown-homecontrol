@@ -9,6 +9,7 @@
 #include <unity.h>
 #include "protocol/iohome_frame.h"
 #include "protocol/iohome_constants.h"
+#include "protocol/iohome_crypto.h"
 #include <string.h>
 
 using iohome::frame::AuthTrailer;
@@ -625,12 +626,151 @@ void test_command_metadata(void) {
     TEST_ASSERT_FALSE(iohome::frame::is_unauthenticated_command(iohome::CMD_EXECUTE));
     TEST_ASSERT_FALSE(iohome::frame::is_unauthenticated_command(iohome::CMD_CHALLENGE_RESPONSE));
 
-    TEST_ASSERT_EQUAL_INT(6, iohome::frame::expected_payload_size(iohome::CMD_EXECUTE));
+    // Execute has no fixed length: captures show both 6 and 8 payload bytes.
+    // Reporting an exact 6 made the 8-byte form miss the parser's precise test.
+    TEST_ASSERT_EQUAL_INT(-1, iohome::frame::expected_payload_size(iohome::CMD_EXECUTE));
+    TEST_ASSERT_EQUAL_INT(-1, iohome::frame::expected_payload_size(iohome::CMD_ACTIVATE_MODE));
+    TEST_ASSERT_EQUAL_INT(6, iohome::frame::min_payload_size(iohome::CMD_EXECUTE));
+    TEST_ASSERT_EQUAL_INT(6, iohome::frame::min_payload_size(iohome::CMD_ACTIVATE_MODE));
+
     TEST_ASSERT_EQUAL_INT(6, iohome::frame::expected_payload_size(iohome::CMD_CHALLENGE_REQUEST));
     TEST_ASSERT_EQUAL_INT(20, iohome::frame::expected_payload_size(iohome::CMD_SEND_1W_KEY));
     TEST_ASSERT_EQUAL_INT(16, iohome::frame::expected_payload_size(iohome::CMD_KEY_TRANSFER));
     TEST_ASSERT_EQUAL_INT(0, iohome::frame::expected_payload_size(iohome::CMD_DISCOVER));
     TEST_ASSERT_EQUAL_INT(-1, iohome::frame::expected_payload_size(0x20));
+
+    // For fixed-length commands the minimum is the exact length.
+    TEST_ASSERT_EQUAL_INT(6, iohome::frame::min_payload_size(iohome::CMD_CHALLENGE_REQUEST));
+    TEST_ASSERT_EQUAL_INT(0, iohome::frame::min_payload_size(iohome::CMD_DISCOVER));
+    TEST_ASSERT_EQUAL_INT(-1, iohome::frame::min_payload_size(0x20));
+}
+
+void test_ksy_capture_frame(void) {
+    // The example frame from scripts/io-homecontrol.ksy, SFD stripped. It comes
+    // from a different capture than docs/linklayer.md, so it is an independent
+    // check on the size-field bias, the CRC and the payload layout - all three
+    // of which the original code had wrong.
+    //
+    //  f8 00 | 00 00 7f | 70 87 58 | 00 | 01 61 d4 00 80 c8 00 00 | 3b d5
+    //   ctrl   target     source    cmd   8 payload bytes           seq
+    //  | 05 52 68 75 49 9c | 7e 72
+    //    MAC                 CRC-16/KERMIT, LSB first
+    static const uint8_t capture[] = {
+        0xf8, 0x00,
+        0x00, 0x00, 0x7f,
+        0x70, 0x87, 0x58,
+        0x00,
+        0x01, 0x61, 0xd4, 0x00, 0x80, 0xc8, 0x00, 0x00,
+        0x3b, 0xd5,
+        0x05, 0x52, 0x68, 0x75, 0x49, 0x9c,
+        0x7e, 0x72
+    };
+
+    // Size field 24 + 3 = 27 bytes. With the original bias of +11 this frame
+    // would have been read as 35 bytes, past the end of the buffer.
+    TEST_ASSERT_EQUAL_UINT(27, sizeof(capture));
+    TEST_ASSERT_EQUAL_UINT8(24, capture[0] & 0x1F);
+
+    // Our CRC reproduces the captured checksum exactly, LSB first.
+    TEST_ASSERT_TRUE(iohome::crypto::verify_crc16(capture, sizeof(capture)));
+
+    IoFrame parsed;
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(capture, sizeof(capture), &parsed));
+
+    TEST_ASSERT_EQUAL_UINT8(27, parsed.frame_length);
+    TEST_ASSERT_TRUE(parsed.is_1w_mode);       // ctrl0 bit 5 set
+    TEST_ASSERT_EQUAL_UINT8(iohome::CMD_EXECUTE, parsed.command_id);
+
+    const uint8_t expected_src[] = {0x70, 0x87, 0x58};
+    const uint8_t expected_dst[] = {0x00, 0x00, 0x7f};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_src, parsed.src_node, 3);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_dst, parsed.dest_node, 3);
+
+    // Eight payload bytes: the six-byte minimum plus two extra functional
+    // parameters. The trailer (2-byte sequence + 6-byte MAC) is split off.
+    TEST_ASSERT_TRUE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(8, parsed.data_len);
+
+    const uint8_t expected_payload[] = {0x01, 0x61, 0xd4, 0x00, 0x80, 0xc8, 0x00, 0x00};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_payload, parsed.data, sizeof(expected_payload));
+
+    // ACEI "IsValid" is set, as it must be for an actuator to act on the frame.
+    TEST_ASSERT_TRUE(iohome::is_acei_valid(parsed.data[1]));
+
+    // Rolling code is stored LSB first, so 3b d5 on air reads back as 0xd53b.
+    TEST_ASSERT_EQUAL_UINT16(0xd53b, iohome::frame::get_rolling_code(&parsed));
+
+    const uint8_t expected_mac[] = {0x05, 0x52, 0x68, 0x75, 0x49, 0x9c};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_mac, parsed.hmac, sizeof(expected_mac));
+
+    // Round-trip: re-serializing the parsed frame reproduces the capture byte
+    // for byte, CRC included.
+    uint8_t out[iohome::FRAME_MAX_SIZE];
+    const size_t len = iohome::frame::serialize_frame(&parsed, out, sizeof(out));
+    TEST_ASSERT_EQUAL_UINT(sizeof(capture), len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(capture, out, sizeof(capture));
+}
+
+void test_execute_command_with_extra_functional_params(void) {
+    IoFrame frame;
+    iohome::frame::init_frame(&frame, true);
+
+    // Four functional parameters, as in the .ksy capture.
+    const uint8_t fps[4] = {0x80, 0xc8, 0x00, 0x00};
+    TEST_ASSERT_TRUE(iohome::frame::set_execute_command_fp(
+        &frame, 0xd400, iohome::Originator::USER, 0x61, fps, sizeof(fps)));
+
+    TEST_ASSERT_EQUAL_UINT8(8, frame.data_len);
+    const uint8_t expected[] = {0x01, 0x61, 0xd4, 0x00, 0x80, 0xc8, 0x00, 0x00};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame.data, sizeof(expected));
+
+    // The two-parameter convenience wrapper produces the same bytes it always did.
+    IoFrame plain_two;
+    iohome::frame::init_frame(&plain_two, true);
+    TEST_ASSERT_TRUE(iohome::frame::set_execute_command(&plain_two, iohome::MP_CLOSE));
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, plain_two.data_len);
+
+    // Rejections: fewer than FP1+FP2, more than the protocol allows, null array,
+    // and an ACEI whose IsValid bit is clear.
+    const uint8_t one_fp[1] = {0x00};
+    TEST_ASSERT_FALSE(iohome::frame::set_execute_command_fp(
+        &frame, 0, iohome::Originator::USER, 0x61, one_fp, 1));
+
+    uint8_t too_many[iohome::EXECUTE_MAX_FUNCTIONAL_PARAMS + 1] = {0};
+    TEST_ASSERT_FALSE(iohome::frame::set_execute_command_fp(
+        &frame, 0, iohome::Originator::USER, 0x61, too_many, sizeof(too_many)));
+
+    TEST_ASSERT_FALSE(iohome::frame::set_execute_command_fp(
+        &frame, 0, iohome::Originator::USER, 0x61, nullptr, 2));
+
+    TEST_ASSERT_FALSE(iohome::frame::set_execute_command_fp(
+        &frame, 0, iohome::Originator::USER, 0x60, fps, sizeof(fps)));
+
+    TEST_ASSERT_FALSE(iohome::frame::set_execute_command_fp(
+        nullptr, 0, iohome::Originator::USER, 0x61, fps, sizeof(fps)));
+}
+
+void test_long_execute_payload_without_trailer_is_plain(void) {
+    // An 8-byte Execute payload with no authentication trailer. The parser used
+    // to call this authenticated because the payload was at least as long as a
+    // trailer, and then read two functional parameters plus part of the main
+    // parameter as a MAC.
+    IoFrame frame;
+    iohome::frame::init_frame(&frame, true);
+    const uint8_t fps[4] = {0x11, 0x22, 0x33, 0x44};
+    TEST_ASSERT_TRUE(iohome::frame::set_execute_command_fp(
+        &frame, iohome::MP_CLOSE, iohome::Originator::USER, iohome::ACEI_DEFAULT,
+        fps, sizeof(fps)));
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
+
+    uint8_t buffer[iohome::FRAME_MAX_SIZE];
+    const size_t len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
+
+    IoFrame parsed;
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_FALSE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(8, parsed.data_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(frame.data, parsed.data, 8);
 }
 
 void test_key_transfer_sized_frames_fit(void) {
@@ -740,6 +880,9 @@ int main(int, char **) {
     RUN_TEST(test_max_payload_frame_roundtrips);
     RUN_TEST(test_auto_trailer_uses_command_metadata);
     RUN_TEST(test_command_metadata);
+    RUN_TEST(test_ksy_capture_frame);
+    RUN_TEST(test_execute_command_with_extra_functional_params);
+    RUN_TEST(test_long_execute_payload_without_trailer_is_plain);
     RUN_TEST(test_key_transfer_sized_frames_fit);
     RUN_TEST(test_parse_never_overflows_for_any_control_byte);
     RUN_TEST(test_print_frame_handles_nullptr);

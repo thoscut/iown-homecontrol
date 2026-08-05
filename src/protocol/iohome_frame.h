@@ -98,6 +98,19 @@ bool is_unauthenticated_command(uint8_t command_id);
  */
 int expected_payload_size(uint8_t command_id);
 
+/**
+ * @brief Smallest valid parameter length for a command
+ *
+ * Same as expected_payload_size() for fixed-length commands. For the
+ * variable-length ones - Execute and Activate Mode, which may carry extra
+ * functional parameters - this reports the minimum instead of -1, which is
+ * what lets the parser tell a long parameter block apart from parameters
+ * followed by an authentication trailer.
+ *
+ * @return Length in bytes, or -1 when the command is not documented
+ */
+int min_payload_size(uint8_t command_id);
+
 // ============================================================================
 // Frame Construction
 // ============================================================================
@@ -167,6 +180,34 @@ bool set_execute_command(IoFrame* frame,
                          uint8_t acei = ACEI_DEFAULT,
                          uint8_t fp1 = 0x00,
                          uint8_t fp2 = 0x00);
+
+/**
+ * @brief Build a command 0x00 payload with an arbitrary number of functional
+ *        parameters
+ *
+ * Layout: originator(1) | acei(1) | main parameter(2, MSB first) | fp[0..n-1]
+ *
+ * set_execute_command() covers the two-parameter form that most actuators use.
+ * Some carry more - the capture in scripts/io-homecontrol.ksy has four - and
+ * actuator types that expose several channels need them.
+ *
+ * @param frame      Pointer to IoFrame structure
+ * @param main_param Main parameter (e.g. MP_OPEN, MP_CLOSE, MP_STOP)
+ * @param originator Command originator
+ * @param acei       ACEI byte; bit 0 must be set or actuators reject the frame
+ * @param fps        Functional parameters, or nullptr when @p fp_count is 0
+ * @param fp_count   Number of functional parameters. At least 2 (the protocol
+ *                   always carries FP1 and FP2) and at most
+ *                   EXECUTE_MAX_FUNCTIONAL_PARAMS.
+ * @return true on success; false on invalid arguments or if the resulting
+ *         frame would not fit the 5-bit size field
+ */
+bool set_execute_command_fp(IoFrame* frame,
+                            uint16_t main_param,
+                            Originator originator,
+                            uint8_t acei,
+                            const uint8_t* fps,
+                            size_t fp_count);
 
 /**
  * @brief Set rolling code (1W mode only)

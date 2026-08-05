@@ -84,6 +84,49 @@ jobs:
           echo "=== src/IoHomeControl.cpp"
           g++ "${FLAGS[@]}" -I test/mocks -c src/IoHomeControl.cpp -o /dev/null
 
+      - name: Compile the C headers as C
+        run: |
+          set -euo pipefail
+          # include/ is written as C with `extern "C"` blocks. It had never been
+          # compiled as C, and it did not: iown_node_types.h used a C++ `enum
+          # class` inside one of those blocks. Build a probe that touches every
+          # public macro so a regression shows up as a failure, not a surprise
+          # for whoever first tries to use these from C.
+          cat > /tmp/c_probe.c <<'PROBE'
+          #include "iown.h"
+          #include "iown_node_types.h"
+          int main(void) {
+            enum iown_node_actuator_types t = IOWN_NODE_WINDOW_OPENER;
+            unsigned char id[IOWN_LEN_NODEID] = {0x00, 0x00, 0x3F};
+            return (int)t
+                 + IOWN_IS_BROADCAST_ADDR(id)
+                 + IOWN_FRAME_SIZE(0xF8)
+                 + IOWN_FRAME_LEN(0xF8)
+                 + IOWN_FRAME_LEN_MAX
+                 + IOWN_LEN_FRAME(IOWN_MODE_1W, 6)
+                 + IOWN_LEN_FRAME(IOWN_MODE_2W, 6)
+                 + IOWN_LEN_PACKET_PLAIN(6)
+                 + IOWN_LEN_SYNC_WORD;
+          }
+          PROBE
+          gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I include \
+              -c /tmp/c_probe.c -o /dev/null
+          echo "include/ compiles as C"
+
+          # The size field encodes "total length minus Control Byte 0 minus the
+          # CRC". The capture in scripts/io-homecontrol.ksy has size 24 and is
+          # 27 bytes long, so the bias is 3. The original code used 11.
+          cat > /tmp/c_assert.c <<'ASSERT'
+          #include "iown.h"
+          _Static_assert(IOWN_FRAME_LEN(0xF8) == 27, "size field bias must be 3");
+          _Static_assert(IOWN_FRAME_LEN_MAX == 34, "5-bit size field tops out at 34 bytes");
+          _Static_assert(IOWN_LEN_SYNC_WORD == 3, "sync word is 57 FD 99");
+          _Static_assert(IOWN_LEN_FRAME(IOWN_MODE_1W, 8) == 27, "ksy capture is 27 bytes");
+          int main(void) { return 0; }
+          ASSERT
+          gcc -std=c11 -Wall -Wextra -Werror -I include -c /tmp/c_assert.c -o /dev/null
+          echo "frame length macros agree with the captures"
+
   radiolib-mock:
     name: RadioLib mock matches upstream
     runs-on: ubuntu-latest

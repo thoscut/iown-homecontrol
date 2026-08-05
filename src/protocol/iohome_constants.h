@@ -203,11 +203,30 @@ constexpr uint8_t CMD_SERVICE_RESET = 0xF1;
 // Command 0x00 (Execute) payload
 // ============================================================================
 //
-// | CMD | Originator | ACEI | Main Parameter | FP1 | FP2 |
-// |  1  |     1      |  1   |       2        |  1  |  1  |
+// | CMD | Originator | ACEI | Main Parameter | FP1 | FP2 | [FP3 ... FPn] |
+// |  1  |     1      |  1   |       2        |  1  |  1  |    0 .. 14    |
 //
-// The payload following the command ID is 6 bytes long.
-constexpr uint8_t EXECUTE_PAYLOAD_SIZE = 6;
+// The payload following the command ID is *at least* 6 bytes. docs/commands.md
+// documents up to 16 functional parameters, and captures show both lengths:
+//
+//   docs/commands.md, 1W example:  DATA(14) 01 67 d2 00 00 00 | SEQ | MAC
+//                                           `- 6 payload bytes
+//   scripts/io-homecontrol.ksy:    27-byte frame, 8 payload bytes
+//                                  01 61 d4 00 80 c8 00 00 | 3b d5 | MAC
+//
+// Treating 6 as an exact length made the second frame fall through the frame
+// parser's precise length test into its guess-a-trailer fallback.
+constexpr uint8_t EXECUTE_PAYLOAD_MIN_SIZE = 6;
+
+/// Bytes before the first functional parameter: originator, ACEI, main parameter.
+constexpr uint8_t EXECUTE_PAYLOAD_PREFIX_SIZE = 4;
+
+/// Largest number of functional parameters docs/commands.md describes.
+constexpr uint8_t EXECUTE_MAX_FUNCTIONAL_PARAMS = 16;
+
+/// Deprecated spelling of EXECUTE_PAYLOAD_MIN_SIZE, kept so existing callers
+/// keep compiling. The value is a minimum, not an exact size.
+constexpr uint8_t EXECUTE_PAYLOAD_SIZE = EXECUTE_PAYLOAD_MIN_SIZE;
 
 /**
  * @brief Command originator - what or who fired the command

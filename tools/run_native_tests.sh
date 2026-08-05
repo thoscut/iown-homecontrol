@@ -79,7 +79,47 @@ else
   done
 fi
 
+# ---------------------------------------------------------------------------
+# Randomness-across-restarts check
+#
+# A unit test cannot distinguish a CSPRNG from a well-seeded PRNG - both differ
+# from themselves within one run. What matters is that two processes do not
+# produce the same sequence, because a predictable 2W challenge lets an attacker
+# precompute a valid response. That is only observable across restarts, so it
+# lives here rather than in a suite.
+# ---------------------------------------------------------------------------
+run_random_restart_check() {
+  local probe="${BUILD_DIR}/random_probe"
+
+  "${CXX}" "${CXXFLAGS[@]}"     "${REPO_ROOT}/test/support/random_probe.cpp"     "${REPO_ROOT}/src/protocol/iohome_crypto.cpp"     "${REPO_ROOT}/src/protocol/iohome_aes_soft.cpp"     -o "${probe}"
+
+  local first second
+  if ! first="$("${probe}")" || ! second="$("${probe}")"; then
+    echo "  FAIL  random source unavailable or failing"
+    return 1
+  fi
+
+  if [[ "${first}" == "${second}" ]]; then
+    echo "  FAIL  random_bytes() returned the same sequence in two processes:"
+    echo "        ${first}"
+    echo "        A constant-seeded generator makes 2W challenges predictable."
+    return 1
+  fi
+
+  echo "  PASS  random_bytes differs across processes"
+  return 0
+}
+
 failures=0
+
+if [[ $# -eq 0 ]]; then
+  echo
+  echo "--- randomness across restarts ---"
+  if ! run_random_restart_check; then
+    failures=$((failures + 1))
+  fi
+fi
+
 for suite in "${SUITES[@]}"; do
   suite_dir="${REPO_ROOT}/test/${suite}"
   if [[ ! -d "${suite_dir}" ]]; then

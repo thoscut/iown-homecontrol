@@ -189,6 +189,7 @@ model. Summary of what remains, by design of the protocol:
 | Unit tests | ✅ 182 tests | 7 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
 | Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
+| Mutation checks | ✅ Complete | Six deliberate regressions - inverted mode bit, wrong size bias, dropped ACEI check, disabled replay guard, always-true MAC comparison, constant-seeded RNG - are each caught by the suite |
 | ESPHome config validation | ✅ Complete | Positive and six negative cases |
 | ESPHome compile | ✅ CI | `esphome compile` on every change |
 | Integration tests | ❌ None | Requires hardware |

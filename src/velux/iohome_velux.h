@@ -293,13 +293,27 @@ public:
    *
    * @param frame Output IoFrame (not finalized - see class note)
    * @param src_node Source node ID (3 bytes)
-   * @param tilt_percent Tilt (0-100)
+   * @param percent_open Slat opening, 0 = fully closed, 100 = fully open.
+   *        Values above 100 are clamped.
+   *
+   *        This used to be `tilt_percent`, with no direction given. The
+   *        implementation treated it as a *closure* percentage, because that is
+   *        what the underlying FP1 scale counts - so a caller reading the name
+   *        as "how far open" got the opposite of what it asked for, which is
+   *        what happened in the ESPHome cover. It now takes an opening
+   *        percentage and inverts internally, matching
+   *        create_position_frame(percent_open).
+   *
    * @return true on success, false if the model has no tilt
+   *
+   * @warning The direction of FP1 is inferred from it sharing the Main
+   *          Parameter's scale, not from a capture. If a blind tilts the wrong
+   *          way, this is the first thing to suspect.
    */
   bool create_tilt_frame(
     frame::IoFrame* frame,
     const uint8_t src_node[NODE_ID_SIZE],
-    uint8_t tilt_percent
+    uint8_t percent_open
   );
 
   const uint8_t* get_node_id() const { return node_id_; }

@@ -32,6 +32,9 @@
 #include <SPI.h>
 #include <vector>
 
+// CRC and MAC initial value. Dependency-free on purpose - see the header.
+#include "iohc_protocol.h"
+
 namespace esphome {
 namespace iown_homecontrol {
 

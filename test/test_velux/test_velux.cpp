@@ -189,10 +189,23 @@ void test_tilt_only_for_models_that_have_it(void) {
   // Tilt rides in FP1 while the main parameter holds "current position", so
   // the slats turn without the blind travelling.
   TEST_ASSERT_EQUAL_HEX16(iohome::MP_STOP, main_param_of(frame));
-  TEST_ASSERT_EQUAL_UINT8(100, frame.data[4]);  // 50 % of the 0..200 FP scale
+  TEST_ASSERT_EQUAL_UINT8(100, frame.data[4]);  // 50 % either way
+
+  // FP1 counts closure while the argument is an opening percentage, the same
+  // way create_position_frame() works. Fully open must be the low end of the
+  // scale; sending it straight through would close the slats instead.
+  TEST_ASSERT_TRUE(pleated.create_tilt_frame(&frame, SRC_NODE, 100));
+  TEST_ASSERT_EQUAL_UINT8(0, frame.data[4]);
+
+  TEST_ASSERT_TRUE(pleated.create_tilt_frame(&frame, SRC_NODE, 0));
+  TEST_ASSERT_EQUAL_UINT8(200, frame.data[4]);
+
+  // 25 % open is 75 % closed, which is 150 on the 0..200 scale.
+  TEST_ASSERT_TRUE(pleated.create_tilt_frame(&frame, SRC_NODE, 25));
+  TEST_ASSERT_EQUAL_UINT8(150, frame.data[4]);
 
   TEST_ASSERT_TRUE(pleated.create_tilt_frame(&frame, SRC_NODE, 250));
-  TEST_ASSERT_EQUAL_UINT8(200, frame.data[4]);  // clamped
+  TEST_ASSERT_EQUAL_UINT8(0, frame.data[4]);  // clamped to fully open
 }
 
 void test_recommended_positions(void) {

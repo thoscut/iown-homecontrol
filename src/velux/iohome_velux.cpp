@@ -238,7 +238,7 @@ bool VeluxBlind::create_position_frame(
 bool VeluxBlind::create_tilt_frame(
   frame::IoFrame* frame,
   const uint8_t src_node[NODE_ID_SIZE],
-  uint8_t tilt_percent
+  uint8_t percent_open
 ) {
   if (frame == nullptr || src_node == nullptr) {
     return false;
@@ -248,16 +248,19 @@ bool VeluxBlind::create_tilt_frame(
     return false;
   }
 
-  if (tilt_percent > 100) {
-    tilt_percent = 100;
+  if (percent_open > 100) {
+    percent_open = 100;
   }
 
   begin_control_frame(frame, node_id_, src_node);
 
   // Tilt is carried in Functional Parameter 1 while the Main Parameter keeps
-  // the current position (0xD200). FP1 uses the same 0-100 % scale as the
-  // main parameter but is a single byte.
-  const uint8_t fp1 = static_cast<uint8_t>((static_cast<uint16_t>(tilt_percent) * 200u) / 100u);
+  // the current position (0xD200). FP1 uses the same scale as the main
+  // parameter, in a single byte: it counts closure, so 0x00 is open and 0xC8
+  // is closed. The caller passes an opening percentage, like
+  // create_position_frame() does, and the inversion happens here.
+  const uint8_t percent_closed = static_cast<uint8_t>(100u - percent_open);
+  const uint8_t fp1 = static_cast<uint8_t>((static_cast<uint16_t>(percent_closed) * 200u) / 100u);
   return frame::set_execute_command(frame, MP_STOP, Originator::USER, ACEI_DEFAULT, fp1);
 }
 

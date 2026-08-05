@@ -236,18 +236,9 @@ int16_t IOWNHomeControlComponent::set_packet_length_(uint8_t len) {
 }
 
 uint16_t IOWNHomeControlComponent::compute_crc(const uint8_t *data, size_t len) {
-  uint16_t crc = 0x0000;
-  for (size_t i = 0; i < len; i++) {
-    crc ^= data[i];
-    for (int j = 0; j < 8; j++) {
-      if (crc & 1) {
-        crc = (crc >> 1) ^ 0x8408;
-      } else {
-        crc >>= 1;
-      }
-    }
-  }
-  return crc;
+  // The implementation lives in iohc_protocol.h, which has no dependencies and
+  // is therefore buildable by test/test_esphome_crypto on the host.
+  return iohc_compute_crc(data, len);
 }
 
 uint16_t IOWNHomeControlComponent::main_param_from_percent_closed(uint8_t percent_closed) {
@@ -318,40 +309,11 @@ uint16_t IOWNHomeControlComponent::consume_rolling_code_() {
 bool IOWNHomeControlComponent::compute_hmac_(const uint8_t *frame_data, size_t data_len,
                                              const uint8_t rolling_code[2], uint8_t hmac_out[6]) {
 #if defined(USE_ESP32)
-  // Build the 16-byte IV for the 1W MAC.
-  uint8_t iv[16];
-  memset(iv, 0x55, 16);
-
-  // Proprietary checksum over the frame data.
-  uint8_t chksum1 = 0, chksum2 = 0;
-  for (size_t i = 0; i < data_len; i++) {
-    const uint8_t tmpchksum = frame_data[i] ^ chksum2;
-    uint8_t new_chksum2 = ((chksum1 & 0x7F) << 1) & 0xFF;
-
-    if ((chksum1 & 0x80) == 0) {
-      if (tmpchksum >= 128)
-        new_chksum2 |= 1;
-      chksum1 = new_chksum2;
-      chksum2 = (tmpchksum << 1) & 0xFF;
-    } else {
-      if (tmpchksum >= 128)
-        new_chksum2 |= 1;
-      chksum1 = new_chksum2 ^ 0x55;
-      chksum2 = ((tmpchksum << 1) ^ 0x5B) & 0xFF;
-    }
-
-    // IV bytes 0-7: first 8 bytes of frame data
-    if (i < 8)
-      iv[i] = frame_data[i];
-  }
-
-  // IV bytes 8-9: checksum
-  iv[8] = chksum1;
-  iv[9] = chksum2;
-
-  // IV bytes 10-11: rolling code (bytes 12-15 stay 0x55 padding)
-  iv[10] = rolling_code[0];
-  iv[11] = rolling_code[1];
+  // The initial value is built in iohc_protocol.h so the host test can check it
+  // against src/protocol/ and against the captures in docs/. Only the AES block
+  // itself needs mbedTLS, which is why it stays here.
+  uint8_t iv[IOHC_IV_SIZE];
+  iohc_build_iv_1w(frame_data, data_len, rolling_code, iv);
 
   mbedtls_aes_context aes;
   mbedtls_aes_init(&aes);

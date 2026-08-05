@@ -182,7 +182,12 @@ void IOWNCover::control(const cover::CoverCall &call) {
     // Tilt travels in Functional Parameter 1 on the 0..0xC8 scale while the
     // main parameter holds "current position", so the slats move but the
     // cover does not.
-    const uint8_t fp1 = static_cast<uint8_t>(tilt * 200.0f);
+    //
+    // FP1 uses the same scale as the main parameter, which counts *closure*:
+    // 0x00 is open, 0xC8 is closed. ESPHome counts openness, so the value has
+    // to be inverted - exactly as the position path below already does. Sent
+    // straight through, a request to open the slats fully closed them.
+    const uint8_t fp1 = static_cast<uint8_t>((1.0f - tilt) * 200.0f + 0.5f);
     if (this->send_main_param_(IOHC_PARAM_STOP, fp1)) {
       this->tilt = tilt;
       this->publish_state();

@@ -1,9 +1,12 @@
 /**
- * @file main.cpp "main.cpp"
- * @brief iown-homecontrol
+ * @file legacy_phy.ino
+ * @brief Minimal physical-layer bring-up for io-homecontrol
  * @author Velocet
  *
- * io-homecontrol (Somfy, Velux, etc.) Implementation for LoRa32 boards
+ * Brings up a LoRa32 radio and prints what the PhysicalLayer interface
+ * reports. This is the smallest starting point for driving the radio
+ * directly; for the actual protocol - frames, authentication, replay
+ * protection - use IoHomeControl, as src/main.cpp does.
  *
  * MIT License
  * Copyright (c) Velocet
@@ -13,7 +16,8 @@
 #include <SPI.h>
 #include <LoRa32.h>
 #include <RadioLib.h>
-#include "IoHome.h"
+
+#include <IoHome.h>
 
 // RadioLib: Load RadioLib module with help of the LoRa32 definitions
 LORA32_RADIO radio = new Module(LORA32_SPI_CS, LORA32_RADIO_IO0, LORA32_RADIO_RST, LORA32_RADIO_IO1);

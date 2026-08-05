@@ -481,11 +481,16 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   frame.rssi = rssi;
 
   if (cmd == IOHC_CMD_EXECUTE && frame.payload_len >= IOHC_EXEC_PAYLOAD_SIZE) {
-    // Payload layout: originator | ACEI | main parameter (2, MSB first) | FP1 | FP2
-    const uint8_t originator = data[9];
-    const uint8_t acei = data[10];
-    const uint16_t main_param =
-        static_cast<uint16_t>((static_cast<uint16_t>(data[11]) << 8) | data[12]);
+    // Payload layout, counted from the command byte at index 8:
+    //   originator | ACEI | main parameter (2, MSB first) | FP1 | FP2
+    // Reading the main parameter from bytes 9-10 picks up the originator and
+    // the ACEI instead.
+    const uint8_t *exec = &data[8];
+    const uint8_t originator = exec[IOHC_EXEC_OFFSET_ORIGINATOR];
+    const uint8_t acei = exec[IOHC_EXEC_OFFSET_ACEI];
+    const uint16_t main_param = static_cast<uint16_t>(
+        (static_cast<uint16_t>(exec[IOHC_EXEC_OFFSET_MAIN_PARAM]) << 8) |
+        exec[IOHC_EXEC_OFFSET_MAIN_PARAM + 1]);
 
     const char *action = "position";
     if (main_param == IOHC_PARAM_OPEN) {
@@ -512,8 +517,12 @@ void IOWNHomeControlComponent::dispatch_to_covers_(const ReceivedFrame &frame) {
     return;
   }
 
-  const uint16_t main_param =
-      static_cast<uint16_t>((static_cast<uint16_t>(frame.payload[2]) << 8) | frame.payload[3]);
+  // frame.payload starts at the byte after the command, so the offsets below
+  // are one less than the IOHC_EXEC_OFFSET_* values, which count from the
+  // command byte itself.
+  const uint16_t main_param = static_cast<uint16_t>(
+      (static_cast<uint16_t>(frame.payload[IOHC_EXEC_OFFSET_MAIN_PARAM - 1]) << 8) |
+      frame.payload[IOHC_EXEC_OFFSET_MAIN_PARAM]);
   const uint8_t percent_closed = percent_closed_from_main_param(main_param);
   if (percent_closed == 0xFF) {
     return;  // Not a position report

@@ -181,6 +181,11 @@ constexpr uint8_t CMD_REMOVE_1W_CONTROLLER = 0x39;
 constexpr uint8_t CMD_CHALLENGE_REQUEST = 0x3C;
 constexpr uint8_t CMD_CHALLENGE_RESPONSE = 0x3D;
 
+// File / Script Commands (docs/commands.md "46", "47", "4A")
+constexpr uint8_t CMD_SCRIPT_UPLOAD = 0x46;
+constexpr uint8_t CMD_DOWNLOAD_CONFIG = 0x47;
+constexpr uint8_t CMD_RENAME_FILE = 0x4A;
+
 // Naming / Info Commands
 constexpr uint8_t CMD_GET_NAME = 0x50;
 constexpr uint8_t CMD_GET_NAME_ANSWER = 0x51;
@@ -195,9 +200,19 @@ constexpr uint8_t CMD_INFO_2_ANSWER = 0x57;
 constexpr uint8_t CMD_BOOTLOADER_START = 0xE0;
 constexpr uint8_t CMD_BOOTLOADER_DATA = 0xE1;
 
-// Service Commands
-constexpr uint8_t CMD_SERVICE_PING = 0xF0;
-constexpr uint8_t CMD_SERVICE_RESET = 0xF1;
+// Service Commands (docs/commands.md "Fx: Service Commands")
+//
+// CMD_SERVICE_RESET used to sit at 0xF1. Reboot is 0xF2; 0xF1 is "read groups"
+// / service ACK, so the old constant named one command and addressed another.
+// scripts/io-homecontrol.ksy agrees: 0xf0 send_raw_message, 0xf2 reboot,
+// 0xf3 service_status_ack, and nothing at 0xf1.
+constexpr uint8_t CMD_SEND_RAW_MESSAGE = 0xF0;   // "Find Hardware" / service
+constexpr uint8_t CMD_READ_GROUPS = 0xF1;        // service ACK
+constexpr uint8_t CMD_REBOOT = 0xF2;             // reboot / service status
+constexpr uint8_t CMD_SERVICE_STATUS_ACK = 0xF3;
+
+/// @deprecated Misleading name for 0xF0; use CMD_SEND_RAW_MESSAGE.
+constexpr uint8_t CMD_SERVICE_PING = CMD_SEND_RAW_MESSAGE;
 
 // ============================================================================
 // Command 0x00 (Execute) payload
@@ -314,9 +329,24 @@ constexpr uint16_t MP_CLOSE = 0xC800;           // Alias: fully closed
 constexpr uint16_t MP_TARGET = 0xD100;          // Execution parameter buffer: target
 constexpr uint16_t MP_CURRENT = 0xD200;         // Execution parameter buffer: current
 constexpr uint16_t MP_STOP = 0xD200;            // Alias: stop at current position
+constexpr uint16_t MP_DEFAULT = 0xD300;         // Relative / target / current default
+
+/// "MP: Ignore / FP: ReadOnly" - leave this parameter alone and act on the
+/// others. This is the main parameter in the capture in
+/// scripts/io-homecontrol.ksy, which sets functional parameters only.
+constexpr uint16_t MP_IGNORE = 0xD400;
+
+constexpr uint16_t MP_RUNNING = 0x6E00;
+constexpr uint16_t MP_PLUS_MINUS_DEFAULT = 0x7D00;
+constexpr uint16_t MP_RETRY = 0xE000;
+constexpr uint16_t MP_UNKNOWN_FEEDBACK = 0xF7FF;
 
 // Relative percentage range: 0x0000 (0 %) .. 0xC800 (100 %)
 constexpr uint16_t MP_PERCENT_MAX_RAW = 0xC800;
+
+// Signed percentage range: 0xC900 (-100 %) .. 0xD0D0 (+100 %)
+constexpr uint16_t MP_SIGNED_PERCENT_MIN = 0xC900;
+constexpr uint16_t MP_SIGNED_PERCENT_MAX = 0xD0D0;
 
 /**
  * @brief Convert a percentage (0-100) into a Main Parameter value.

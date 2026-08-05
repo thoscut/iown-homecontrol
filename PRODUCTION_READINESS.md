@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 188 host-run unit tests, and hardened against the receive
+`docs/`, covered by 190 host-run unit tests, and hardened against the receive
 path being attacker-controlled. What is *not* verified is behaviour against
 real hardware: nobody has yet confirmed that a physical actuator obeys a frame
 this library produces. Treat every "Complete" below as "complete and tested in
@@ -107,6 +107,7 @@ software".
 | V29 | Low | `include/` | `iown_node_types.h` used a C++ `enum class` inside an `extern "C"` block, so the headers could not be compiled as C despite advertising it. `iown_defs.h` used the reserved identifier `_IOWN_DEFS_H` and defined `IOWN_MODE_1W` after the header that uses it. |
 | V30 | Low | `platformio.ini` | The firmware built with no warning flags at all, and RadioLib was pinned with a caret range that had drifted from 7.1.2 to 7.7.1. |
 | V31 | Low | `src/board_pins.h` | The old board table keyed TTGO v2.1 on `ARDUINO_TTGO_LORA32_V21NEW` while PlatformIO defines `ARDUINO_TTGO_LoRa32_v21new`, so that board never compiled; and SX126x boards got BUSY passed as the interrupt line. |
+| V32 | Medium | `iohome_constants.h` | `CMD_SERVICE_RESET` sat at 0xF1. Reboot is 0xF2; 0xF1 is "read groups" / service ACK, so the constant named one command and addressed another. Found by diffing our table against `docs/commands.md` and the enum in `scripts/io-homecontrol.ksy`, which agree with each other. The whole command table, the Main Parameter values, the originators and the ACEI layout are now pinned by tests. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 

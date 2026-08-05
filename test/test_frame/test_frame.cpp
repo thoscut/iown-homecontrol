@@ -645,6 +645,116 @@ void test_command_metadata(void) {
     TEST_ASSERT_EQUAL_INT(-1, iohome::frame::min_payload_size(0x20));
 }
 
+void test_command_ids_match_the_documented_table(void) {
+    // Two independent sources agree on these: the "Command IDs" section of
+    // docs/commands.md and the enum in scripts/io-homecontrol.ksy. Fabricated
+    // IDs are the easiest way to build frames nothing answers - this library
+    // once carried 0x60-0x63, which exist nowhere - so the table is pinned.
+    TEST_ASSERT_EQUAL_HEX8(0x00, iohome::CMD_EXECUTE);
+    TEST_ASSERT_EQUAL_HEX8(0x01, iohome::CMD_ACTIVATE_MODE);
+    TEST_ASSERT_EQUAL_HEX8(0x02, iohome::CMD_MANUAL_ORDER);
+    TEST_ASSERT_EQUAL_HEX8(0x04, iohome::CMD_PRIVATE_ANSWER);
+
+    TEST_ASSERT_EQUAL_HEX8(0x28, iohome::CMD_DISCOVER);
+    TEST_ASSERT_EQUAL_HEX8(0x29, iohome::CMD_DISCOVER_ANSWER);
+    TEST_ASSERT_EQUAL_HEX8(0x2A, iohome::CMD_DISCOVER_REMOTE);
+    TEST_ASSERT_EQUAL_HEX8(0x2B, iohome::CMD_DISCOVER_REMOTE_ANSWER);
+    TEST_ASSERT_EQUAL_HEX8(0x2C, iohome::CMD_DISCOVER_CONFIRM);
+    TEST_ASSERT_EQUAL_HEX8(0x2D, iohome::CMD_DISCOVER_CONFIRM_ACK);
+
+    TEST_ASSERT_EQUAL_HEX8(0x30, iohome::CMD_SEND_1W_KEY);
+    TEST_ASSERT_EQUAL_HEX8(0x31, iohome::CMD_ASK_CHALLENGE);
+    TEST_ASSERT_EQUAL_HEX8(0x32, iohome::CMD_KEY_TRANSFER);
+    TEST_ASSERT_EQUAL_HEX8(0x33, iohome::CMD_KEY_TRANSFER_ACK);
+    TEST_ASSERT_EQUAL_HEX8(0x36, iohome::CMD_ADDRESS_REQUEST);
+    TEST_ASSERT_EQUAL_HEX8(0x37, iohome::CMD_ADDRESS_ANSWER);
+    TEST_ASSERT_EQUAL_HEX8(0x38, iohome::CMD_LAUNCH_KEY_TRANSFER);
+    TEST_ASSERT_EQUAL_HEX8(0x39, iohome::CMD_REMOVE_1W_CONTROLLER);
+
+    TEST_ASSERT_EQUAL_HEX8(0x3C, iohome::CMD_CHALLENGE_REQUEST);
+    TEST_ASSERT_EQUAL_HEX8(0x3D, iohome::CMD_CHALLENGE_RESPONSE);
+
+    TEST_ASSERT_EQUAL_HEX8(0x46, iohome::CMD_SCRIPT_UPLOAD);
+    TEST_ASSERT_EQUAL_HEX8(0x47, iohome::CMD_DOWNLOAD_CONFIG);
+    TEST_ASSERT_EQUAL_HEX8(0x4A, iohome::CMD_RENAME_FILE);
+
+    TEST_ASSERT_EQUAL_HEX8(0x50, iohome::CMD_GET_NAME);
+    TEST_ASSERT_EQUAL_HEX8(0x51, iohome::CMD_GET_NAME_ANSWER);
+    TEST_ASSERT_EQUAL_HEX8(0x52, iohome::CMD_WRITE_NAME);
+    TEST_ASSERT_EQUAL_HEX8(0x53, iohome::CMD_WRITE_NAME_ACK);
+    TEST_ASSERT_EQUAL_HEX8(0x54, iohome::CMD_GET_INFO_1);
+    TEST_ASSERT_EQUAL_HEX8(0x55, iohome::CMD_INFO_1_ANSWER);
+    TEST_ASSERT_EQUAL_HEX8(0x56, iohome::CMD_GET_INFO_2);
+    TEST_ASSERT_EQUAL_HEX8(0x57, iohome::CMD_INFO_2_ANSWER);
+
+    TEST_ASSERT_EQUAL_HEX8(0xE0, iohome::CMD_BOOTLOADER_START);
+    TEST_ASSERT_EQUAL_HEX8(0xE1, iohome::CMD_BOOTLOADER_DATA);
+
+    // Reboot is 0xF2. The old CMD_SERVICE_RESET named a reset and addressed
+    // 0xF1, which is "read groups" / service ACK.
+    TEST_ASSERT_EQUAL_HEX8(0xF0, iohome::CMD_SEND_RAW_MESSAGE);
+    TEST_ASSERT_EQUAL_HEX8(0xF1, iohome::CMD_READ_GROUPS);
+    TEST_ASSERT_EQUAL_HEX8(0xF2, iohome::CMD_REBOOT);
+    TEST_ASSERT_EQUAL_HEX8(0xF3, iohome::CMD_SERVICE_STATUS_ACK);
+}
+
+void test_parameter_tables_match_the_documentation(void) {
+    // docs/commands.md "Standard Values".
+    TEST_ASSERT_EQUAL_HEX16(0x0000, iohome::MP_MIN);
+    TEST_ASSERT_EQUAL_HEX16(0x0001, iohome::MP_1W_BUTTON_DOWN);
+    TEST_ASSERT_EQUAL_HEX16(0x0002, iohome::MP_1W_BUTTON_STOP);
+    TEST_ASSERT_EQUAL_HEX16(0x0003, iohome::MP_1W_BUTTON_PROG);
+    TEST_ASSERT_EQUAL_HEX16(0x00FE, iohome::MP_BUTTON_RELEASED);
+    TEST_ASSERT_EQUAL_HEX16(0x00FF, iohome::MP_BUTTON_STOP);
+    TEST_ASSERT_EQUAL_HEX16(0xC800, iohome::MP_MAX);
+    TEST_ASSERT_EQUAL_HEX16(0xD100, iohome::MP_TARGET);
+    TEST_ASSERT_EQUAL_HEX16(0xD200, iohome::MP_CURRENT);
+    TEST_ASSERT_EQUAL_HEX16(0xD300, iohome::MP_DEFAULT);
+    TEST_ASSERT_EQUAL_HEX16(0xD400, iohome::MP_IGNORE);
+    TEST_ASSERT_EQUAL_HEX16(0x6E00, iohome::MP_RUNNING);
+    TEST_ASSERT_EQUAL_HEX16(0x7D00, iohome::MP_PLUS_MINUS_DEFAULT);
+    TEST_ASSERT_EQUAL_HEX16(0xE000, iohome::MP_RETRY);
+    TEST_ASSERT_EQUAL_HEX16(0xF7FF, iohome::MP_UNKNOWN_FEEDBACK);
+    TEST_ASSERT_EQUAL_HEX16(0xC900, iohome::MP_SIGNED_PERCENT_MIN);
+    TEST_ASSERT_EQUAL_HEX16(0xD0D0, iohome::MP_SIGNED_PERCENT_MAX);
+
+    // "Open" is the minimum and "closed" the maximum: the wire value counts
+    // closure, so the aliases must not be the other way round.
+    TEST_ASSERT_EQUAL_HEX16(iohome::MP_MIN, iohome::MP_OPEN);
+    TEST_ASSERT_EQUAL_HEX16(iohome::MP_MAX, iohome::MP_CLOSE);
+    TEST_ASSERT_EQUAL_HEX16(iohome::MP_CURRENT, iohome::MP_STOP);
+
+    // docs/commands.md "Command Originator".
+    TEST_ASSERT_EQUAL_HEX8(0x00, static_cast<uint8_t>(iohome::Originator::LOCAL_USER));
+    TEST_ASSERT_EQUAL_HEX8(0x01, static_cast<uint8_t>(iohome::Originator::USER));
+    TEST_ASSERT_EQUAL_HEX8(0x02, static_cast<uint8_t>(iohome::Originator::SENSOR_RAIN));
+    TEST_ASSERT_EQUAL_HEX8(0x08, static_cast<uint8_t>(iohome::Originator::SAAC));
+    TEST_ASSERT_EQUAL_HEX8(0x09, static_cast<uint8_t>(iohome::Originator::SENSOR_WIND));
+    TEST_ASSERT_EQUAL_HEX8(0x10, static_cast<uint8_t>(iohome::Originator::MYSELF));
+    TEST_ASSERT_EQUAL_HEX8(0xFE, static_cast<uint8_t>(iohome::Originator::AUTOMATIC_CYCLE));
+    TEST_ASSERT_EQUAL_HEX8(0xFF, static_cast<uint8_t>(iohome::Originator::EMERGENCY));
+
+    // ACEI field layout: A(7-5) C(4-3) E(2-1) I(0).
+    TEST_ASSERT_EQUAL_HEX8(0xE0, iohome::ACEI_LEVEL_MASK);
+    TEST_ASSERT_EQUAL_HEX8(0x18, iohome::ACEI_SERVICE_MASK);
+    TEST_ASSERT_EQUAL_HEX8(0x06, iohome::ACEI_EXTENDED_INFO_MASK);
+    TEST_ASSERT_EQUAL_HEX8(0x01, iohome::ACEI_VALID_MASK);
+
+    // Priority level 3 ("Level 2 - Default: Default for Remote Controllers")
+    // with the IsValid bit gives 0x61 - the ACEI in both captured frames.
+    TEST_ASSERT_EQUAL_HEX8(0x61, iohome::ACEI_DEFAULT);
+    TEST_ASSERT_EQUAL_HEX8(0x61, iohome::make_acei(iohome::PriorityLevel::USER_LEVEL_2));
+    TEST_ASSERT_EQUAL_HEX8(0x01, iohome::make_acei(iohome::PriorityLevel::HUMAN_PROTECTION));
+    TEST_ASSERT_EQUAL_HEX8(0xE1, iohome::make_acei(iohome::PriorityLevel::COMFORT_LEVEL_4));
+
+    // The IsValid bit is set whatever the caller asks for.
+    for (uint8_t level = 0; level < 8; level++) {
+        const uint8_t acei = iohome::make_acei(static_cast<iohome::PriorityLevel>(level), 3, 3);
+        TEST_ASSERT_TRUE(iohome::is_acei_valid(acei));
+        TEST_ASSERT_EQUAL_HEX8(level, (acei & iohome::ACEI_LEVEL_MASK) >> iohome::ACEI_LEVEL_SHIFT);
+    }
+}
+
 void test_ksy_capture_frame(void) {
     // The example frame from scripts/io-homecontrol.ksy, SFD stripped. It comes
     // from a different capture than docs/linklayer.md, so it is an independent
@@ -880,6 +990,8 @@ int main(int, char **) {
     RUN_TEST(test_max_payload_frame_roundtrips);
     RUN_TEST(test_auto_trailer_uses_command_metadata);
     RUN_TEST(test_command_metadata);
+    RUN_TEST(test_command_ids_match_the_documented_table);
+    RUN_TEST(test_parameter_tables_match_the_documentation);
     RUN_TEST(test_ksy_capture_frame);
     RUN_TEST(test_execute_command_with_extra_functional_params);
     RUN_TEST(test_long_execute_payload_without_trailer_is_plain);

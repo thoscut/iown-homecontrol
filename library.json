@@ -4,12 +4,12 @@
   "version": "0.7.0",
   "description": "io-homecontrol protocol library for Somfy, Velux and compatible devices, targeting ESP32 boards with RadioLib-supported radios.",
   "keywords": "io-homecontrol, somfy, velux, LoRa32, iown, iohome",
-  "homepage": "https://velocet.github.io/iown-homecontrol",
+  "homepage": "https://github.com/thoscut/iown-homecontrol",
   "license": "CC-BY-SA-4.0",
   "platforms": "espressif32",
   "repository": {
     "type": "git",
-    "url": "https://github.com/velocet/iown-homecontrol"
+    "url": "https://github.com/thoscut/iown-homecontrol"
   },
   "authors": [
     {
@@ -22,7 +22,7 @@
   "dependencies": [
     {
       "name": "RadioLib",
-      "version": "^7.1.2"
+      "version": "7.7.1"
     }
   ],
   "frameworks": [

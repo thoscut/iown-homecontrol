@@ -1,14 +1,52 @@
 # yaml-language-server: $schema=https://github.com/SchemaStore/schemastore/raw/master/src/schemas/json/github-workflow.json
 
+# Arduino library specification compliance.
+#
+# This workflow was disabled with `on: workflow_dispatch` and a "TODO Remove"
+# comment, so it never ran - the same shape as the CodeQL and spell-check
+# workflows. When it finally did run, it found that library.properties pointed
+# at a URL that 404s and that the library had no header named after itself.
+#
+# It was also configured with `library-manager: update`, which asserts that the
+# library is already in the Library Manager index. It is not, so that mode could
+# never have passed regardless of the code.
+#
+# `library-manager: false` runs the specification rules and skips the ones that
+# only matter for getting listed in the index. One of those is still failing:
+# three tracked .exe files - Windows tooling referenced by the reverse-
+# engineering notes - block addition to the index. Removing them is a decision
+# for the maintainer, and until it is made, running in `submit` mode would
+# report a failure nobody intends to act on. See PRODUCTION_READINESS.md, K10.
+
 name: Arduino-Lint
 
-# TODO Remove
-on: workflow_dispatch
-# on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "examples/**"
+      - "library.properties"
+      - "library.json"
+      - "keywords.txt"
+      - ".github/workflows/arduino-lint.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "examples/**"
+      - "library.properties"
+      - "library.json"
+      - "keywords.txt"
+      - ".github/workflows/arduino-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -17,10 +55,9 @@ jobs:
       - name: Arduino Lint
         uses: arduino/arduino-lint-action@v2
         with:
-          # Configure how strict the tool is about which checks are considered errors vs warnings if they don't pass.
-          # strict - enforces best practices, above and beyond the minimum requirements for specification compliance. Use this setting to ensure the best experience for the users of the project.
-          # specification - enforces compliance with the official Arduino project specifications.
-          # permissive - will cause the checks to fail only when severe problems are found. Although a project that passes at the permissive setting will work with the current Arduino development software versions, it may not be fully specification-compliant, risking incompatibility or a poor experience for the users.
+          # strict - enforces best practices, above and beyond the minimum
+          #          requirements for specification compliance.
           compliance: strict
-          library-manager: update
+          # See the note at the top of this file for why this is not `submit`.
+          library-manager: false
           project-type: library

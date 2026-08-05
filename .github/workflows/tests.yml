@@ -17,6 +17,7 @@ on:
       - "test/**"
       - "tools/**"
       - "esphome/**"
+      - "library.json"
       - "platformio.ini"
       - ".github/workflows/tests.yml"
   pull_request:
@@ -25,6 +26,7 @@ on:
       - "test/**"
       - "tools/**"
       - "esphome/**"
+      - "library.json"
       - "platformio.ini"
       - ".github/workflows/tests.yml"
   workflow_dispatch:
@@ -209,7 +211,7 @@ jobs:
       - name: Compare mock against upstream
         run: ./tools/check_radiolib_mock.sh
 
-      - name: The ESPHome component must pin the same RadioLib
+      - name: Every RadioLib declaration must name the same version
         run: |
           set -euo pipefail
           # The component declares its own dependency, because an
@@ -227,8 +229,22 @@ jobs:
             echo "could not read one of the pins - did the declaration change shape?" >&2
             exit 1
           fi
-          if [ "${pio_version}" != "${esphome_version}" ]; then
-            echo "RadioLib pins disagree. Both must name the same version." >&2
+          json_version="$(python3 -c "
+          import json
+          for dep in json.load(open('library.json'))['dependencies']:
+              if dep['name'] == 'RadioLib':
+                  print(dep['version'])
+          ")"
+          echo "library.json:   ${json_version:-<none>}"
+          if [ -z "${json_version}" ]; then
+            echo "could not read the RadioLib dependency from library.json" >&2
             exit 1
           fi
-          echo "OK: both pin RadioLib ${pio_version}"
+          if [ "${pio_version}" != "${esphome_version}" ] || \
+             [ "${pio_version}" != "${json_version}" ]; then
+            echo "RadioLib declarations disagree. All three must name the same" >&2
+            echo "exact version - library.json said ^7.1.2 while the firmware" >&2
+            echo "built against 7.7.1." >&2
+            exit 1
+          fi
+          echo "OK: all three pin RadioLib ${pio_version}"

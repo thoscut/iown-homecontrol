@@ -6,6 +6,12 @@
  * to. They are the same captures that were once read as a "non-standard
  * 48-byte OEM format"; de-framed, every one is an ordinary io-homecontrol
  * frame with a valid CRC. See docs/devices/velux/velux-frame-analysis.md.
+ *
+ * Exception: the 0x30 key-transfer vector is SYNTHETIC. A real 0x30 carries the
+ * installation's 1W key masked only with the public transfer key, so committing
+ * a real capture of it would leak a recoverable key. The synthetic frame has a
+ * fabricated address and key and a valid CRC, so it exercises the codec on a
+ * 0x30 without embedding a secret.
  */
 
 #include <unity.h>
@@ -36,8 +42,13 @@ const Vector VECTORS[] = {
    "96007ee7ee844377040500000000000000fc6e64010000310a", "0x04 private answer"},
   {"47c01005017e51d2f48f3a4015043178c855d55901de717c5713",
    "f10000013f717ae22e0005188f425d35c0cff4d4", "0x2e"},
-  {"1fc01005017e4694ad31065370f40b47db150d83165f71a5f5565bd60c3d5a501404412cd3958cfb",
-   "fc0000013f2ca91930d978a0f11b858334df2c5f357b83782d0101049a398d", "0x30 key transfer"},
+  // 0x30 key transfer: SYNTHETIC, not a real capture. A real 0x30 carries the
+  // installation's 1W key masked only with the public transfer key, so a real
+  // capture here would leak a recoverable key (this vector used to, and was
+  // replaced). Fabricated address ABCDEF and key 00..0f, valid CRC-16/KERMIT -
+  // it exercises the codec on a 0x30 without embedding a real secret.
+  {"1fc01004017e5ab59def064014048160441504c170421484a168461584e17850100401404a174f",
+   "fc0000003fabcdef30000102030405060708090a0b0c0d0e0f010000010a97", "0x30 key transfer (synthetic)"},
   {"47c01004017e4694ad314e4011053320d592549b5d4af29d6182",
    "f10000003f2ca91939000499823552b25deaca0d", "0x39 remove 1W controller"},
   {"3840155c0f564fd73cef5e58b48d6b1748973caf645540",

@@ -8,17 +8,21 @@ PlatformIO will compile these project specific private libs to static libraries 
 
 The source code of each lib is placed in its own directory: `lib/library_name/[source files]`.
 
-## Structure of library `LoRa32`
+This directory is currently empty: iown-homecontrol has no private libraries.
+Board pin maps, which used to come from an external `LoRa32` library, live in
+`src/board_pins.h` - see the comment at the top of that file for why.
+
+## Structure of a library `Foo`
 
 ``` ascii
 |--lib
 |  |
-|  |--LoRa32
+|  |--Foo
 |  |  |--docs
 |  |  |--examples
 |  |  |--src
-|  |     |- LoRa32.c
-|  |     |- LoRa32.h
+|  |     |- Foo.c
+|  |     |- Foo.h
 |  |  |- library.json - Build options, etc.: https://docs.platformio.org/page/librarymanager/config.html
 |
 |- platformio.ini
@@ -30,7 +34,7 @@ The source code of each lib is placed in its own directory: `lib/library_name/[s
 ### Contents of `main.cpp`
 
 ``` cpp
-#include <LoRa32.h>
+#include <Foo.h>
 
 int main (void) {
   // ...

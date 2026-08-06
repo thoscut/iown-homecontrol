@@ -1,0 +1,261 @@
+# yaml-language-server: $schema=https://github.com/SchemaStore/schemastore/raw/master/src/schemas/json/github-workflow.json
+
+# Protocol library unit tests.
+#
+# These run on the host with no PlatformIO toolchain and no radio hardware, so
+# they are fast enough to gate every push. AddressSanitizer and
+# UndefinedBehaviorSanitizer are on: the frame parser eats attacker-controlled
+# bytes, and a sanitizer failure there is a real finding.
+
+name: Unit Tests
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "test/**"
+      - "tools/**"
+      - "esphome/**"
+      - "library.json"
+      - "platformio.ini"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "test/**"
+      - "tools/**"
+      - "esphome/**"
+      - "library.json"
+      - "platformio.ini"
+      - ".github/workflows/tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run protocol unit tests
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: ./tools/run_native_tests.sh
+
+  strict-warnings:
+    name: Warnings as errors
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile with warnings as errors
+        run: |
+          set -euo pipefail
+          FLAGS=(
+            -std=c++17
+            -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion
+            -Werror
+            -DUNIT_TEST -DIOHOME_FORCE_SOFTWARE_AES
+            -I src
+            -I include
+          )
+          for source in src/protocol/*.cpp src/velux/*.cpp \
+                        src/esp32_utils.cpp src/iown_mac.cpp; do
+            echo "=== ${source}"
+            g++ "${FLAGS[@]}" -c "${source}" -o /dev/null
+          done
+          # IoHomeControl needs a RadioLib header; the test mock provides one.
+          echo "=== src/IoHomeControl.cpp"
+          g++ "${FLAGS[@]}" -I test/mocks -c src/IoHomeControl.cpp -o /dev/null
+
+      - name: Compile the C headers as C
+        run: |
+          set -euo pipefail
+          # include/ is written as C with `extern "C"` blocks. It had never been
+          # compiled as C, and it did not: iown_node_types.h used a C++ `enum
+          # class` inside one of those blocks. Build a probe that touches every
+          # public macro so a regression shows up as a failure, not a surprise
+          # for whoever first tries to use these from C.
+          cat > /tmp/c_probe.c <<'PROBE'
+          #include "iown.h"
+          #include "iown_node_types.h"
+          int main(void) {
+            enum iown_node_actuator_types t = IOWN_NODE_WINDOW_OPENER;
+            unsigned char id[IOWN_LEN_NODEID] = {0x00, 0x00, 0x3F};
+            return (int)t
+                 + IOWN_IS_BROADCAST_ADDR(id)
+                 + IOWN_FRAME_SIZE(0xF8)
+                 + IOWN_FRAME_LEN(0xF8)
+                 + IOWN_FRAME_LEN_MAX
+                 + IOWN_LEN_FRAME(IOWN_MODE_1W, 6)
+                 + IOWN_LEN_FRAME(IOWN_MODE_2W, 6)
+                 + IOWN_LEN_PACKET_PLAIN(6)
+                 + IOWN_LEN_SYNC_WORD;
+          }
+          PROBE
+          gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -I include \
+              -c /tmp/c_probe.c -o /dev/null
+          echo "include/ compiles as C"
+
+          # The size field encodes "total length minus Control Byte 0 minus the
+          # CRC". The capture in scripts/io-homecontrol.ksy has size 24 and is
+          # 27 bytes long, so the bias is 3. The original code used 11.
+          cat > /tmp/c_assert.c <<'ASSERT'
+          #include "iown.h"
+          _Static_assert(IOWN_FRAME_LEN(0xF8) == 27, "size field bias must be 3");
+          _Static_assert(IOWN_FRAME_LEN_MAX == 34, "5-bit size field tops out at 34 bytes");
+          _Static_assert(IOWN_LEN_SYNC_WORD == 3, "sync word is 57 FD 99");
+          _Static_assert(IOWN_LEN_FRAME(IOWN_MODE_1W, 8) == 27, "ksy capture is 27 bytes");
+          int main(void) { return 0; }
+          ASSERT
+          gcc -std=c11 -Wall -Wextra -Werror -I include -c /tmp/c_assert.c -o /dev/null
+          echo "frame length macros agree with the captures"
+
+  scripts:
+    name: Analysis scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile every script
+        run: python3 -m compileall -q scripts
+
+      - name: No two tracked paths collide when lower-cased
+        run: |
+          set -euo pipefail
+          # docs/devices/ carried both Velux/ and velux/ - 46 files each, 57 MB
+          # duplicated, seven pairs not byte-identical. macOS and Windows use
+          # case-insensitive filesystems by default, so git cannot check both
+          # out side by side: one silently overwrites the other and the working
+          # tree reads as permanently modified for the pairs that differ.
+          git ls-files | python3 -c "
+          import sys, collections
+          seen = collections.defaultdict(set)
+          for line in sys.stdin:
+              path = line.rstrip('\n')
+              seen[path.lower()].add(path)
+          collisions = {k: v for k, v in seen.items() if len(v) > 1}
+          for _, paths in sorted(collisions.items()):
+              print('COLLIDES:', ', '.join(sorted(paths)))
+          if collisions:
+              print(f'{len(collisions)} path(s) differ only in case; a checkout on '
+                    'macOS or Windows cannot represent them.')
+              sys.exit(1)
+          print('every tracked path is unique when lower-cased')
+          "
+
+      - name: The ESPHome copy of the protocol layer is current
+        run: |
+          set -euo pipefail
+          # ESPHome compiles a component directory and nothing else, so the
+          # component carries a copy of src/protocol/. It used to carry a second
+          # *implementation* instead, which is how the 2W key transfer came to
+          # use an initial value neither peer computed.
+          python3 tools/sync_esphome_protocol.py --check
+
+      - name: Frame parser self-test
+        # Checks the decoder against the captures in docs/linklayer.md and
+        # scripts/io-homecontrol.ksy: address order, the size-field bias, where
+        # the authentication trailer starts and the CRC. The script had never
+        # run at all - it imported a module name that cannot exist, because the
+        # file it wanted is called Iown-ioCrypto.py.
+        run: python3 scripts/Iown-IoHexFrameParser.py --self-test
+
+  radiolib-mock:
+    name: RadioLib mock matches upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # The native build compiles against test/mocks/RadioLib.h. A constant that
+    # exists only in the mock passes here and then breaks the firmware build
+    # minutes later - RADIOLIB_ERR_INVALID_RADIO did exactly that. Comparing
+    # the mock against the pinned upstream catches the drift in seconds.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch the pinned RadioLib
+        run: |
+          set -euo pipefail
+          # Read the pin from platformio.ini so the two cannot disagree.
+          version="$(sed -nE 's#.*jgromes/RadioLib@([0-9]+\.[0-9]+\.[0-9]+).*#\1#p' platformio.ini | head -1)"
+          if [ -z "${version}" ]; then
+            echo "could not read an exact RadioLib version from platformio.ini" >&2
+            exit 1
+          fi
+          echo "RadioLib pin: ${version}"
+          git clone --quiet --depth 1 --branch "${version}" \
+            https://github.com/jgromes/RadioLib.git "${RUNNER_TEMP}/RadioLib"
+          echo "RADIOLIB_DIR=${RUNNER_TEMP}/RadioLib" >> "${GITHUB_ENV}"
+
+      - name: Compare mock against upstream
+        run: ./tools/check_radiolib_mock.sh
+
+      - name: Every RadioLib declaration must name the same version
+        run: |
+          set -euo pipefail
+          # The component declares its own dependency, because an
+          # external_components directory is copied on its own and cannot read
+          # platformio.ini. It said 7.1.2 while the firmware built against
+          # 7.7.1, so the two halves of this repository compiled against
+          # different versions of the same library - and only the firmware side
+          # was covered by the mock check above.
+          pio_version="$(sed -nE 's#.*jgromes/RadioLib@([0-9]+\.[0-9]+\.[0-9]+).*#\1#p' platformio.ini | head -1)"
+          esphome_version="$(sed -nE 's#.*add_library\("jgromes/RadioLib", "([0-9]+\.[0-9]+\.[0-9]+)"\).*#\1#p' \
+                             esphome/components/iown_homecontrol/__init__.py | head -1)"
+          echo "platformio.ini: ${pio_version:-<none>}"
+          echo "ESPHome:        ${esphome_version:-<none>}"
+          if [ -z "${pio_version}" ] || [ -z "${esphome_version}" ]; then
+            echo "could not read one of the pins - did the declaration change shape?" >&2
+            exit 1
+          fi
+          json_version="$(python3 -c "
+          import json
+          for dep in json.load(open('library.json'))['dependencies']:
+              if dep['name'] == 'RadioLib':
+                  print(dep['version'])
+          ")"
+          echo "library.json:   ${json_version:-<none>}"
+          if [ -z "${json_version}" ]; then
+            echo "could not read the RadioLib dependency from library.json" >&2
+            exit 1
+          fi
+          if [ "${pio_version}" != "${esphome_version}" ] || \
+             [ "${pio_version}" != "${json_version}" ]; then
+            echo "RadioLib declarations disagree. All three must name the same" >&2
+            echo "exact version - library.json said ^7.1.2 while the firmware" >&2
+            echo "built against 7.7.1." >&2
+            exit 1
+          fi
+          echo "OK: all three pin RadioLib ${pio_version}"

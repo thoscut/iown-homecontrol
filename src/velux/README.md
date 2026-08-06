@@ -66,7 +66,7 @@ controller.transmit_frame(&frame);
 
 // Check rain sensor
 RainSensorStatus rain = VeluxWindow::parse_rain_sensor_status(&received_frame);
-if (rain == RainSensorStatus::RAIN) {
+if (rain == RainSensorStatus::RAIN) {  // an Execute a rain sensor originated
   // Rain detected!
 }
 ```
@@ -269,22 +269,24 @@ Velux windows have standardized ventilation positions for optimal air exchange w
 
 Windows with integrated rain sensors can automatically close when precipitation is detected:
 
-```cpp
-// Check rain sensor status
-RainSensorStatus status = window.parse_rain_sensor_status(frame);
+A rain sensor is an input, not something a controller polls. There is no query
+and no answer frame - what you see is the sensor *acting*: an ordinary Execute
+whose Command Originator is `0x02` (RAIN). So a controller learns about rain by
+watching the traffic, and the absence of rain is simply the absence of such a
+frame. There is no "dry" report to wait for.
 
-switch (status) {
-  case RainSensorStatus::DRY:
-    // No rain, safe to open
-    break;
-  case RainSensorStatus::RAIN:
-    // Rain detected, close window!
-    window.create_emergency_close_frame(&frame, src_node);
-    break;
-  case RainSensorStatus::ERROR:
-    // Sensor malfunction
-    break;
+```cpp
+if (VeluxWindow::parse_rain_sensor_status(&received_frame) == RainSensorStatus::RAIN) {
+  // A rain sensor has just driven an actuator. The window it belongs to is
+  // already closing on its own - this is a notification, not a request.
 }
+```
+
+To close a window *because* of rain, name the sensor as the originator so it
+outranks a user command that asked for the window to be open:
+
+```cpp
+window.create_rain_close_frame(&frame, src_node);
 ```
 
 ### ESPHome Rain Protection
@@ -352,14 +354,13 @@ controller.start_discovery(0xFF, 10000);
 mode2w::DiscoveredDevice device;
 controller.get_discovered_device(0, &device);
 
-// Detect Velux model
-VeluxModel model = velux::detect_model(
-  device.device_type,
+// What kind of product it is. The node type says "window opener"; which
+// window opener - GGL, GGU, GPL - is not on the wire, so this returns a
+// category, not a model number.
+VeluxCategory category = velux::detect_category(
+  device.node_type,
   device.manufacturer
 );
-
-const char* name = velux::get_model_name(model);
-// "GGL Electric (KMX 100)"
 ```
 
 ## Troubleshooting

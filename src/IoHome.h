@@ -1,31 +1,55 @@
-#if !defined(_IOHOME_H)
-#define _IOHOME_H
+/**
+ * @file IoHome.h
+ * @brief Thin RadioLib-oriented io-homecontrol node (legacy API)
+ *
+ * This is the original, low-level entry point of the project. It only owns the
+ * physical layer configuration and a few byte-order helpers; frame building,
+ * authentication and the receive policy live in IoHomeControl, which is what
+ * new code should use.
+ *
+ * It is kept because existing sketches include it and because it is the
+ * smallest possible starting point for experiments that drive the radio
+ * directly.
+ */
+
+// The guard was _IOHOME_H. A leading underscore followed by a capital is
+// reserved for the implementation in both C and C++, so that name belongs to
+// the compiler, not to us.
+#ifndef IOHOME_H
+#define IOHOME_H
 
 #include <RadioLib.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #pragma region CONST
 // preamble
-#define IOHOME_PREAMBLE_LEN                 (512) // Preamble Length in Bits
+#define IOHOME_PREAMBLE_LEN                 (512) // Preamble length in bits
 
-// sync word
+// sync word (already bit-reversed for MSB-first radios)
 #define IOHOME_SYNC_WORD                    (0x57FD99)
 #define IOHOME_SYNC_WORD_LEN                (3)
 
-// frame header
-#define IOHOME_CTRLBYTE0_MODE_TWOWAY        (0x00 << 7)        //  7     7
-#define IOHOME_CTRLBYTE0_MODE_ONEWAY        (0x01 << 7)        //  7     7
-#define IOHOME_CTRLBYTE0_ORDER_0            (0x00 << 5)        //  7     6
-#define IOHOME_CTRLBYTE0_ORDER_1            (0x01 << 5)        //  7     6
-#define IOHOME_CTRLBYTE0_ORDER_2            (0x02 << 5)        //  7     6
-#define IOHOME_CTRLBYTE0_ORDER_3            (0x03 << 5)        //  7     6
-#define IOHOME_CTRLBYTE0_LENGTH(IOHOME_LEN) (IOHOME_LEN << 0)  //  5     0
+// Control Byte 0 layout (see docs/linklayer.md):
+//   bits 7-6 = Order, bit 5 = isOneWay, bits 4-0 = Size
+#define IOHOME_CTRLBYTE0_MODE_TWOWAY        (0x00 << 5)        //  5     5
+#define IOHOME_CTRLBYTE0_MODE_ONEWAY        (0x01 << 5)        //  5     5
+#define IOHOME_CTRLBYTE0_ORDER_0            (0x00 << 6)        //  7     6
+#define IOHOME_CTRLBYTE0_ORDER_1            (0x01 << 6)        //  7     6
+#define IOHOME_CTRLBYTE0_ORDER_2            (0x02 << 6)        //  7     6
+#define IOHOME_CTRLBYTE0_ORDER_3            (0x03 << 6)        //  7     6
+
+// `Size` is the frame length excluding Control Byte 0 and the CRC.
+#define IOHOME_CTRLBYTE0_LENGTH(IOHOME_LEN) ((IOHOME_LEN) & 0x1F)  //  4     0
+#define IOHOME_FRAME_LEN(IOHOME_SIZE)       ((IOHOME_SIZE) + 3)
 
 // frame header layout
 #define IOHOME_CTRLBYTE0_POS                (0x0)
 #define IOHOME_CTRLBYTE1_POS                (0x1)
-#define IOHOME_MAC_SOURCE_POS               (0x2)
-#define IOHOME_MAC_DEST_POS                 (0x3)
-#define IOHOME_MSG_LEN(MSG)                 (/* TODO get msg len*/)
+#define IOHOME_MAC_DEST_POS                 (0x2)
+#define IOHOME_MAC_SOURCE_POS               (0x5)
+#define IOHOME_CMD_POS                      (0x8)
+
 #define IOHOME_NUM_COMMANDS                 (2)
 #define IOHOME_CMD_0x00                     (0x00)
 #define IOHOME_CMD_0x01                     (0x01)
@@ -39,19 +63,21 @@ struct IoHomeCommands_t {
   /*! \brief Command ID */
   uint8_t cid;
 
-  /*! \brief Command Length */
+  /*! \brief Payload length in bytes, excluding the command ID */
   uint8_t len;
 
-  /*! \brief Number of Parameters */
+  /*! \brief Number of parameters */
   uint8_t pnum;
 
   /*! \brief Whether this command needs authentication */
   bool auth;
 };
+
+// Commands 0x00 and 0x01 both carry originator + ACEI + a 2-byte parameter
+// plus 2 further bytes = 6 payload bytes, and both are authenticated in 1W.
 const IoHomeCommands_t CMD_TABLE[IOHOME_NUM_COMMANDS] = {
-  { IOHOME_CMD_0x00, 10, 1, true },
-  { IOHOME_CMD_0x01, 10, 1, true },
-  // ...
+  { IOHOME_CMD_0x00, 6, 1, true },
+  { IOHOME_CMD_0x01, 6, 1, true },
 };
 
 struct NodeId {
@@ -77,35 +103,87 @@ class IoHomeNode {
       \param phy Pointer to the PhysicalLayer radio module.
       \param channel Pointer to the io-homecontrol channel to use.
     */
-    IoHomeNode(PhysicalLayer* phy, const IoHomeChannel_t* channel);
+    explicit IoHomeNode(PhysicalLayer* phy, const IoHomeChannel_t* channel = nullptr);
 
     /*!
-      \brief $description
-      \param channel $description
-      \param sourceNodeID $description
-      \param destinationNodeId $description
-      \param stackKey $description
-      \param systemKey $description
-      \returns \ref status_codes
+      \brief Store the node configuration.
+      \param chan Channel to operate on.
+      \param source_node_id This node's address.
+      \param destination_node_id Default peer address.
+      \param stack_key 16-byte stack key, or nullptr.
+      \param system_key 16-byte system key, or nullptr.
+      \returns true when the parameters were accepted.
     */
-    void begin(const IoHomeChannel_t* channel, NodeId source_node_id, NodeId destination_node_id, uint8_t* stack_key, uint8_t* system_key);
+    bool begin(const IoHomeChannel_t* chan,
+               NodeId source_node_id,
+               NodeId destination_node_id,
+               const uint8_t* stack_key = nullptr,
+               const uint8_t* system_key = nullptr);
 
-    PhysicalLayer* phyLayer = NULL;
-    const IoHomeChannel_t* channel = NULL;
+    PhysicalLayer* phyLayer = nullptr;
+    const IoHomeChannel_t* channel = nullptr;
 
-    // configure common physical layer properties (preamble, sync word etc.)
+    /*! \brief Configure common physical layer properties (preamble, sync word, ...). */
     int16_t setPhyProperties();
 
-    // crc16-kermit that takes a uint8_t array of even length and calculates the checksum
-    static uint16_t crc16();
+    /*!
+      \brief CRC-16/KERMIT over a buffer, as used by io-homecontrol frames.
+      \param data Buffer to checksum.
+      \param len Number of bytes.
+      \returns The CRC; transmit the least significant byte first.
+    */
+    static uint16_t crc16(const uint8_t* data, size_t len);
 
-    // network-to-host conversion method - takes data from network packet and converts it to the host endians
-    template<typename T>
-    static T ntoh(uint8_t* buff, size_t size = 0);
+    /*!
+      \brief Network-to-host conversion.
 
-    // host-to-network conversion method - takes data from host variable and and converts it to network packet endians
+      io-homecontrol multi-byte fields are little-endian on the wire.
+
+      \note Defined in the header: a template body in the .cpp would not be
+            visible to callers and every use would fail to link.
+    */
     template<typename T>
-    static void hton(uint8_t* buff, T val, size_t size = 0);
+    static T ntoh(const uint8_t* buff, size_t size = 0) {
+      if (buff == nullptr) {
+        return static_cast<T>(0);
+      }
+      size_t targetSize = (size != 0) ? size : sizeof(T);
+      if (targetSize > sizeof(T)) {
+        targetSize = sizeof(T);
+      }
+      T res = 0;
+      for (size_t i = 0; i < targetSize; i++) {
+        res = static_cast<T>(res | (static_cast<T>(buff[i]) << (8 * i)));
+      }
+      return res;
+    }
+
+    /*! \brief Host-to-network conversion. */
+    template<typename T>
+    static void hton(uint8_t* buff, T val, size_t size = 0) {
+      if (buff == nullptr) {
+        return;
+      }
+      size_t targetSize = (size != 0) ? size : sizeof(T);
+      if (targetSize > sizeof(T)) {
+        targetSize = sizeof(T);
+      }
+      for (size_t i = 0; i < targetSize; i++) {
+        buff[i] = static_cast<uint8_t>(val >> (8 * i));
+      }
+    }
+
+    NodeId sourceNodeId = {0, 0, 0};
+    NodeId destinationNodeId = {0, 0, 0};
+
+    bool hasStackKey() const { return stackKeySet_; }
+    bool hasSystemKey() const { return systemKeySet_; }
+
+  private:
+    uint8_t stackKey_[16] = {0};
+    uint8_t systemKey_[16] = {0};
+    bool stackKeySet_ = false;
+    bool systemKeySet_ = false;
 };
 
 #endif

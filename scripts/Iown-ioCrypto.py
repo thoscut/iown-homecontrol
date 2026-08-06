@@ -1,9 +1,38 @@
 #!/usr/bin/env python3
 
 import binascii
+import importlib.util
+import pathlib
+import sys
 from typing import Tuple
 
-import aes
+
+def _load_sibling(name: str, filename: str):
+  """
+  Import a module that sits next to this file under a non-importable name.
+
+  `import aes` never resolved: the AES implementation lives in Iown-AES.py, and
+  a hyphen is not valid in a Python identifier, so there is no import statement
+  that reaches it. That made this module - and Iown-IoHexFrameParser.py, which
+  imports from it - fail at startup with ModuleNotFoundError.
+
+  Loading by path also means the scripts work from any working directory
+  instead of only from inside scripts/.
+  """
+  cached = sys.modules.get(name)
+  if cached is not None:
+    return cached
+  path = pathlib.Path(__file__).resolve().with_name(filename)
+  spec = importlib.util.spec_from_file_location(name, path)
+  if spec is None or spec.loader is None:
+    raise ImportError(f"cannot load {filename} from {path.parent}")
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[name] = module
+  spec.loader.exec_module(module)
+  return module
+
+
+aes = _load_sibling("aes", "Iown-AES.py")
 
 # Transfer key used to obfuscate keys transferred during pairing process
 transfer_key = bytes.fromhex("34c3466ed88f4e8e16aa473949884373")
@@ -29,7 +58,7 @@ def compute_crc_8408(data: bytes, crc: int = 0) -> int:
 
 def computeChecksum(frame_byte: int, chksum1: int, chksum2: int) -> Tuple[int, int]:
   """
-  Returns what looks like a custom-made CRC for use in intial values
+  Returns what looks like a custom-made CRC for use in initial values
   """
   tmpchksum = frame_byte ^ chksum2
   chksum2 = ((chksum1 & 0x7f) << 1) & 0xff
@@ -129,6 +158,26 @@ def encrypt_1W_key(node_address: bytes, key: bytes) -> bytes:
     encrypted_iv[i] ^= key[i]
   return encrypted_iv
 
+# The 5-bit size field in Control Byte 0 counts every byte except Control Byte 0
+# itself and the two CRC bytes, so a frame is three bytes longer than the field
+# says. The demo frames below hardcode their control bytes; finish_frame()
+# appends the CRC and checks that the two agree, which is how the stray MAC on
+# the 1W key-push frame was found.
+SIZE_FIELD_BIAS = 3
+
+
+def finish_frame(frame: bytes) -> bytes:
+  """Append the CRC and verify the frame length matches Control Byte 0."""
+  crc = compute_crc_8408(frame)
+  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  claimed = (frame[0] & 0x1f) + SIZE_FIELD_BIAS
+  if claimed != len(frame):
+    raise ValueError(
+      f"Control Byte 0 0x{frame[0]:02x} claims {claimed} bytes "
+      f"but the frame is {len(frame)}")
+  return frame
+
+
 def demo() -> None:
   """
   Tests and demonstrates the usage of all functions provided by this script.
@@ -157,9 +206,15 @@ def demo() -> None:
   print("Authentication message:")
   print("   " + binascii.hexlify(mac).decode('utf-8'))
   print("Final frame sent (assuming the controller is built by Somfy):")
-  frame = bytes.fromhex("fc 00 00003f") + node_address + b'\x30' + encrypted_1W + b'\x02\x01' + sequence_number + mac
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  # The payload is the encrypted key, the manufacturer and reserved bytes and
+  # the sequence number - 20 bytes, giving a 31-byte frame, which is what the
+  # 0xfc control byte encodes. This used to append `mac` as well, making the
+  # frame 37 bytes: six more than its own length field allows, and two more
+  # than the 5-bit field can express at all. Command 0x30 is a bootstrap
+  # command and travels without a MAC; the value is printed above because
+  # computing it is the point of this demo, not because it goes on the wire.
+  frame = bytes.fromhex("fc 00 00003f") + node_address + b'\x30' + encrypted_1W + b'\x02\x01' + sequence_number
+  frame = finish_frame(frame)
   print("   " + binascii.hexlify(frame).decode('utf-8'))
 
   print()
@@ -180,23 +235,19 @@ def demo() -> None:
   print("Frames sent on the air:")
   # 0x38 ask key transfer
   frame = bytes.fromhex("4e 04 feefee f00f00") + frame38
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x32 key transfer
   frame = bytes.fromhex("18 04 f00f00 feefee 32") + encrypted_2W
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x3c challenge
   frame = bytes.fromhex("0e 00 feefee f00f00 3c") + challenge
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x3d challenge answer
   frame = bytes.fromhex("8e 00 f00f00 feefee 3d") + mac_2w
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
 
   print()
@@ -217,33 +268,27 @@ def demo() -> None:
   print("Frames sent on the air:")
   # 0x31 ask challenge
   frame = bytes.fromhex("48 00 feefee f00f00") + frame31
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x3c challenge
   frame = bytes.fromhex("0e 00 f00f00 feefee 3c") + challenge1
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x32 key transfer
   frame = bytes.fromhex("18 00 f00f00 feefee 32") + encrypted_2W
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x3c challenge
   frame = bytes.fromhex("0e 00 f00f00 feefee 3c") + challenge2
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x3d challenge answer
   frame = bytes.fromhex("0e 00 feefee f00f00 3d") + mac_2w32
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
   # 0x33 key transfer complete
   frame = bytes.fromhex("88 00 f00f00 feefee 33")
-  crc = compute_crc_8408(frame)
-  frame = frame + bytes([crc & 0xff, (crc >> 8) & 0xff])
+  frame = finish_frame(frame)
   print("  " + binascii.hexlify(frame).decode('utf-8'))
 
 if "__main__" == __name__:

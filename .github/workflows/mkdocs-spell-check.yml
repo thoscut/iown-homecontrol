@@ -1,16 +1,40 @@
 # yaml-language-server: $schema=https://github.com/SchemaStore/schemastore/raw/master/src/schemas/json/github-workflow.json
 
-name: MkDocs Spell Check
+name: Spell Check
 
-# TODO Remove
-on: workflow_dispatch
-  # push:
-  #   paths:             # Only run changes in these directories
-  #     - docs/**
-  # pull_request:
-  #   paths:             # Only run changes in these directories
-  #     - docs/**
-  # Allows to run this workflow manually from the Actions tab
+# Scoped to the code and the documents this project authors.
+#
+# The protocol notes under docs/devices, docs/commands.md and docs/firmware.md
+# quote device menus, firmware strings and German manuals verbatim. "Correcting"
+# those would falsify reverse-engineering evidence, so they are out of scope.
+# See .codespellrc for the shared skip and ignore lists.
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "test/**"
+      - "tools/**"
+      - "esphome/**"
+      - "README.md"
+      - "PRODUCTION_READINESS.md"
+      - "docs/SECURITY-MODEL.md"
+      - "docs/RADIO-SETUP.md"
+      - "docs/HARDWARE-BRINGUP.md"
+      - ".codespellrc"
+  pull_request:
+    paths:
+      - "src/**"
+      - "test/**"
+      - "tools/**"
+      - "esphome/**"
+      - "README.md"
+      - "PRODUCTION_READINESS.md"
+      - "docs/SECURITY-MODEL.md"
+      - "docs/RADIO-SETUP.md"
+      - "docs/HARDWARE-BRINGUP.md"
+      - ".codespellrc"
+  workflow_dispatch:
 
 jobs:
   spellcheck:
@@ -22,3 +46,14 @@ jobs:
 
       - name: Spell check
         uses: codespell-project/actions-codespell@master
+        with:
+          path: >-
+            src
+            test
+            tools
+            esphome
+            README.md
+            PRODUCTION_READINESS.md
+            docs/SECURITY-MODEL.md
+            docs/RADIO-SETUP.md
+            docs/HARDWARE-BRINGUP.md

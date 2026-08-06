@@ -1,17 +1,130 @@
 # Syntax Coloring Map For iown-homecontrol
 #
-# Library Keyword list. When a keyword of any installed library is used in a sketch the Arduino IDE colors it.
-
-# This file would cause the Arduino IDE to highlight Test as a data type, and doSomething as a method / function.
-
+# Library keyword list. When a keyword of any installed library is used in a
+# sketch, the Arduino IDE colors it.
+#
 # KEYWORD TOKENTYPE   REFERENCE  RSYNTAXTEXTAREA
 
 # Datatypes (KEYWORD1)
-#Test    KEYWORD1
+IoHomeControl	KEYWORD1
+IoHomeNode	KEYWORD1
+IoFrame	KEYWORD1
+ReplayGuard	KEYWORD1
+RollingCodeStore	KEYWORD1
+MemoryRollingCodeStore	KEYWORD1
+NvsRollingCodeStore	KEYWORD1
+ChannelHopper	KEYWORD1
+AuthenticationManager	KEYWORD1
+BeaconHandler	KEYWORD1
+DiscoveryManager	KEYWORD1
+DiscoveredDevice	KEYWORD1
+BeaconInfo	KEYWORD1
+VeluxWindow	KEYWORD1
+VeluxBlind	KEYWORD1
+RxStats	KEYWORD1
+RxReject	KEYWORD1
+AuthTrailer	KEYWORD1
+FrameOrder	KEYWORD1
+Originator	KEYWORD1
+PriorityLevel	KEYWORD1
+DeviceType	KEYWORD1
+WindowPosition	KEYWORD1
+VeluxModel	KEYWORD1
+RainSensorStatus	KEYWORD1
 
 # Methods and Functions (KEYWORD2)
-#doSomething KEYWORD2
+configure_radio	KEYWORD2
+start_receive	KEYWORD2
+stop_receive	KEYWORD2
+check_received	KEYWORD2
+notify_packet_received	KEYWORD2
+send_command	KEYWORD2
+send_execute	KEYWORD2
+set_position	KEYWORD2
+set_acei	KEYWORD2
+set_originator	KEYWORD2
+set_rolling_code	KEYWORD2
+get_rolling_code	KEYWORD2
+set_rolling_code_store	KEYWORD2
+set_packet_length_callback	KEYWORD2
+set_accept_plain_frames	KEYWORD2
+rx_stats	KEYWORD2
+reset_rx_stats	KEYWORD2
+last_reject_reason	KEYWORD2
+replay_guard	KEYWORD2
+enable_frequency_hopping	KEYWORD2
+update_frequency_hopping	KEYWORD2
+send_challenge_request	KEYWORD2
+send_challenge_response	KEYWORD2
+get_auth_state	KEYWORD2
+start_discovery	KEYWORD2
+stop_discovery	KEYWORD2
+get_discovered_count	KEYWORD2
+get_discovered_device	KEYWORD2
+pair_device_1w	KEYWORD2
+pair_device_2w	KEYWORD2
+has_recent_beacon	KEYWORD2
+get_last_beacon	KEYWORD2
 
-# Instances (KEYWORD2)
+init_frame	KEYWORD2
+set_order	KEYWORD2
+set_destination	KEYWORD2
+set_source	KEYWORD2
+set_command	KEYWORD2
+set_execute_command	KEYWORD2
+finalize_frame	KEYWORD2
+finalize_frame_plain	KEYWORD2
+serialize_frame	KEYWORD2
+parse_frame	KEYWORD2
+validate_frame	KEYWORD2
+print_frame	KEYWORD2
+is_broadcast	KEYWORD2
+is_1w_mode	KEYWORD2
+is_2w_mode	KEYWORD2
+get_frame_length	KEYWORD2
+set_frame_length	KEYWORD2
+is_unauthenticated_command	KEYWORD2
+expected_payload_size	KEYWORD2
+
+compute_crc16	KEYWORD2
+verify_crc16	KEYWORD2
+constant_time_equal	KEYWORD2
+secure_zero	KEYWORD2
+random_bytes	KEYWORD2
+has_secure_random	KEYWORD2
+generate_system_key	KEYWORD2
+aes128_encrypt	KEYWORD2
+aes128_decrypt	KEYWORD2
+encrypt_1w_key	KEYWORD2
+decrypt_1w_key	KEYWORD2
+encrypt_2w_key	KEYWORD2
+decrypt_2w_key	KEYWORD2
+create_1w_hmac	KEYWORD2
+create_2w_hmac	KEYWORD2
+verify_hmac	KEYWORD2
 
 # Constants (LITERAL1)
+FREQUENCY_CHANNEL_1	LITERAL1
+FREQUENCY_CHANNEL_2	LITERAL1
+FREQUENCY_CHANNEL_3	LITERAL1
+SYNC_WORD_BYTES	LITERAL1
+FRAME_MIN_SIZE	LITERAL1
+FRAME_MAX_SIZE	LITERAL1
+FRAME_MAX_DATA_SIZE	LITERAL1
+NODE_ID_SIZE	LITERAL1
+AES_KEY_SIZE	LITERAL1
+HMAC_SIZE	LITERAL1
+ADDRESS_BROADCAST	LITERAL1
+ADDRESS_GROUP	LITERAL1
+CMD_EXECUTE	LITERAL1
+CMD_ACTIVATE_MODE	LITERAL1
+CMD_DISCOVER	LITERAL1
+CMD_DISCOVER_ANSWER	LITERAL1
+CMD_SEND_1W_KEY	LITERAL1
+CMD_KEY_TRANSFER	LITERAL1
+CMD_CHALLENGE_REQUEST	LITERAL1
+CMD_CHALLENGE_RESPONSE	LITERAL1
+MP_OPEN	LITERAL1
+MP_CLOSE	LITERAL1
+MP_STOP	LITERAL1
+ACEI_DEFAULT	LITERAL1

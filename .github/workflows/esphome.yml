@@ -1,0 +1,141 @@
+# yaml-language-server: $schema=https://github.com/SchemaStore/schemastore/raw/master/src/schemas/json/github-workflow.json
+
+# ESPHome external component validation and build.
+#
+# `esphome config` catches schema and code-generation mistakes in seconds;
+# `esphome compile` catches the C++ ones. Both are worth running because a
+# component can validate cleanly and still fail to compile.
+
+name: ESPHome
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "esphome/**"
+      - ".github/workflows/esphome.yml"
+  pull_request:
+    paths:
+      - "esphome/**"
+      - ".github/workflows/esphome.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Validate and compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            esphome/.esphome
+          key: ${{ runner.os }}-esphome-${{ hashFiles('esphome/components/**') }}
+          restore-keys: ${{ runner.os }}-esphome-
+
+      - name: Install ESPHome
+        run: pip install --upgrade esphome
+
+      - name: Write placeholder secrets
+        working-directory: esphome
+        run: |
+          cat > secrets.yaml <<'EOF'
+          wifi_ssid: "ci-ssid"
+          wifi_password: "ci-password"
+          ap_password: "ci-ap-password"
+          api_key: "u4tPeR0EF8bCRDgWkZ+lVdrYcDLMoDkPMbfLBCX2Gzo="
+          ota_password: "ci-ota-password"
+          iohc_system_key: "000102030405060708090A0B0C0D0E0F"
+          EOF
+
+      - name: Validate example configuration
+        working-directory: esphome
+        run: esphome config example.yaml
+
+      - name: Compile example configuration
+        working-directory: esphome
+        run: esphome compile example.yaml
+
+      - name: Compile a cover-only 2W configuration
+        working-directory: esphome
+        # example.yaml uses both platforms, so it never noticed that the hub
+        # compiles iown_cover.cpp and iown_sensor.cpp unconditionally and those
+        # need the cover and sensor components loaded. A configuration with only
+        # one of them failed on a missing esphome/components/sensor/sensor.h.
+        #
+        # This also compiles the 2W path, which example.yaml does not reach.
+        run: |
+          set -euo pipefail
+          cat > cover-only.yaml <<'EOF'
+          esphome:
+            name: cover-only
+          esp32:
+            board: esp32dev
+            framework:
+              type: arduino
+          logger:
+          external_components:
+            - source:
+                type: local
+                path: components
+          iown_homecontrol:
+            id: hub
+            cs_pin: 18
+            rst_pin: 14
+            dio0_pin: 26
+            dio1_pin: 33
+            two_way: true
+            position_feedback: true
+            system_key: !secret iohc_system_key
+          cover:
+            - platform: iown_homecontrol
+              iown_homecontrol_id: hub
+              name: "Cover"
+              target_address: 0x708758
+          EOF
+          esphome compile cover-only.yaml
+
+      - name: Compile a sensor-only configuration
+        working-directory: esphome
+        run: |
+          set -euo pipefail
+          cat > sensor-only.yaml <<'EOF'
+          esphome:
+            name: sensor-only
+          esp32:
+            board: esp32dev
+            framework:
+              type: arduino
+          logger:
+          external_components:
+            - source:
+                type: local
+                path: components
+          iown_homecontrol:
+            id: hub
+            cs_pin: 18
+            rst_pin: 14
+            dio0_pin: 26
+            dio1_pin: 33
+          sensor:
+            - platform: iown_homecontrol
+              iown_homecontrol_id: hub
+              rssi:
+                name: "RSSI"
+          EOF
+          esphome compile sensor-only.yaml

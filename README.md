@@ -122,13 +122,17 @@ framework, if you would rather use PlatformIO's runner.
 An [ESPHome](https://esphome.io) external component is available for integration with [Home Assistant](https://www.home-assistant.io/). This enables controlling io-homecontrol devices (blinds, shutters, etc.) directly from Home Assistant using an ESP32 + LoRa radio module.
 
 > [!WARNING]
-> The ESPHome component is experimental and has not been verified against a
-> physical actuator. It builds, it validates, and its frames match the
-> documented captures - that is not the same as knowing a blind obeys them.
+> The ESPHome component is still experimental. The core path is now confirmed on
+> real hardware - on a Heltec V4 a physical actuator pairs, obeys its cover
+> commands (it actually moves) and its frames decode correctly - but coverage is
+> one board and a limited set of actuators, and the FP1 tilt direction on
+> slatted products is still unconfirmed. Treat it as beta, not proven across
+> every device.
 
 Frame reception, authenticated 1W cover commands, tilt and diagnostic sensors
-are supported. The 2W challenge-response handshake is not wired in yet, so 2W
-frames go out unauthenticated.
+are supported. The 2W challenge-response handshake is wired in behind
+`two_way: true`: the component challenges the actuator and MACs each command
+against that session.
 
 Add this to your ESPHome YAML configuration:
 

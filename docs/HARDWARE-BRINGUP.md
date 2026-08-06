@@ -1,13 +1,17 @@
 # Hardware bring-up
 
 Everything this library claims about the io-homecontrol wire format is checked
-against captures in `docs/` and reproduced by 198 host-run tests. None of it has
-been checked against a physical actuator. That is the single largest open item
-in `PRODUCTION_READINESS.md` (**K1**), and it is the one thing a laptop cannot
-close.
+against captures in `docs/` and reproduced by 223 host-run tests. The core path
+has now also been checked against a **physical actuator** on a Heltec V4: it
+pairs, it obeys open/close/position/ventilation (the actuator actually moves),
+and its own frames decode byte-correct. What a laptop still cannot close is the
+FP1 tilt *direction* on a slatted product, and broader coverage across actuator
+models and the full 2W session - the remainder of **K1** in
+`PRODUCTION_READINESS.md`.
 
-This document is the order to do it in, what a pass looks like at each step, and
-which open questions a session with real hardware can actually settle.
+This document is the order to bring up a new board in, what a pass looks like at
+each step, and which open questions a session with real hardware can still
+settle.
 
 ---
 

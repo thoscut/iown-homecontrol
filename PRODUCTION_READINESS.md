@@ -9,12 +9,15 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 
 **Current Status: BETA**
 
-The protocol layer is now verified against the byte-for-byte captures in
-`docs/`, covered by 199 host-run unit tests, and hardened against the receive
-path being attacker-controlled. What is *not* verified is behaviour against
-real hardware: nobody has yet confirmed that a physical actuator obeys a frame
-this library produces. Treat every "Complete" below as "complete and tested in
-software".
+The protocol layer is verified against the byte-for-byte captures in `docs/`,
+covered by 223 host-run unit tests, and hardened against the receive path being
+attacker-controlled. The core path is now also confirmed on **real hardware**:
+on a Heltec V4 a physical io-homecontrol actuator pairs, obeys our
+open/close/position/ventilation commands (it actually moves), and its own frames
+decode byte-correct. The one behaviour still unconfirmed on hardware is the FP1
+tilt *direction* on a slatted product - see K1. Coverage is still one board and a
+limited set of actuators, so this stays BETA rather than a broad conformance
+claim.
 
 ---
 
@@ -145,7 +148,7 @@ software".
 
 | ID | Severity | Component | Description | Recommended Fix |
 |----|----------|-----------|-------------|-----------------|
-| K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/` and on the Velux KLF 200 specification - see [`docs/VELUX-FORMAT.md`](docs/VELUX-FORMAT.md). | Follow [`docs/HARDWARE-BRINGUP.md`](docs/HARDWARE-BRINGUP.md), which lists the experiments that settle the FP1 tilt direction |
+| K1 | Low | `src/velux/` tilt | The core path is now confirmed on real hardware (a Heltec V4): a physical actuator pairs, obeys open/close/position/ventilation, and its own frames decode byte-correct. The blanket "no hardware verification" no longer holds. What is still unconfirmed on hardware is the **direction of Functional Parameter 1** on a tilting product: `create_tilt_frame()` assumes FP1 counts closure the way the Main Parameter does, inferred from the shared scale rather than from a capture, so a blind could tilt the wrong way. Broader coverage (more actuator models, the 2W session end-to-end) is also still thin. | Tilt a slatted product (Velux FML) both ways and capture FP1 - see the "direction of Functional Parameter 1" experiment in [`docs/HARDWARE-BRINGUP.md`](docs/HARDWARE-BRINGUP.md) |
 | K8 | Low | `src/esp32_api_spi.cpp` | The SPI register helpers still have no runtime coverage - they need an ESP-IDF SPI host, so a host test cannot reach them. Everything else in the legacy layer is now tested (`test_legacy_helpers`). | Exercise on hardware, or remove |
 
 ### 🔒 Security Considerations

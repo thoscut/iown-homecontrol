@@ -83,16 +83,31 @@ void test_channel_hopper_cycles(void) {
 
 void test_channel_hopper_survives_counter_wrap(void) {
     mode2w::ChannelHopper hopper;
-    hopper.begin(1.0f);
+    hopper.begin(1.0f);  // 1000 us hop interval
     hopper.set_enabled(true);
 
     // Start just before the 32-bit microsecond counter wraps (~71.6 minutes).
-    const unsigned long near_max = 0xFFFFFF00UL;
+    // The post-wrap timestamps are passed as genuinely-reduced uint32_t values,
+    // so `now` is numerically *smaller* than last_hop and the wrap-safe
+    // subtraction is actually exercised. The old form used near_max + offset,
+    // which on a 64-bit host never wraps at 2^32 - so its "wrap" was fiction and
+    // a regression in the subtraction would not have been caught. The hopper now
+    // does its timestamp math in uint32_t, so this crosses the real 2^32 boundary
+    // on host and target alike.
+    const uint32_t near_max = 0xFFFFFF00u;
     hopper.reset(near_max);
 
-    TEST_ASSERT_FALSE(hopper.update_us(near_max + 500));
-    TEST_ASSERT_TRUE(hopper.update_us(near_max + 1000));  // wraps to 0x000000FC
+    // now = (near_max + 0x134) mod 2^32 = 0x34; elapsed = 0x34 - 0xFFFFFF00 = 308 us (< 1000): no hop.
+    TEST_ASSERT_FALSE(hopper.update_us(static_cast<uint32_t>(near_max + 0x134)));
+    // now = 0x300; elapsed since the reset point = 0x400 = 1024 us (>= 1000): one hop.
+    TEST_ASSERT_TRUE(hopper.update_us(static_cast<uint32_t>(near_max + 0x400)));
     TEST_ASSERT_EQUAL(mode2w::ChannelState::CHANNEL_3, hopper.get_current_channel());
+
+    // time_until_next_hop_us() uses the same wrap-safe math: reset at 0xFFFFFFC0,
+    // query 400 us later (which wraps past 2^32), and 600 of the 1000 us remain.
+    hopper.reset(0xFFFFFFC0u);
+    TEST_ASSERT_EQUAL_UINT32(600, hopper.time_until_next_hop_us(
+        static_cast<uint32_t>(0xFFFFFFC0u + 400)));
 }
 
 void test_channel_hopper_time_until_next_hop(void) {

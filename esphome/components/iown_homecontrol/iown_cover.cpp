@@ -201,20 +201,20 @@ void IOWNCover::control(const cover::CoverCall &call) {
 
   const float pos = clamp(*call.get_position(), 0.0f, 1.0f);
 
-  this->start_position_ = this->position;
-  this->movement_start_ms_ = millis();
-  this->last_publish_ms_ = this->movement_start_ms_;
+  bool sent;
+  float target;
+  cover::CoverOperation op;
 
   if (pos >= 0.99f) {
     ESP_LOGI(TAG, "OPEN -> 0x%06X", static_cast<unsigned int>(this->target_address_));
-    this->send_main_param_(IOHC_PARAM_OPEN);
-    this->target_position_ = cover::COVER_OPEN;
-    this->current_operation = cover::COVER_OPERATION_OPENING;
+    sent = this->send_main_param_(IOHC_PARAM_OPEN);
+    target = cover::COVER_OPEN;
+    op = cover::COVER_OPERATION_OPENING;
   } else if (pos <= 0.01f) {
     ESP_LOGI(TAG, "CLOSE -> 0x%06X", static_cast<unsigned int>(this->target_address_));
-    this->send_main_param_(IOHC_PARAM_CLOSE);
-    this->target_position_ = cover::COVER_CLOSED;
-    this->current_operation = cover::COVER_OPERATION_CLOSING;
+    sent = this->send_main_param_(IOHC_PARAM_CLOSE);
+    target = cover::COVER_CLOSED;
+    op = cover::COVER_OPERATION_CLOSING;
   } else {
     // Ask the actuator for the position directly. Actuators that honour a
     // percentage stop on their own; for the rest, loop() sends STOP once the
@@ -226,11 +226,27 @@ void IOWNCover::control(const cover::CoverCall &call) {
     ESP_LOGI(TAG, "POSITION %.0f%% -> 0x%06X (main=0x%04X)", pos * 100.0f,
              static_cast<unsigned int>(this->target_address_), main_param);
 
-    this->send_main_param_(main_param);
-    this->target_position_ = pos;
-    this->current_operation =
-        (pos > this->position) ? cover::COVER_OPERATION_OPENING : cover::COVER_OPERATION_CLOSING;
+    sent = this->send_main_param_(main_param);
+    target = pos;
+    op = (pos > this->position) ? cover::COVER_OPERATION_OPENING
+                                : cover::COVER_OPERATION_CLOSING;
   }
+
+  // If the command did not actually go out - most commonly because a 2W session
+  // is still handshaking and send_2w_command_() deferred it - do NOT animate to
+  // a position the actuator never received. Leaving the state untouched keeps
+  // the reported position honest; the user re-issues once the session is up.
+  // (The tilt path above already guards this way.)
+  if (!sent) {
+    ESP_LOGW(TAG, "command not sent (2W session not ready?); position unchanged");
+    return;
+  }
+
+  this->start_position_ = this->position;
+  this->movement_start_ms_ = millis();
+  this->last_publish_ms_ = this->movement_start_ms_;
+  this->target_position_ = target;
+  this->current_operation = op;
 
   if (std::fabs(this->target_position_ - this->position) < 0.001f) {
     // Already there; nothing to time.

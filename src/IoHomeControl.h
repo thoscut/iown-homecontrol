@@ -763,6 +763,18 @@ protected:
   uint8_t pairing_key_[AES_KEY_SIZE];
   /// Challenge sent in our 0x38, needed to unmask the device's 0x32 (pull).
   uint8_t pairing_challenge_[HMAC_SIZE];
+  /// When the current pairing wait began, so a stalled peer cannot leave us
+  /// stuck. See expire_stale_pairing() / PAIRING_TIMEOUT_MS.
+  uint32_t pairing_started_ms_;
+
+  /// A pairing handshake that has not completed within this long is abandoned.
+  /// Long enough for a slow device to answer, short enough that a dropped peer
+  /// does not keep diverting unrelated 0x3C/0x32 frames from MAC screening.
+  static constexpr uint32_t PAIRING_TIMEOUT_MS = 5000;
+
+  /// Reset a pairing handshake to IDLE if it has been waiting too long. Called
+  /// on the receive path so the guard runs even without a matching answer.
+  void expire_stale_pairing();
 
   /// Bytes to pull off the air per packet. A frame is at most FRAME_MAX_SIZE
   /// logical bytes, each ten bits on the wire, so up to 43 arrive; 64 leaves

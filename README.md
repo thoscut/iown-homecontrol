@@ -14,18 +14,20 @@
 
 > **Current: Beta** — the protocol layer is verified against the captures in
 > [`docs/linklayer.md`](docs/linklayer.md) and covered by host-run unit tests,
-> but nothing here has been confirmed against a physical actuator yet.
+> and the core path is now confirmed on real hardware: on a Heltec V4 a physical
+> actuator pairs, obeys its cover commands (it actually moves) and its frames
+> decode correctly. Coverage is still one board and a limited set of actuators,
+> and the direction of Functional Parameter 1 (tilt) on slatted products is
+> unconfirmed.
 > See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for the detailed
 > assessment and [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) for what the
 > authentication does and does not protect against.
 >
 > **Have a board and an actuator?** [docs/HARDWARE-BRINGUP.md](docs/HARDWARE-BRINGUP.md)
-> is the step-by-step for closing that gap. The firmware in `src/main.cpp`
-> sweeps the three channels, prints every packet it hears as plain hex and says
-> so in as many words when the radio does not answer over SPI. Captures are the
-> most useful thing anyone can contribute right now: several open questions -
-> the Velux command IDs, the direction of Functional Parameter 1, the pairing
-> sequence - need one recording each to settle.
+> is the step-by-step. The firmware in `src/main.cpp` sweeps the three channels,
+> prints every packet it hears as plain hex and says so in as many words when the
+> radio does not answer over SPI. The one open question a fresh capture still
+> settles is the direction of Functional Parameter 1 on a tilting blind.
 
 ### Protocol Documentation
 - [X] [Document Layer 1](docs/radio.md) - Physical Layer (RF, modulation, frequencies)
@@ -64,8 +66,8 @@
 - [X] ESPHome: authenticated 1W frames
 - [X] Rolling code persistence across reboots (NVS, batched writes)
 - [X] Unit test suite (`./tools/run_native_tests.sh`)
-- [ ] ESPHome: 2W challenge-response handshake
-- [ ] Verification against physical hardware
+- [X] ESPHome: 2W challenge-response handshake (behind `two_way: true`)
+- [X] Core path verified on physical hardware (Heltec V4); FP1 tilt direction still open
 - [ ] Simple [MicroPython](https://micropython.org/) implementation
 - [ ] Expose as ZigBee device for HomeAssistant integration
 - [ ] Expose as HomeKit device (HomeSpan?)

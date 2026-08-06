@@ -116,7 +116,11 @@ public:
 
 protected:
   ChannelState current_channel_;
-  unsigned long last_hop_time_us_;
+  // Stored as a fixed 32 bits so the wrap happens at 2^32 on every platform,
+  // matching Arduino micros() (a 32-bit unsigned long). On a 64-bit host,
+  // `unsigned long` is 64 bits and would only wrap at 2^64, so the timestamp
+  // math is done in uint32_t regardless of the caller's type.
+  uint32_t last_hop_time_us_;
   unsigned long hop_interval_us_;
   bool enabled_;
 

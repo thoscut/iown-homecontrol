@@ -37,6 +37,17 @@ namespace iohome {
  *
  * Tracking is per source node ID and bounded by MAX_NODES; the least recently
  * used entry is evicted when the table is full.
+ *
+ * Persistence: this state lives in RAM only. It is NOT saved across a reboot,
+ * and nothing primes it on boot - so the FIRST authenticated frame from each
+ * source after a power-cycle is accepted at whatever sequence it carries (the
+ * empty-table branch has no previous value to compare against). That is the
+ * mirror image of the *transmit* rolling code, which IS persisted in NVS. An
+ * attacker who records a valid 1W frame can therefore replay it once per source
+ * per reboot. In this project that is harmless because received 1W frames only
+ * update reported position (position_feedback), never actuator motion; a
+ * receiver that acts on 1W commands must persist the last-accepted sequence per
+ * peer and restore it with prime() in begin(). See docs/SECURITY-MODEL.md.
  */
 class ReplayGuard {
 public:

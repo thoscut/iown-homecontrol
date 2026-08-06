@@ -885,6 +885,16 @@ void IOWNHomeControlComponent::handle_1w_key_transfer_(const uint8_t *data, size
     return s;
   };
 
+  // SECURITY: the bytes below are (a candidate for) the installation's 128-bit
+  // system key - the secret that authenticates every command to every actuator.
+  // key_capture: true opts into surfacing it, but ESP_LOGx is forwarded over
+  // ESPHome's network API/logger and anything recording that stream, not just
+  // the serial console the operator is watching. Lead with a loud warning so the
+  // value is never pasted into a GitHub issue, forum post, or shared log.
+  ESP_LOGW(TAG, "SECURITY: a system-key candidate follows. It IS the installation secret;");
+  ESP_LOGW(TAG, "  anyone who reads it can command every actuator. These log lines travel over");
+  ESP_LOGW(TAG, "  the network API too - do NOT share them. Move the node to serial-only logging");
+  ESP_LOGW(TAG, "  while capturing, and clear the value from any dashboard/log afterwards.");
   ESP_LOGI(TAG, "1W key transfer from 0x%06X (manufacturer 0x%02X)",
            static_cast<unsigned int>(src_addr), manufacturer);
   ESP_LOGI(TAG, "  encrypted key on air: %s", to_hex(ciphertext, iohome::AES_KEY_SIZE).c_str());

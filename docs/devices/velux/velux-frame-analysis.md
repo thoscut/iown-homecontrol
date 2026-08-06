@@ -207,7 +207,7 @@ and needs the system key.
 37 C0 90 04 01 7E 51 D2 F4 8F 00 50 14 34 27 00 40 10 05 41 34 4D 34 74 47 34 43 D6 2D 57 1A 49 3A 69 6F 19 03 0A 86 2F A9 92 11 8C FD D2 6E A0
 # NOT 2W pairing - this de-frames to a 1W 0x30 key transfer (ctrl0 0xFC, 1W bit
 # set). The raw 0x1F is the first framed byte, not a control byte. See §0/§5.
-1F C0 10 05 01 7E 46 94 AD 31 06 53 70 F4 0B 47 DB 15 0D 83 16 5F 71 A5 F5 56 5B D6 0C 3D 5A 50 14 04 41 2C D3 95 8C FB A8 80 DF 0C 6E 8F 95 97 C5 77 DB C6 33 CC 13 4E 84 15
+[redacted: 0x30 1W key-transfer frame - omitted so the installation key cannot be recovered from this repo]
 # 1W frames, other types
 47 C0 10 04 01 7E 46 94 AD 31 4E 40 11 05 33 20 D5 92 54 9B 5D 4A F2 9D 61 82 0B 1F D7 4F C3 A3 63 70 A8 32 DF E5 C3 7E FB 62 55 B7 90
 69 40 16 4D 3D 5B 4F D7 3C EF 60 58 10 04 01 25 C8 F5 50 16 6D 6B 4D 64 96 60 39 65 5E A2 F7 69 E3 F5 5A BF
@@ -215,12 +215,15 @@ and needs the system key.
 
 ## 5. Key recovery from captures — still open, for different reasons than first thought
 
-> **Partly superseded by §0.** A 1W key transfer (0x30) *does* appear in the
-> capture — the search here missed it because it ran on the framed bytes, where
-> no `0x30` command byte is visible. The rest of this section's conclusion (the
-> key is not confirmable from the capture) still holds, but not for the reason
-> given: the 0x30 frame carries **no MAC**, so it is not self-verifying, and the
-> documented de-masking does not reproduce this installation's traffic.
+> **Superseded by §0.** Two things this section got wrong. First, a 1W key
+> transfer (0x30) *does* appear in the capture — the search here missed it
+> because it ran on the framed bytes, where no `0x30` command byte is visible.
+> Second, and more important: the key **is** recoverable, and is verified 80/80.
+> The reason the brute-force below found no match was an **off-by-one in the MAC
+> input range** — the 1W MAC covers the frame *from the command byte*, not the
+> payload after it — **not** a masking difference. De-masking with IV = the
+> frame's SRC address repeated is correct. The bullets below are kept as the
+> original (mistaken) conclusion; read §0 for the resolution.
 
 - **1W key transfer (0x30)** is present (§0): manufacturer `0x01` = Velux, a
   16-byte masked key, a sequence, and **no MAC** — CRC only. The claim here that
@@ -239,9 +242,11 @@ and needs the system key.
   crack a 2W key from, which is a stronger statement than "no anchor": the frame
   was never captured.
 
-The system key is therefore still not *confirmed* from sniffing. Hardware
-extraction (§6) remains the reliable route; the 0x30 de-masked candidate is worth
-checking against later authenticated traffic before trusting it.
+The original conclusion here was that the system key is *not confirmed* from
+sniffing and that hardware extraction (§6) is the reliable route. **§0 resolves
+it the other way:** the de-masked candidate was checked against later authenticated
+traffic and reproduces the 1W MAC on 80/80 commands, so the key is confirmed from
+passive captures and SWD extraction is not needed.
 
 ### The 2W traffic that *was* captured
 
@@ -312,12 +317,13 @@ installation is simply standard io-homecontrol.
 
 What is genuinely still open:
 
-- **The system key.** Not recoverable from these captures. The one `0x30` 1W key
-  transfer carries no MAC to confirm a de-mask, and the documented address-mask
-  does not reproduce the installation's command MACs (§5). No `0x32` 2W transfer
-  was captured at all. Hardware extraction (§6) remains the route, or a fresh
-  capture of a pairing that includes the key transfer *to a device whose address
-  is known*, so the de-mask can be checked.
+- **The system key — recovered (§0), not open.** The original entry here said
+  the key was not recoverable; §0 supersedes it. The one `0x30` 1W key transfer
+  *is* de-maskable (IV = the frame's SRC repeated), and the recovered per-remote
+  key reproduces the 1W MAC on 80/80 captured commands, so it is confirmed from
+  passive captures — no hardware extraction needed. What remains open is only the
+  **2W** side: no `0x32` 2W key transfer was captured, so a 2W key cannot be
+  recovered from this set.
 - **The 2W handshake, end to end.** The capture has `0x3D` challenge responses and
   `0x03`/`0x04` private exchanges but no preceding `0x3C`/`0x31` challenge request
   (§5). A capture that includes the request would let the session set-up be

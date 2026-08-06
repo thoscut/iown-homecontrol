@@ -79,7 +79,8 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     key_received_callback_(nullptr),
     key_received_context_(nullptr),
     accept_pairing_(false),
-    pairing_state_(Pairing2W::IDLE)
+    pairing_state_(Pairing2W::IDLE),
+    pairing_started_ms_(0)
 {
   memset(own_node_id_, 0, NODE_ID_SIZE);
   memset(system_key_, 0, AES_KEY_SIZE);
@@ -428,6 +429,12 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
     last_reject_ = RxReject::MALFORMED;
     return false;
   }
+
+  // A pairing handshake that stalled (the peer never answered) must not keep
+  // diverting unrelated frames from the MAC gate. Age it out before we decide
+  // how to route this frame, so a stranger's 0x3C/0x32 goes through the normal
+  // gate once our own attempt has timed out.
+  expire_stale_pairing();
 
   // Pairing frames run their own short exchange and must not go through the
   // session authentication gate below: while a key is being transferred the
@@ -1065,6 +1072,7 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
   memcpy(pairing_peer_, dest_node, NODE_ID_SIZE);
   memcpy(pairing_key_, new_system_key, AES_KEY_SIZE);
   pairing_state_ = Pairing2W::PUSH_WAIT_CHALLENGE;
+  pairing_started_ms_ = static_cast<uint32_t>(NOW_MS());
 
   if (!transmit_frame(&ask)) {
     pairing_state_ = Pairing2W::IDLE;
@@ -1105,6 +1113,7 @@ bool IoHomeControl::pull_device_key_2w(const uint8_t dest_node[NODE_ID_SIZE]) {
 
   memcpy(pairing_peer_, dest_node, NODE_ID_SIZE);
   pairing_state_ = Pairing2W::PULL_WAIT_KEY;
+  pairing_started_ms_ = static_cast<uint32_t>(NOW_MS());
 
   if (!transmit_frame(&launch)) {
     pairing_state_ = Pairing2W::IDLE;
@@ -1115,6 +1124,16 @@ bool IoHomeControl::pull_device_key_2w(const uint8_t dest_node[NODE_ID_SIZE]) {
 }
 
 bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
+  // The 2W pairing exchange only exists in 2W mode: it builds challenges and
+  // recovers masked keys through auth_manager_/discovery_manager_, which are
+  // only allocated when begin() runs in 2W mode. Diverting a frame here in 1W
+  // mode would reach a null manager. A 1W node with accept_pairing_ set must
+  // therefore never route an incoming 0x31/0x38 into the pairing machine - an
+  // attacker could otherwise crash it with a single broadcast frame.
+  if (is_1w_mode_ || auth_manager_ == nullptr) {
+    return false;
+  }
+
   // Addressed to us (or broadcast), and a command that belongs to a pairing
   // exchange this node is currently part of. 0x3C and 0x33 are only diverted
   // while we are the initiator waiting for them; otherwise 0x3C is an ordinary
@@ -1139,7 +1158,29 @@ bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
   }
 }
 
+void IoHomeControl::expire_stale_pairing() {
+  if (pairing_state_ == Pairing2W::IDLE) {
+    return;
+  }
+  // 32-bit unsigned subtraction is wrap-safe across the millis() rollover (which
+  // is itself 32-bit). elapsed = now - start is correct even at the wrap.
+  const uint32_t elapsed = static_cast<uint32_t>(NOW_MS()) - pairing_started_ms_;
+  if (elapsed < PAIRING_TIMEOUT_MS) {
+    return;
+  }
+  LOG_WARN("Pairing timed out; abandoning the handshake");
+  pairing_state_ = Pairing2W::IDLE;
+  crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+  crypto::secure_zero(pairing_challenge_, sizeof(pairing_challenge_));
+}
+
 void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
+  // Defence in depth: is_pairing_frame() already refuses to divert here in 1W
+  // mode, but the managers this function drives are only non-null in 2W mode.
+  if (is_1w_mode_ || auth_manager_ == nullptr || discovery_manager_ == nullptr) {
+    return;
+  }
+
   const bool from_peer = memcmp(frame->src_node, pairing_peer_, NODE_ID_SIZE) == 0;
 
   // ---- Initiator (controller pushing its key) ----------------------------
@@ -1162,6 +1203,7 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
       return;
     }
     pairing_state_ = Pairing2W::PUSH_WAIT_ACK;
+    pairing_started_ms_ = static_cast<uint32_t>(NOW_MS());
     LOG_INFO("Pairing: sending key transfer");
     transmit_frame(&kt);
     // From now on we speak to the device under the key we just pushed.

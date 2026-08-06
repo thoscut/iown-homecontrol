@@ -41,12 +41,14 @@ bool ChannelHopper::update_us(unsigned long current_time_us) {
     return false;
   }
 
-  // Unsigned subtraction stays correct across the counter wrap.
-  const unsigned long elapsed_us = current_time_us - last_hop_time_us_;
+  // Do the arithmetic in 32 bits so the unsigned subtraction wraps at 2^32 -
+  // the width of Arduino micros() - on every platform, including a 64-bit host.
+  const uint32_t now = static_cast<uint32_t>(current_time_us);
+  const uint32_t elapsed_us = now - last_hop_time_us_;
 
   if (elapsed_us >= hop_interval_us_) {
     next_channel();
-    last_hop_time_us_ = current_time_us;
+    last_hop_time_us_ = now;
     return true;
   }
 
@@ -77,11 +79,12 @@ float ChannelHopper::get_current_frequency() const {
 
 void ChannelHopper::reset(unsigned long current_time_us) {
   current_channel_ = ChannelState::CHANNEL_2;
-  last_hop_time_us_ = current_time_us;
+  last_hop_time_us_ = static_cast<uint32_t>(current_time_us);
 }
 
 unsigned long ChannelHopper::time_until_next_hop_us(unsigned long current_time_us) const {
-  const unsigned long elapsed_us = current_time_us - last_hop_time_us_;
+  // 32-bit math, as in update_us(): the counter wraps at 2^32 everywhere.
+  const uint32_t elapsed_us = static_cast<uint32_t>(current_time_us) - last_hop_time_us_;
 
   if (elapsed_us >= hop_interval_us_) {
     return 0;

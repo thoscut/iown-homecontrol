@@ -177,6 +177,9 @@ class IOWNHomeControlComponent : public Component {
   void set_encryption_enabled(bool enabled) { this->encryption_enabled_ = enabled; }
   void set_acei(uint8_t acei) { this->acei_ = acei; }
   void set_originator(uint8_t originator) { this->originator_ = originator; }
+  /// Seed the 1W rolling code (only raises it) so an impersonated/re-adopted
+  /// controller starts above the sequence the actuator last saw from that node.
+  void set_initial_rolling_code(uint16_t value) { this->initial_rolling_code_ = value; }
   void set_position_feedback(bool enabled) { this->position_feedback_ = enabled; }
   /// Select 2W (challenge-response authenticated) instead of 1W.
   void set_two_way(bool enabled) { this->two_way_ = enabled; }
@@ -229,6 +232,15 @@ class IOWNHomeControlComponent : public Component {
   /** Send a cover control command (command 0x00 with a main parameter). */
   bool send_cover_command(uint32_t target_address, uint8_t command, uint16_t main_param,
                           uint8_t fp1 = 0x00, uint8_t fp2 = 0x00);
+
+  /** Send a 1W "remove controller" (0x39) - the exclusion step the io 1W
+   *  discovery handshake sends just before the 0x30 key transfer. */
+  bool send_1w_remove(uint32_t dest_address = 0x00003F);
+
+  /** Send a 1W key transfer (0x30) that pairs THIS device - its own system_key
+   *  under its own source address - into an actuator that is in learn mode.
+   *  dest defaults to the pairing broadcast 0x00013F seen on the wire. */
+  bool send_1w_pairing(uint32_t dest_address = 0x00013F);
 
   /** Convert a percentage of closure (0-100) to a main parameter value. */
   static uint16_t main_param_from_percent_closed(uint8_t percent_closed);
@@ -341,6 +353,7 @@ class IOWNHomeControlComponent : public Component {
   static const uint16_t ROLLING_CODE_RESERVE_BLOCK = 64;
   uint16_t rolling_code_{0};
   uint16_t rolling_code_reserved_until_{0};
+  uint16_t initial_rolling_code_{0};
   ESPPreferenceObject rolling_code_pref_;
 
   int16_t last_rssi_{0};

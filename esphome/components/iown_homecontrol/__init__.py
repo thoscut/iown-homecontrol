@@ -53,6 +53,7 @@ CONF_SYSTEM_KEY = "system_key"
 CONF_ENCRYPTION_ENABLED = "encryption_enabled"
 CONF_ACEI = "acei"
 CONF_ORIGINATOR = "originator"
+CONF_INITIAL_ROLLING_CODE = "initial_rolling_code"
 CONF_POSITION_FEEDBACK = "position_feedback"
 CONF_TWO_WAY = "two_way"
 CONF_KEY_CAPTURE = "key_capture"
@@ -288,6 +289,11 @@ CONFIG_SCHEMA = cv.All(
                 ORIGINATORS, upper=True
             ),
             cv.Optional(CONF_POSITION_FEEDBACK, default=False): cv.boolean,
+            # Seed the 1W rolling code so an impersonated/re-adopted controller
+            # starts above the sequence the actuator last saw. Only ever raises.
+            cv.Optional(CONF_INITIAL_ROLLING_CODE, default=0): cv.int_range(
+                min=0, max=0xFFFF
+            ),
             # 2W: every frame is signed against a nonce the actuator chose
             # moments earlier, so a recorded frame stops working when the
             # session ends. 1W relies on a rolling code instead.
@@ -325,6 +331,7 @@ async def to_code(config):
     cg.add(var.set_source_address(config[CONF_SOURCE_ADDRESS]))
     cg.add(var.set_acei(config[CONF_ACEI]))
     cg.add(var.set_originator(config[CONF_ORIGINATOR]))
+    cg.add(var.set_initial_rolling_code(config[CONF_INITIAL_ROLLING_CODE]))
     cg.add(var.set_position_feedback(config[CONF_POSITION_FEEDBACK]))
     cg.add(var.set_two_way(config[CONF_TWO_WAY]))
     cg.add(var.set_key_capture(config[CONF_KEY_CAPTURE]))

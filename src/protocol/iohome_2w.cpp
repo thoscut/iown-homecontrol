@@ -555,8 +555,13 @@ bool DiscoveryManager::create_key_transfer_1w(
 
   // Payload per docs/commands.md "30: Send 1W Key":
   //   encrypted key (16) | manufacturer (1) | reserved (1) | sequence (2)
+  //
+  // The key is masked with the SENDER's own address, not the destination:
+  // verified against real captured 0x30 frames (their key de-masks with the src
+  // node and then validates the sender's command MACs). Masking with dest_node -
+  // as this did - produces a key the receiver de-masks wrong, so pairing failed.
   uint8_t params[AES_KEY_SIZE + 4];
-  if (!crypto::encrypt_1w_key(system_key, dest_node, params)) {
+  if (!crypto::encrypt_1w_key(system_key, src_node, params)) {
     return false;
   }
 

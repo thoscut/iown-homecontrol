@@ -272,8 +272,11 @@ int16_t IOWNHomeControlComponent::configure_phy_layer_() {
     return state;
   }
 
-  // Set Tx output power (start at 20 dBm, decrease until supported)
-  int8_t pwr = 20;
+  // Set Tx output power (start here, decrease until supported). Kept modest: the
+  // GC1109 front-end adds gain on top, and driving the SX126x at 20 dBm into it
+  // browns out a USB-powered board mid-transmit (the serial link drops and the
+  // ESP resets). 10 dBm + the PA still reaches across a house with margin.
+  int8_t pwr = 10;
   do {
     state = this->phy_->setOutputPower(pwr);
   } while (state == RADIOLIB_ERR_INVALID_OUTPUT_POWER && --pwr >= -3);
@@ -377,6 +380,15 @@ void IOWNHomeControlComponent::restore_rolling_code_() {
   } else {
     ESP_LOGD(TAG, "No stored rolling code, starting at 0");
     stored = 0;
+  }
+
+  // Seed the counter when impersonating (or re-adopting) an existing controller:
+  // the actuator remembers that node's last sequence, so we must start above it
+  // or every command reads as a replay. Only ever raises, never lowers.
+  if (stored < this->initial_rolling_code_) {
+    ESP_LOGI(TAG, "Seeding rolling code to configured initial %u",
+             static_cast<unsigned>(this->initial_rolling_code_));
+    stored = this->initial_rolling_code_;
   }
 
   this->rolling_code_ = stored;
@@ -1036,7 +1048,14 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address, uint8
   // Size field excludes Control Byte 0 and the CRC.
   const uint8_t size_field = static_cast<uint8_t>((total_len - IOHC_SIZE_BIAS) & IOHC_CTRL0_SIZE_MASK);
 
-  frame[pos++] = static_cast<uint8_t>((authenticated ? IOHC_MODE_1W : IOHC_MODE_2W) | size_field);
+  // Real 1W command frames carry order bits 11 (0xC0, "group end") in ctrl0; an
+  // actuator ignores an otherwise-valid command that arrives as order 00. This
+  // was verified byte-for-byte against a real remote's CLOSE: with 0xC0 our
+  // frame is identical to the wire, without it only ctrl0 (and hence the CRC)
+  // differed. send_1w_pairing()/send_1w_remove() already set these bits; the
+  // command builder must too. The 2W-plain path keeps order 00.
+  const uint8_t order_bits = authenticated ? 0xC0u : 0x00u;
+  frame[pos++] = static_cast<uint8_t>(order_bits | (authenticated ? IOHC_MODE_1W : IOHC_MODE_2W) | size_field);
   frame[pos++] = 0x00;  // Control Byte 1
 
   frame[pos++] = (target_address >> 16) & 0xFF;
@@ -1065,8 +1084,13 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address, uint8
 
     const uint16_t sequence = this->consume_rolling_code_();
     uint8_t rc[2];
-    rc[0] = sequence & 0xFF;  // LSB first on the wire
-    rc[1] = (sequence >> 8) & 0xFF;
+    // Observed Velux 1W frames carry the sequence high byte first: the low byte
+    // is the one that increments per press. Match that so the actuator's
+    // freshness check sees the same monotonic counter its own remotes send.
+    // (The MAC is self-consistent either way, since sender and receiver both key
+    // the IV off these two bytes in wire order - only freshness cares.)
+    rc[0] = (sequence >> 8) & 0xFF;  // high byte first on the wire
+    rc[1] = sequence & 0xFF;
 
     uint8_t hmac[6];
     if (!this->compute_hmac_(hmac_data, hmac_data_len, rc, hmac)) {
@@ -1100,6 +1124,149 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address, uint8
     return false;
   }
 
+  return this->send_frame(frame, pos);
+}
+
+bool IOWNHomeControlComponent::send_1w_pairing(uint32_t dest_address) {
+  if (this->is_failed()) {
+    return false;
+  }
+  if (!this->system_key_set_) {
+    ESP_LOGE(TAG, "1W pairing needs a system_key - the ESP's own key to hand the actuator");
+    return false;
+  }
+
+  // 0x30 "Send 1W Key" (31 bytes, no MAC - the receiver has no key yet):
+  //   ctrl0 ctrl1 | dest(3) | src(3) | 0x30 | enc_key(16) | mfr | reserved | seq(2) | crc(2)
+  // We transfer OUR OWN system_key, masked with OUR OWN source address (the
+  // actuator de-masks by the sender's address). Sent to an actuator that has
+  // been put in learn mode (the gear button on a KLI 31x switch), it stores us
+  // as an additional 1W controller; our normal commands - signed with the same
+  // key, under our own identity - are then accepted, without touching any real
+  // remote's rolling code.
+  uint8_t frame[IOHC_MAX_FRAME_SIZE];
+  size_t pos = 0;
+
+  constexpr size_t total_len = 9 + iohome::AES_KEY_SIZE + 1 + 1 + 2 + 2;  // 31
+  const uint8_t size_field =
+      static_cast<uint8_t>((total_len - IOHC_SIZE_BIAS) & IOHC_CTRL0_SIZE_MASK);
+
+  // Order bits 11 (group-end), matching the real 0x30 on the wire (ctrl0 0xFC).
+  frame[pos++] = static_cast<uint8_t>(0xC0 | IOHC_MODE_1W | size_field);
+  frame[pos++] = 0x00;
+
+  frame[pos++] = (dest_address >> 16) & 0xFF;
+  frame[pos++] = (dest_address >> 8) & 0xFF;
+  frame[pos++] = dest_address & 0xFF;
+
+  const uint8_t src[iohome::NODE_ID_SIZE] = {
+      static_cast<uint8_t>((this->source_address_ >> 16) & 0xFF),
+      static_cast<uint8_t>((this->source_address_ >> 8) & 0xFF),
+      static_cast<uint8_t>(this->source_address_ & 0xFF)};
+  frame[pos++] = src[0];
+  frame[pos++] = src[1];
+  frame[pos++] = src[2];
+
+  frame[pos++] = iohome::CMD_SEND_1W_KEY;  // 0x30
+
+  uint8_t enc_key[iohome::AES_KEY_SIZE];
+  if (!iohome::crypto::encrypt_1w_key(this->system_key_, src, enc_key)) {
+    ESP_LOGE(TAG, "1W pairing: key masking failed");
+    return false;
+  }
+  memcpy(&frame[pos], enc_key, sizeof(enc_key));
+  pos += sizeof(enc_key);
+  iohome::crypto::secure_zero(enc_key, sizeof(enc_key));
+
+  frame[pos++] = 0x01;  // manufacturer (Velux), as seen on the wire
+  frame[pos++] = 0x01;  // reserved, as seen on the wire
+
+  const uint16_t sequence = this->consume_rolling_code_();
+  frame[pos++] = (sequence >> 8) & 0xFF;  // high byte first, like commands
+  frame[pos++] = sequence & 0xFF;
+
+  const uint16_t crc = compute_crc(frame, pos);
+  frame[pos++] = crc & 0xFF;
+  frame[pos++] = (crc >> 8) & 0xFF;
+
+  if (pos != total_len) {
+    ESP_LOGE(TAG, "Internal error: pairing frame %u vs %u", static_cast<unsigned>(pos),
+             static_cast<unsigned>(total_len));
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Sending 1W pairing (0x30) as 0x%06X to 0x%06X (seq=%u) - actuator must be in learn mode",
+           static_cast<unsigned int>(this->source_address_),
+           static_cast<unsigned int>(dest_address), static_cast<unsigned>(sequence));
+  return this->send_frame(frame, pos);
+}
+
+bool IOWNHomeControlComponent::send_1w_remove(uint32_t dest_address) {
+  if (this->is_failed()) {
+    return false;
+  }
+  if (!this->system_key_set_) {
+    ESP_LOGE(TAG, "1W remove needs a system_key");
+    return false;
+  }
+
+  // 0x39 "Remove 1W controller" (20 bytes), authenticated:
+  //   ctrl0 ctrl1 | dest(3) | src(3) | 0x39 | 0x00 | seq(2) | mac(6) | crc(2)
+  // The io 1W discovery handshake sends this (exclusion) just before the 0x30
+  // key transfer; the actuator forgets any old controller at this address, then
+  // learns our key from the following 0x30.
+  uint8_t frame[IOHC_MAX_FRAME_SIZE];
+  size_t pos = 0;
+
+  constexpr size_t total_len = 9 + 1 + 2 + 6 + 2;  // 20
+  const uint8_t size_field =
+      static_cast<uint8_t>((total_len - IOHC_SIZE_BIAS) & IOHC_CTRL0_SIZE_MASK);
+
+  frame[pos++] = static_cast<uint8_t>(0xC0 | IOHC_MODE_1W | size_field);  // order 11, 1W -> 0xF1
+  frame[pos++] = 0x00;
+
+  frame[pos++] = (dest_address >> 16) & 0xFF;
+  frame[pos++] = (dest_address >> 8) & 0xFF;
+  frame[pos++] = dest_address & 0xFF;
+
+  frame[pos++] = (this->source_address_ >> 16) & 0xFF;
+  frame[pos++] = (this->source_address_ >> 8) & 0xFF;
+  frame[pos++] = this->source_address_ & 0xFF;
+
+  frame[pos++] = iohome::CMD_REMOVE_1W_CONTROLLER;  // 0x39
+  frame[pos++] = 0x00;                              // payload, as seen on the wire
+
+  // MAC over command byte + payload (0x39 0x00), like every authenticated 1W frame.
+  const uint8_t *hmac_data = &frame[8];
+  const size_t hmac_data_len = 2;
+  const uint16_t sequence = this->consume_rolling_code_();
+  uint8_t rc[2];
+  rc[0] = (sequence >> 8) & 0xFF;
+  rc[1] = sequence & 0xFF;
+
+  uint8_t hmac[6];
+  if (!this->compute_hmac_(hmac_data, hmac_data_len, rc, hmac)) {
+    ESP_LOGE(TAG, "1W remove: MAC computation failed");
+    return false;
+  }
+  frame[pos++] = rc[0];
+  frame[pos++] = rc[1];
+  memcpy(&frame[pos], hmac, sizeof(hmac));
+  pos += sizeof(hmac);
+
+  const uint16_t crc = compute_crc(frame, pos);
+  frame[pos++] = crc & 0xFF;
+  frame[pos++] = (crc >> 8) & 0xFF;
+
+  if (pos != total_len) {
+    ESP_LOGE(TAG, "Internal error: remove frame %u vs %u", static_cast<unsigned>(pos),
+             static_cast<unsigned>(total_len));
+    return false;
+  }
+
+  ESP_LOGI(TAG, "Sending 1W remove (0x39) as 0x%06X to 0x%06X (seq=%u)",
+           static_cast<unsigned int>(this->source_address_),
+           static_cast<unsigned int>(dest_address), static_cast<unsigned>(sequence));
   return this->send_frame(frame, pos);
 }
 

@@ -175,9 +175,22 @@ check tells us immediately per device.
   validate no CRC under exhaustive testing (§2, §3), yet the demod is provably
   good (the doc reference frames validate; the sync word is confirmed on air).
   Either these specific BG-RC011-02 remotes use a proprietary extension, or there
-  is a demod subtlety not yet seen. Full raw captures are in [`captures/`](captures/)
-  so this can be re-examined with fresh eyes. Resolving it is the prerequisite for
-  everything downstream.
+  is a demod subtlety not yet seen. **Confirmed across both a window-opener remote
+  and a roller-shutter remote** (source `7E 5A 11`, session E) — the whole
+  installation uses this 48-byte format, so it is not one odd device. Full raw
+  captures are in [`captures/`](captures/) so this can be re-examined with fresh
+  eyes. Resolving it is the prerequisite for everything downstream.
+- **Related work — a working project with the *same crypto* but the *standard*
+  format.** `github.com/rspaargaren/iohomecontrol` (ESP32, raw SX1276) controls
+  Velux devices and shares this repo's crypto exactly: transfer key
+  `34c3466e…4373`, the same CRC-16/KERMIT (`radioPacketComputeCrc`), the same 1W
+  HMAC and `encrypt_1W_key`, radio at 38.4 kbps / 19.2 kHz dev. But its
+  `MAX_FRAME_LEN` is 32 and its frames validate — i.e. **its devices use the
+  standard format these captures do not.** Its method is the target end state:
+  the ESP generates its own 1W key and pairs *itself* to the actuator with a `0x30`
+  send, then drives it with `open`/`close`/`stop` while managing sequence numbers
+  in NVS to avoid the desync PR #1 describes. Worth asking that author whether the
+  48-byte format here is a Velux generation they recognise.
 - Is either target's debug interface actually locked? (needs a debugger + probe)
 - From a flash dump: locate the 16-byte key and reverse `construct_iv` / MAC for
   the Velux-extended format (idx20-47), then verify by reproducing a captured

@@ -134,13 +134,15 @@ software".
 | V56 | **High** | ESPHome component | With `two_way: true` no incoming 2W frame could ever authenticate. A 2W MAC is bound to the session nonce, and the component called `validate_frame(frame, key)` without one - which that function refuses outright. Every 2W frame was counted as a MAC error and dropped, so position feedback never worked in 2W mode. The session's challenge is now passed, and a 0x3C is checked against the nonce it carries. |
 | V57 | **High** | ESPHome component | The component answered a 0x3C challenge request without verifying it, so anyone in radio range could hand this hub a nonce of their choosing and read back the MAC computed over it with the system key - a chosen-input oracle, offered to strangers, on request. A challenge request is now answered only if its own signature holds. |
 | V58 | **High** | ESPHome component | The replay check ran only for 1W frames - `is_1w_mode && replay_guard_.accept(...)`, with nothing at all on the 2W branch. A 2W position report was authenticated but never fresh: record one and re-transmit it and it was applied again every time, for as long as the session lasted. That is the attack V50 closed, still open for the 2W half. `ReplayGuard::accept_mac()` already existed for exactly this and `IoHomeControl` already called it; the component now does too. |
+| V59 | **High** | `DiscoveryManager`, `iohome_constants.h` | Every field of a Discover Answer was read at the wrong offset. The node type is 16 bits - ten of type, six of sub-type - and was read as `data[0]`, truncating it to the high byte; the manufacturer was read from `data[1]`, which is the type's low half; and `protocol_version` came from `data[2]`, the first byte of the node address, a field the answer does not contain. Against the worked example in `docs/commands.md`, `29 FFC0 XXXXXX 0C CC 0000`, a remote controller from Atlantic was reported as device type 0xFF from manufacturer 0xC0. `DeviceType`'s nineteen values matched neither source and are replaced by `NodeType` with the real ones. See [`docs/VELUX-FORMAT.md`](docs/VELUX-FORMAT.md). |
+| V60 | Medium | `src/velux/` (K2) | The six `VELUX_CMD_*` constants at 0x58-0x5D were invented. 0x50-0x57 are four request/answer *pairs* and the six sat among them as unpaired singletons, in a metadata range, four of them claiming to be actuator control - which is command 0x00. Each function they named exists and none is a command: rain is Command Originator 0x02 on an ordinary frame, ventilation is Main Parameter 0xD803 ("Secured Ventilation"), emergency close is Originator 0xFF plus a protection priority, status is the Current access method. Set/reset limitation is real io-homecontrol functionality whose RF command ID is genuinely unknown. |
+| V61 | Medium | `src/velux/` | `parse_rain_sensor_status()` looked for command 0x58 with a DRY/RAIN/ERROR byte, so it never matched anything and claimed to observe a "dry" state nothing reports. It now detects what is actually observable: an Execute whose originator is the rain sensor. `create_emergency_close_frame()` built a *rain* close - Originator SENSOR_RAIN - under a name that said otherwise; the two are now separate functions with the right originator each. `detect_model()` derived specific product numbers (GGL_ELECTRIC, FML) from a node type that cannot distinguish them; it is `detect_category()` now. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
 | ID | Severity | Component | Description | Recommended Fix |
 |----|----------|-----------|-------------|-----------------|
-| K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/`. | Follow [`docs/HARDWARE-BRINGUP.md`](docs/HARDWARE-BRINGUP.md), which lists the experiments that settle K2, K9 and the FP1 tilt direction |
-| K2 | Medium | `src/velux/` | `VELUX_CMD_*` (0x58-0x5D) are undocumented and unverified; they sit in the range the standard uses for naming/info commands. Marked UNVERIFIED in the header. | Confirm with a capture, or remove |
+| K1 | High | Everything | No verification against real hardware. Every conformance claim rests on the captures in `docs/` and on the Velux KLF 200 specification - see [`docs/VELUX-FORMAT.md`](docs/VELUX-FORMAT.md). | Follow [`docs/HARDWARE-BRINGUP.md`](docs/HARDWARE-BRINGUP.md), which lists the experiments that settle K9 and the FP1 tilt direction |
 | K8 | Low | `src/esp32_api_spi.cpp` | The SPI register helpers still have no runtime coverage - they need an ESP-IDF SPI host, so a host test cannot reach them. Everything else in the legacy layer is now tested (`test_legacy_helpers`). | Exercise on hardware, or remove |
 | K9 | **High** | `IoHomeControl::pair_device_2w` | Sends the 0x32 key transfer on its own. The documented exchange also has the controller send a 0x3c challenge request carrying the challenge, so the device knows which one to build its IV from. Pairing therefore works only against a device that already holds that challenge. | Send the 0x3c step, or drive pairing from a received 0x31 |
 
@@ -222,7 +224,7 @@ model. Summary of what remains, by design of the protocol:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ✅ 205 tests | 7 suites, ASan + UBSan by default |
+| Unit tests | ✅ 206 tests | 7 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
 | Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
 | Mutation checks | ✅ Complete | Eight deliberate regressions - inverted mode bit, wrong size bias, dropped ACEI check, disabled replay guard, always-true MAC comparison, constant-seeded RNG, ignored log level, log message used as its own format string - are each caught by the suite |
@@ -245,7 +247,6 @@ pio test -e native                     # via PlatformIO
 
 ### P0 - Before any deployment
 1. Verify against a real actuator (K1). Everything else is downstream of this.
-2. Confirm or remove the unverified Velux command IDs (K2).
 
 ### P1 - High priority
 3. Send the 0x3c challenge request during 2W pairing (K9). Hardware-blocked:
@@ -259,4 +260,7 @@ pio test -e native                     # via PlatformIO
 5. MicroPython implementation.
 6. Performance profiling.
 
-K3, K4, K5, K6, K7 and K10 are closed - see V48 to V54 and V47 above.
+K2, K3, K4, K5, K6, K7 and K10 are closed - see V47 to V61 above. K2 was
+resolved without hardware, from the Velux KLF 200 API specification that was
+already in this repository; [`docs/VELUX-FORMAT.md`](docs/VELUX-FORMAT.md)
+records what that settled, what it contradicted, and what is still open.

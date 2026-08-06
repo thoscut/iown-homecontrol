@@ -467,15 +467,43 @@ bool DiscoveryManager::process_discovery_response(const frame::IoFrame* frame, i
   DiscoveredDevice* device = &discovered_devices_[discovered_count_];
   memcpy(device->node_id, frame->src_node, NODE_ID_SIZE);
 
+  // Discover Answer payload, from docs/commands.md:
+  //
+  //   [0..1] node type and sub-type, 16 bits, most significant byte first
+  //   [2..4] node address
+  //   [5]    manufacturer (OEM) ID
+  //   [6]    multi info byte
+  //   [7..8] timestamp
+  //
+  // Every field is optional here only in the sense that a short answer should
+  // not be read past its end; a well-formed one carries all of them.
+  device->node_type = 0;
+  device->type = 0;
+  device->subtype = 0;
+  device->manufacturer = 0;
+  device->multi_info = 0;
+  device->device_timestamp = 0;
+
   if (frame->data_len >= 2) {
-    device->device_type = static_cast<DeviceType>(frame->data[0]);
-    device->manufacturer = frame->data[1];
-  } else {
-    device->device_type = DeviceType::ROLLER_SHUTTER;
-    device->manufacturer = 0;
+    device->node_type = static_cast<uint16_t>((static_cast<uint16_t>(frame->data[0]) << 8) |
+                                              frame->data[1]);
+    device->type = node_type_of(device->node_type);
+    device->subtype = node_subtype_of(device->node_type);
   }
 
-  device->protocol_version = (frame->data_len >= 3) ? frame->data[2] : 0;
+  // The node address at [2..4] repeats the frame's source, which is already in
+  // node_id, so it is read only to get past it.
+  if (frame->data_len >= 6) {
+    device->manufacturer = frame->data[5];
+  }
+  if (frame->data_len >= 7) {
+    device->multi_info = frame->data[6];
+  }
+  if (frame->data_len >= 9) {
+    device->device_timestamp = static_cast<uint16_t>((static_cast<uint16_t>(frame->data[7]) << 8) |
+                                                     frame->data[8]);
+  }
+
   device->rssi = rssi;
   device->timestamp_ms = now_ms;
 

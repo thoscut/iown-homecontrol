@@ -372,12 +372,30 @@ enum class DiscoveryState : uint8_t {
 
 /**
  * @brief Discovered device information
+ *
+ * Field for field, this is what a Discover Answer (0x29) carries. It used to
+ * be read as `type = data[0]`, `manufacturer = data[1]`, `version = data[2]`,
+ * which is three fields at three wrong offsets: the type is 16 bits, so
+ * data[1] is its low half, and data[2] is the first byte of the node address.
+ * There is no protocol-version field in the answer at all.
  */
 struct DiscoveredDevice {
   uint8_t node_id[NODE_ID_SIZE];
-  DeviceType device_type;
+
+  /// Full 16-bit type field, comparable against NodeType.
+  uint16_t node_type;
+  /// The 10-bit type half, for grouping by kind of device.
+  uint16_t type;
+  /// The 6-bit sub-type half, which distinguishes variants of one type.
+  uint8_t subtype;
+
+  /// OEM ID; see the Manufacturer enumeration.
   uint8_t manufacturer;
-  uint8_t protocol_version;
+  /// "Multi info byte" - undecoded, carried through as received.
+  uint8_t multi_info;
+  /// Device's own timestamp, as reported.
+  uint16_t device_timestamp;
+
   int16_t rssi;
   unsigned long timestamp_ms;
 };

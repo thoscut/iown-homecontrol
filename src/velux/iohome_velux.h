@@ -69,34 +69,69 @@ enum class VeluxModel : uint8_t {
 };
 
 /**
- * @brief Rain sensor status
+ * @brief What a received frame says about rain
+ *
+ * A rain sensor is an input, not something a controller polls. It cannot be
+ * asked whether it is dry - there is no query, and DRY and ERROR were never
+ * observable. What *is* observable is the sensor acting: the frame it causes
+ * carries Command Originator 0x02 (RAIN). So this has two states, and the
+ * absence of rain is simply the absence of such a frame.
  */
 enum class RainSensorStatus : uint8_t {
+  /// Nothing in this frame says anything about rain.
   UNKNOWN = 0x00,
-  DRY = 0x01,              // No rain detected
-  RAIN = 0x02,             // Rain detected
-  ERROR = 0xFF             // Sensor error
+  /// This frame is an actuator command a rain sensor triggered.
+  RAIN = 0x02
 };
 
-/**
- * @brief Velux-specific command IDs
- *
- * @warning UNVERIFIED. These IDs are not documented in docs/commands.md and
- *          have not been confirmed against a capture. They sit in the range the
- *          standard reserves for naming/info commands (0x50-0x57 are documented
- *          there), so sending them may do something unexpected. Treat every
- *          helper that uses them as experimental.
- *
- *          Standard actuator control - opening, closing, positioning,
- *          ventilation - does *not* need these: it goes through command 0x00
- *          with a Main Parameter, which is what the helpers below emit.
- */
-constexpr uint8_t VELUX_CMD_GET_RAIN_SENSOR = 0x58;     // UNVERIFIED
-constexpr uint8_t VELUX_CMD_SET_VENTILATION = 0x59;     // UNVERIFIED
-constexpr uint8_t VELUX_CMD_EMERGENCY_CLOSE = 0x5A;     // UNVERIFIED
-constexpr uint8_t VELUX_CMD_GET_WINDOW_STATUS = 0x5B;   // UNVERIFIED
-constexpr uint8_t VELUX_CMD_RESET_LIMITS = 0x5C;        // UNVERIFIED
-constexpr uint8_t VELUX_CMD_SET_LIMITS = 0x5D;          // UNVERIFIED
+// ============================================================================
+// There are no Velux-private command IDs here, and there never were
+//
+// This file used to declare six of them - 0x58 GET_RAIN_SENSOR, 0x59
+// SET_VENTILATION, 0x5A EMERGENCY_CLOSE, 0x5B GET_WINDOW_STATUS, 0x5C
+// RESET_LIMITS, 0x5D SET_LIMITS - all marked UNVERIFIED. They were invented.
+// Two things give them away before any capture is taken:
+//
+//   * 0x50-0x57 are documented in docs/commands.md as four request/answer
+//     *pairs*: Get Name / Get Name Answer, Write Name / Write Name Ack, Get
+//     General Info 1 / Answer, Get General Info 2 / Answer. Even is the
+//     request, odd is the reply. The six sat in that block as unpaired
+//     singletons.
+//   * That block is metadata - names and info. Four of the six claimed to be
+//     actuator *control*, which lives at 0x00.
+//
+// Each function they claimed does exist. None of them is a command:
+//
+//   Rain sensor        A rain sensor is an input, not something to poll. A
+//                      window with one is node type 0x0101 (Window Opener with
+//                      Integrated Rain Sensor), and when it acts, the frame it
+//                      produces carries Command Originator 0x02 (RAIN). The
+//                      KLF 200 surfaces the same thing as STATUS_RAIN and
+//                      LIMITATION_BY_RAIN. So a controller learns about rain
+//                      by watching originators, not by asking.
+//
+//   Ventilation        Main Parameter 0xD803, "Secured Ventilation", from the
+//                      window opener actuator profile. See
+//                      MP_SECURED_VENTILATION. An ordinary Execute (0x00).
+//
+//   Emergency close    Command Originator 0xFF (EMERGENCY) with a priority
+//                      level in the Protection group (PL0-PL1), on an ordinary
+//                      Execute. Priority is what makes it override; the
+//                      command is the same one every other close uses.
+//
+//   Window status      The actuator reports its own state; a controller reads
+//                      the current value with the Current access method
+//                      (0xD200) rather than a private query.
+//
+//   Set/reset limits   Real io-homecontrol functionality - the KLF 200 exposes
+//                      it as GW_SET_LIMITATION_REQ and documents the semantics
+//                      in §10.5. Its RF command ID is genuinely unknown, and
+//                      guessing 0x5C/0x5D did not make it known.
+//
+// Sources: docs/commands.md, and the Velux KLF 200 API specification in
+// docs/devices/velux/KLF200/ - Table 164 (CommandOriginator), Table 165
+// (PriorityLevel), Table 275 (Access Methods), §14.2.1 (alias values).
+// ============================================================================
 
 // ============================================================================
 // Velux Window Controller
@@ -173,10 +208,36 @@ public:
   );
 
   /**
-   * @brief Create emergency close frame (for rain)
+   * @brief Create a rain-triggered close
    *
-   * Uses the environment-protection priority level in the ACEI byte and the
-   * rain-sensor originator, so it outranks ordinary user commands.
+   * Command Originator 0x02 (RAIN) at priority level 1, Environment
+   * Protection - the level the specification describes with exactly this
+   * example, "rain sensor on a roof window". It outranks ordinary user
+   * commands, which is the point: the window shuts even if someone just asked
+   * for it to be open.
+   *
+   * This is what create_emergency_close_frame() used to build, under a name
+   * that said something else.
+   *
+   * @param frame Output IoFrame (not finalized - see class note)
+   * @param src_node Source node ID (3 bytes)
+   * @return true on success
+   */
+  bool create_rain_close_frame(
+    frame::IoFrame* frame,
+    const uint8_t src_node[NODE_ID_SIZE]
+  );
+
+  /**
+   * @brief Create an emergency close
+   *
+   * Command Originator 0xFF (EMERGENCY), "used in context with emergency or
+   * security commands", again at Environment Protection.
+   *
+   * Not at level 0, Human Protection, although the name invites it: level 0
+   * disables every other category, and the specification makes its use
+   * conditional on an agreement from io-homecontrol. A library cannot grant
+   * itself that.
    *
    * @param frame Output IoFrame (not finalized - see class note)
    * @param src_node Source node ID (3 bytes)
@@ -188,10 +249,32 @@ public:
   );
 
   /**
-   * @brief Parse rain sensor status from frame
+   * @brief Create a frame for the secured ventilation position
+   *
+   * The window opens far enough to ventilate while staying locked. This is a
+   * position, expressed as Main Parameter 0xD803 on the ordinary Execute
+   * command, and it is what a Velux window actually implements - unlike
+   * create_ventilation_frame(), which picks a percentage this library chose.
+   *
+   * @param frame Output IoFrame (not finalized - see class note)
+   * @param src_node Source node ID (3 bytes)
+   * @return true on success
+   */
+  bool create_secured_ventilation_frame(
+    frame::IoFrame* frame,
+    const uint8_t src_node[NODE_ID_SIZE]
+  );
+
+  /**
+   * @brief Whether a received frame is a rain-triggered command
+   *
+   * There is no rain-sensor query and no rain-sensor answer. What a controller
+   * can see is the sensor acting: an Execute whose Command Originator is 0x02
+   * (RAIN). This used to look for command 0x58 with a one-byte DRY/RAIN/ERROR
+   * payload, which no device sends.
    *
    * @param frame Received frame
-   * @return Rain sensor status
+   * @return RAIN if this frame was triggered by a rain sensor, else UNKNOWN
    */
   static RainSensorStatus parse_rain_sensor_status(const frame::IoFrame* frame);
 
@@ -329,13 +412,37 @@ protected:
 // ============================================================================
 
 /**
- * @brief Detect Velux model from device type and manufacturer code
+ * @brief What kind of Velux product a discovered node is
  *
- * @param device_type Device type from discovery
- * @param manufacturer Manufacturer code
- * @return Detected VeluxModel
+ * As much as the wire can tell you, and no more. A node announces its *type* -
+ * window opener, roller shutter, blind - and that is the whole of it. Which
+ * window opener, GGL or GGU or GPL, is a question the type field does not
+ * answer: the KLF 200 reads that from a separate ProductType field ("Ex. KMG,
+ * KMX etc.", §NodeTypeSubType), and the Discover Answer does not carry one.
+ *
+ * detect_model() used to claim otherwise. It mapped node type "window opener"
+ * to VeluxModel::GGL_ELECTRIC and "venetian blind" to FML - specific product
+ * numbers picked from a field that cannot distinguish them. VeluxModel is a
+ * configuration value the user supplies, not something to be detected.
  */
-VeluxModel detect_model(uint8_t device_type, uint8_t manufacturer);
+enum class VeluxCategory : uint8_t {
+  UNKNOWN = 0,
+  WINDOW,           // Roof window, with or without an integrated rain sensor
+  ROLLER_SHUTTER,   // Outside roller shutter
+  BLIND,            // Interior blind - blackout, roller, pleated
+  AWNING,           // Awning blind, inside or outside
+  LIGHT,
+  CONTROLLER        // Remote, wall switch or gateway
+};
+
+/**
+ * @brief Categorise a discovered node
+ *
+ * @param node_type Full 16-bit node type field from the discovery answer
+ * @param manufacturer OEM ID; anything but Velux gives UNKNOWN
+ * @return The category the node type determines
+ */
+VeluxCategory detect_category(uint16_t node_type, uint8_t manufacturer);
 
 /**
  * @brief Get human-readable model name

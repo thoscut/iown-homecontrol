@@ -1,0 +1,1813 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="io-homecontrol Documentation and Implementation">
+      
+      
+        <meta name="author" content="velocet">
+      
+      
+        <link rel="canonical" href="https://velocet.github.io/iown-homecontrol/HARDWARE-BRINGUP/">
+      
+      
+        <link rel="prev" href="../RADIO-SETUP/">
+      
+      
+        <link rel="next" href="../VELUX-FORMAT/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.ico">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Hardware Bring-up - iown-homecontrol™ Documentation</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        
+        <link rel="stylesheet" href="../assets/external/fonts.googleapis.com/css.bfe0d362.css">
+        <style>:root{--md-text-font:"Open Sans";--md-code-font:"Source Code Pro"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../css/timeago.css">
+    
+      <link rel="stylesheet" href="../assets/stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Hardware Bring-up - iown-homecontrol™ Documentation" />
+<meta property="og:description" content="io-homecontrol Documentation and Implementation" />
+<meta property="og:image" content="https://velocet.github.io/iown-homecontrol/assets/images/social/HARDWARE-BRINGUP.png" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:url" content="https://velocet.github.io/iown-homecontrol/HARDWARE-BRINGUP/" />
+<meta property="twitter:card" content="summary_large_image" />
+<meta property="twitter:title" content="Hardware Bring-up - iown-homecontrol™ Documentation" />
+<meta property="twitter:description" content="io-homecontrol Documentation and Implementation" />
+<meta property="twitter:image" content="https://velocet.github.io/iown-homecontrol/assets/images/social/HARDWARE-BRINGUP.png" />
+</head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="grey" data-md-color-accent="light-blue">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#hardware-bring-up" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="https://velocet.github.io/iown-homecontrol" title="iown-homecontrol™ Documentation" class="md-header__button md-logo" aria-label="iown-homecontrol™ Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m19 2-5 4.5v11l5-4.5zM6.5 5C4.55 5 2.45 5.4 1 6.5v14.66c0 .25.25.5.5.5.1 0 .15-.07.25-.07 1.35-.65 3.3-1.09 4.75-1.09 1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 3.35.31 4.75 1.06.1.05.15.03.25.03.25 0 .5-.25.5-.5V6.5c-.6-.45-1.25-.75-2-1V19c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V6.5C10.55 5.4 8.45 5 6.5 5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            iown-homecontrol™ Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Hardware Bring-up
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/velocet/iown-homecontrol/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iown™
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../radio/" class="md-tabs__link">
+          
+  
+  
+  Protocol
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../parameter/database/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Parameter Viewer
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../devices/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../radio-rtlsdr/" class="md-tabs__link">
+          
+  
+  
+  misc
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--lifted md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="https://velocet.github.io/iown-homecontrol" title="iown-homecontrol™ Documentation" class="md-nav__button md-logo" aria-label="iown-homecontrol™ Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m19 2-5 4.5v11l5-4.5zM6.5 5C4.55 5 2.45 5.4 1 6.5v14.66c0 .25.25.5.5.5.1 0 .15-.07.25-.07 1.35-.65 3.3-1.09 4.75-1.09 1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 3.35.31 4.75 1.06.1.05.15.03.25.03.25 0 .5-.25.5-.5V6.5c-.6-.45-1.25-.75-2-1V19c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V6.5C10.55 5.4 8.45 5 6.5 5"/></svg>
+
+    </a>
+    iown-homecontrol™ Documentation
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/velocet/iown-homecontrol/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    iown™
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protocol
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Protocol
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio/" class="md-nav__link">
+        
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M16.5 21c-3 0-4.19-4.24-5.45-8.72C10.14 9.04 9 5 7.5 5 4.11 5 4 11.93 4 12H2c0-.37.06-9 5.5-9 3 0 4.21 4.25 5.47 8.74C13.83 14.8 15 19 16.5 19c3.44 0 3.53-6.93 3.53-7h2c0 .37-.06 9-5.53 9"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Layer 1
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../linklayer/" class="md-nav__link">
+        
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 0 3 7l1.63 1.27L12 14l7.36-5.73L21 7zm7.37 10.73L12 16.47l-7.38-5.73L3 12l9 7 9-7zm0 5L12 21.47l-7.38-5.73L3 17l9 7 9-7z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Layer 2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../commands/" class="md-nav__link">
+        
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 2 1 21h22zm.75 9.47c1.81.4 2.95 2.2 2.55 4.03-.3 1.25-1.3 2.25-2.55 2.53zM11.25 18c-1.81-.4-2.95-2.2-2.55-4 .3-1.28 1.3-2.28 2.55-2.56zm5.63-3.28A4.874 4.874 0 0 0 12.75 10V6.29L20.4 19.5h-7.33c2.22-.5 3.8-2.47 3.81-4.75zm-5.63-8.43V10c-2.65.4-4.48 2.88-4.07 5.54.32 1.96 1.79 3.58 3.75 4.01H3.6z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../parameter/" class="md-nav__link">
+        
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 1 2 2 2 2 0 0 1-.47 1.29L16.7 22h-2.13L12 14.93 9.43 22H7.3l3.17-8.71A2 2 0 0 1 10 12a2 2 0 0 1 2-2m0-2a4 4 0 0 0-4 4c0 .5.1 1 .28 1.46l-.88 2.4A6.03 6.03 0 0 1 6 12a6 6 0 0 1 6-6 6 6 0 0 1 6 6c0 1.47-.53 2.81-1.4 3.86l-.88-2.4C15.9 13 16 12.5 16 12a4 4 0 0 0-4-4m0-4a8 8 0 0 0-8 8c0 2.36 1 4.5 2.64 5.94l-.72 2A10 10 0 0 1 2 12 10 10 0 0 1 12 2a10 10 0 0 1 10 10c0 3.23-1.54 6.11-3.92 7.94l-.72-2C19 16.5 20 14.36 20 12a8 8 0 0 0-8-8"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Parameter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../SECURITY-MODEL/" class="md-nav__link">
+        
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a1 1 0 0 1 1 1 1 1 0 0 1-1 1 1 1 0 0 1-1-1 1 1 0 0 1 1-1m9 3c0 5.55-3.84 10.74-9 12-5.16-1.26-9-6.45-9-12V5l9-4 9 4zm-9-5a3 3 0 0 0-3 3c0 1.31.83 2.42 2 2.83V18h2v-2h2v-2h-2v-2.17c1.17-.41 2-1.52 2-2.83a3 3 0 0 0-3-3"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../RADIO-SETUP/" class="md-nav__link">
+        
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 1 2 2 2 2 0 0 1-.47 1.29L16.7 22h-2.13L12 14.93 9.43 22H7.3l3.17-8.71A2 2 0 0 1 10 12a2 2 0 0 1 2-2m0-2a4 4 0 0 0-4 4c0 .5.1 1 .28 1.46l-.88 2.4A6.03 6.03 0 0 1 6 12a6 6 0 0 1 6-6 6 6 0 0 1 6 6c0 1.47-.53 2.81-1.4 3.86l-.88-2.4C15.9 13 16 12.5 16 12a4 4 0 0 0-4-4m0-4a8 8 0 0 0-8 8c0 2.36 1 4.5 2.64 5.94l-.72 2A10 10 0 0 1 2 12 10 10 0 0 1 12 2a10 10 0 0 1 10 10c0 3.23-1.54 6.11-3.92 7.94l-.72-2C19 16.5 20 14.36 20 12a8 8 0 0 0-8-8"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Radio Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hardware Bring-up
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hardware Bring-up
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+  
+
+<nav class="md-nav md-nav--secondary" aria-label="-&gt; agenda">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      -> agenda
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#0-what-you-need" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0. What you need
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#1-does-the-radio-answer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Does the radio answer?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-does-it-hear-anything" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Does it hear anything?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-do-the-captures-decode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Do the captures decode?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-open-questions-a-capture-can-settle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Open questions a capture can settle
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-transmitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Transmitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-reporting-back" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Reporting back
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../VELUX-FORMAT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Velux Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../parameter/database/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parameter Viewer
+  
+
+    
+  </span>
+  
+  
+    
+  
+  
+    <span class="md-status md-status--new"></span>
+  
+
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Devices
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/somfy/ConnectivityKit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectivity Kit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/somfy/izymo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Somfy Izymo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/somfy/Smoove/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Somfy Smoove
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/somfy/SetGo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Somfy Set&Go
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/velux/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Velux Devices
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/velux/KLI31x/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Velux KLI31x
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/velux/KLR200/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Velux KLR200
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/misc/AtlanticThermor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Atlantic Thermor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../firmware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Firmware
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/Si446x/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Si446x
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio-cc1021/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CC1021
+  
+
+    
+  </span>
+  
+  
+    
+  
+  
+    <span class="md-status md-status--WIP" title="Document is unfinished">
+    </span>
+  
+
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../devices/somfy/somfy-pin-to-box/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Box PINs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    misc
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    misc
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../radio-rtlsdr/" class="md-nav__link">
+        
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M17 20c-.29 0-.56-.06-.76-.15-.71-.35-1.21-.88-1.71-2.38-.53-1.56-1.47-2.29-2.39-3-.79-.61-1.61-1.24-2.32-2.53C9.29 11 9 9.93 9 9c0-2.8 2.2-5 5-5s5 2.2 5 5h2c0-3.93-3.07-7-7-7S7 5.07 7 9c0 1.26.38 2.65 1.07 3.9.93 1.65 1.98 2.48 2.85 3.15.81.62 1.39 1.07 1.71 2.05.6 1.82 1.37 2.84 2.73 3.55.51.23 1.07.35 1.64.35a4 4 0 0 0 4-4h-2a2 2 0 0 1-2 2M7.64 2.64 6.22 1.22A10.97 10.97 0 0 0 3 9c0 3.04 1.23 5.79 3.22 7.78l1.41-1.41A8.95 8.95 0 0 1 5 9c0-2.5 1-4.74 2.64-6.36M11.5 9a2.5 2.5 0 0 0 2.5 2.5A2.5 2.5 0 0 0 16.5 9 2.5 2.5 0 0 0 14 6.5 2.5 2.5 0 0 0 11.5 9"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    RTL-SDR
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/EMS2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    EMS2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/velocet/iown-homecontrol/blog/main/docs/HARDWARE-BRINGUP.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20.71 7.04c.39-.39.39-1.04 0-1.41l-2.34-2.34c-.37-.39-1.02-.39-1.41 0l-1.84 1.83 3.75 3.75M3 17.25V21h3.75L17.81 9.93l-3.75-3.75z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="hardware-bring-up">Hardware bring-up</h1>
+<p>Everything this library claims about the io-homecontrol wire format is checked
+against captures in <code>docs/</code> and reproduced by 198 host-run tests. None of it has
+been checked against a physical actuator. That is the single largest open item
+in <code>PRODUCTION_READINESS.md</code> (<strong>K1</strong>), and it is the one thing a laptop cannot
+close.</p>
+<p>This document is the order to do it in, what a pass looks like at each step, and
+which open questions a session with real hardware can actually settle.</p>
+<hr />
+<h2 id="0-what-you-need">0. What you need</h2>
+<ul>
+<li>A LoRa32 board with an SX127x or SX126x at 868 MHz. Supported out of the box:</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Board</th>
+<th>Environment</th>
+<th>Radio</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Heltec WiFi LoRa 32 V2 / V2.1</td>
+<td><code>heltec_wifi_lora_32_V2</code></td>
+<td>SX1276</td>
+</tr>
+<tr>
+<td>Heltec WiFi LoRa 32 V1</td>
+<td><code>heltec_wifi_lora_32</code></td>
+<td>SX1276</td>
+</tr>
+<tr>
+<td>Heltec WiFi LoRa 32 V3</td>
+<td><code>heltec_wifi_lora_32_V3</code></td>
+<td>SX1262</td>
+</tr>
+<tr>
+<td>Heltec WiFi LoRa 32 V4</td>
+<td><code>heltec_wifi_lora_32_V4</code></td>
+<td>SX1262, <strong>pins unconfirmed</strong></td>
+</tr>
+<tr>
+<td>Heltec Wireless Stick / Lite</td>
+<td><code>heltec_wireless_stick[_lite]</code></td>
+<td>SX1276</td>
+</tr>
+<tr>
+<td>TTGO LoRa32 v1 / v2 / v2.1.6</td>
+<td><code>ttgo-lora32-v1</code> / <code>-v2</code> / <code>-v21</code></td>
+<td>SX1276</td>
+</tr>
+<tr>
+<td>LilyGO T-Beam</td>
+<td><code>ttgo-t-beam</code></td>
+<td>SX1276</td>
+</tr>
+</tbody>
+</table>
+<p>V2.1 is a minor revision of the V2 and uses the same environment.</p>
+<ul>
+<li>An io-homecontrol actuator. A Velux window or blind, a Somfy motor - anything
+  that talks the protocol.</li>
+<li>Ideally a <strong>second</strong> board, so you can watch one talk while the other listens.</li>
+</ul>
+<blockquote>
+<p><strong>Legal note.</strong> 868 MHz is licence-exempt in the EU under duty-cycle limits.
+Listening is unrestricted. Transmitting into a neighbour's installation is
+not something to do by accident - keep the power low and know which node IDs
+are yours before you send anything.</p>
+</blockquote>
+<hr />
+<h2 id="1-does-the-radio-answer">1. Does the radio answer?</h2>
+<p>Flash the listener and open the serial monitor:</p>
+<div class="language-sh highlight"><span class="filename">Bash</span><pre><span></span><code><span id="__span-0-1">pio<span class="w"> </span>run<span class="w"> </span>-e<span class="w"> </span>heltec_wifi_lora_32_V2<span class="w"> </span>-t<span class="w"> </span>upload<span class="w"> </span>-t<span class="w"> </span>monitor
+</span></code></pre></div>
+<p>The first thing it prints is its pin map:</p>
+<div class="language-text highlight"><span class="filename">Text Only</span><pre><span></span><code><span id="__span-1-1">iown-homecontrol starting
+</span><span id="__span-1-2">[PINS] board: Heltec WiFi LoRa 32 (V2)
+</span><span id="__span-1-3">[PINS] CS=18 RST=14 SCK=5 MISO=19 MOSI=27
+</span><span id="__span-1-4">[PINS] DIO0=26 DIO1=35 (SX127x)
+</span></code></pre></div>
+<p><strong>Pass:</strong> it continues to <code>[PHY] RSSI (dBm): -110</code> or similar and then
+<code>Listening for io-homecontrol frames</code>.</p>
+<p>Everything the library itself logs is tagged with its severity, so a long
+bring-up log stays readable:</p>
+<div class="language-text highlight"><span class="filename">Text Only</span><pre><span></span><code><span id="__span-2-1">[INFO] IoHomeControl: Initializing (1W mode)
+</span><span id="__span-2-2">[INFO]   Node ID: 1A 38 0B
+</span><span id="__span-2-3">[INFO] Configuring radio on 868.95 MHz
+</span><span id="__span-2-4">[INFO] Radio configured successfully
+</span></code></pre></div>
+<p><code>grep ERR</code> finds where it went wrong without reading the rest. Drop the third
+argument of <code>set_log_callback()</code> in <code>src/main.cpp</code> from <code>LogLevel::DEBUG</code> to
+<code>LogLevel::INFO</code> if the per-frame transmit dumps get in the way.</p>
+<p><strong>Fail:</strong> <code>[FATAL] radio.beginFSK failed: -2</code>. That is
+<code>RADIOLIB_ERR_CHIP_NOT_FOUND</code> - the radio did not answer over SPI at all, which
+is nearly always a pin map that does not match the board. The firmware says so
+and reprints the pins. Fix them in <code>src/board_pins.h</code>, or pass them as build
+flags:</p>
+<div class="language-ini highlight"><span class="filename">INI</span><pre><span></span><code><span id="__span-3-1"><span class="na">build_flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">${env.build_flags}</span>
+</span><span id="__span-3-2"><span class="w">              </span><span class="na">-DIOHC_BOARD_CUSTOM</span>
+</span><span id="__span-3-3"><span class="w">              </span><span class="na">-DIOHC_RADIO_SX127X -DIOHC_RADIO_CLASS</span><span class="o">=</span><span class="s">SX1276</span>
+</span><span id="__span-3-4"><span class="w">              </span><span class="na">-DIOHC_PIN_CS</span><span class="o">=</span><span class="s">18 -DIOHC_PIN_RST=14</span>
+</span><span id="__span-3-5"><span class="w">              </span><span class="na">-DIOHC_PIN_DIO0</span><span class="o">=</span><span class="s">26 -DIOHC_PIN_DIO1=35</span>
+</span><span id="__span-3-6"><span class="w">              </span><span class="na">-DIOHC_PIN_SCK</span><span class="o">=</span><span class="s">5 -DIOHC_PIN_MISO=19 -DIOHC_PIN_MOSI=27</span>
+</span></code></pre></div>
+<p>To find the right macro name for a board, <code>tools/list_board_macros.py</code>.</p>
+<h3 id="the-v4-in-particular">The V4 in particular</h3>
+<p><code>[env:heltec_wifi_lora_32_V4]</code> carries the <strong>V3's</strong> radio pins, because
+PlatformIO has no V4 manifest and nobody has confirmed the numbers. Step 1 is
+exactly the test: if it reaches "Listening", the pins are right and the entry
+can be marked confirmed. If it prints <code>-2</code>, correct the <code>IOHC_PIN_*</code> flags in
+<code>platformio.ini</code> and it is settled either way in two minutes.</p>
+<hr />
+<h2 id="2-does-it-hear-anything">2. Does it hear anything?</h2>
+<p>Press a button on the actuator's remote, or operate it from a wall switch, while
+the listener runs.</p>
+<p>Every packet the radio delivers is printed raw, before the protocol layer forms
+any opinion about it:</p>
+<div class="language-text highlight"><span class="filename">Text Only</span><pre><span></span><code><span id="__span-4-1">[RAW] F80000007F708758000161D40080C800003BD505526875499C7E72 rssi=-64 snr=9.5 len=27
+</span></code></pre></div>
+<p><strong>Pass:</strong> <code>[RAW]</code> lines appear when, and only when, the actuator is operated.
+That alone confirms the frequency, the bit rate, the deviation and the sync
+word - four settings that were all wrong in this codebase at some point, and
+that produce total silence when they are.</p>
+<p><strong>Nothing at all?</strong> The listener sweeps the three channels for you. If it never
+lands on one you will see:</p>
+<div class="language-text highlight"><span class="filename">Text Only</span><pre><span></span><code><span id="__span-5-1">[PHY] scanning all three channels until a frame arrives
+</span><span id="__span-5-2">[PHY] nothing heard, trying 869.85 MHz
+</span><span id="__span-5-3">[PHY] nothing heard, trying 868.25 MHz
+</span></code></pre></div>
+<p>and when it does:</p>
+<div class="language-text highlight"><span class="filename">Text Only</span><pre><span></span><code><span id="__span-6-1">[PHY] traffic on 868.95 MHz - staying here
+</span></code></pre></div>
+<p>It stops on the first frame that arrives at all, including one that fails its
+CRC - a broken frame still proves the channel carries traffic and that the PHY
+settings are close enough to demodulate it. Set <code>IOHC_SCAN_CHANNELS</code> to false in
+<code>src/main.cpp</code> to pin it to one channel.</p>
+<p>If the sweep completes without hearing anything, in order of likelihood:</p>
+<ol>
+<li>Sync word. It has to be programmed bit-reversed - <code>57 FD 99</code>, not the
+   <code>FF 33</code> that appears over the air. Deriving one from the other by shifting
+   yields <code>00 FF 33</code>, which matches nothing. <code>configure_radio()</code> gets this
+   right; a hand-rolled setup may not.</li>
+<li>Antenna. An SX127x transmitting without one can damage itself; receiving
+   without one just does not work well.</li>
+<li>Nothing is transmitting. io-homecontrol devices are silent unless operated;
+   there is no periodic beacon to wait for on a 1W installation.</li>
+</ol>
+<p><strong>Statistics</strong> print every 30 seconds:</p>
+<div class="language-text highlight"><span class="filename">Text Only</span><pre><span></span><code><span id="__span-7-1">[RX] received=42 accepted=0 crc=0 mac=0 replay=0 plain=42 malformed=0
+</span></code></pre></div>
+<p><code>received</code> counts everything the radio delivered. The rest say what happened to
+it. <code>plain=42</code> here means 42 frames arrived without a MAC this controller could
+check, which is exactly what you see when you are not paired with the actuator -
+that is not a fault, it is the expected state before pairing.</p>
+<hr />
+<h2 id="3-do-the-captures-decode">3. Do the captures decode?</h2>
+<p>Save the serial log and feed the raw frames to the decoder:</p>
+<div class="language-sh highlight"><span class="filename">Bash</span><pre><span></span><code><span id="__span-8-1">grep<span class="w"> </span><span class="s1">&#39;^\[RAW\]&#39;</span><span class="w"> </span>capture.log<span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span><span class="s1">&#39;{print $2}&#39;</span><span class="w"> </span>&gt;<span class="w"> </span>frames.txt
+</span><span id="__span-8-2">./scripts/Iown-IoHexFrameParser.py<span class="w"> </span>-f<span class="w"> </span>frames.txt
+</span></code></pre></div>
+<div class="language-text highlight"><span class="filename">Text Only</span><pre><span></span><code><span id="__span-9-1">io-homecontrol frame: length=27 (size field 24 + 3), from_addr=708758, to_addr=00007f
+</span><span id="__span-9-2">  control byte 1=0xf8 (order=command group end, protocol mode = One-Way)
+</span><span id="__span-9-3">  control byte 2=0x00 (use beacon=False, routed=False, low power mode=False, ack=False, protocol version=0)
+</span><span id="__span-9-4">  command ID=0x00
+</span><span id="__span-9-5">  command data=0161d40080c80000
+</span><span id="__span-9-6">  sequence=3bd5
+</span><span id="__span-9-7">  MAC=05526875499c
+</span><span id="__span-9-8">  CRC=7e72 (correct)
+</span></code></pre></div>
+<p><strong>Pass:</strong> <code>CRC=... (correct)</code> on frames from your own installation.</p>
+<p>A correct CRC on a real capture is the strongest single confirmation available
+without pairing: it means the frame boundary, the size-field bias (+3) and the
+CRC polynomial and bit order are all right simultaneously. Getting any one of
+them wrong makes it fail.</p>
+<p><strong>This is also the data worth keeping.</strong> Please attach captures to an issue -
+they are what turns the open questions below from arguments into answers.</p>
+<hr />
+<h2 id="4-open-questions-a-capture-can-settle">4. Open questions a capture can settle</h2>
+<p>Each of these is currently marked unverified in the code. None needs pairing;
+all of them need is a capture of the right button being pressed.</p>
+<h3 id="k2-the-velux-command-ids">K2 - the Velux command IDs</h3>
+<p><code>src/velux/iohome_velux.h</code> declares <code>VELUX_CMD_*</code> at 0x58-0x5D, all marked
+<code>UNVERIFIED</code>. They appear in no document in this repository and sit in the range
+the standard uses for naming and info commands.</p>
+<p><strong>Experiment:</strong> operate a Velux window through every function its remote offers
+- open, close, stop, ventilation position, rain-sensor query - and look at which
+command IDs appear. If nothing outside 0x00/0x01 shows up, these constants
+describe commands that do not exist and should be deleted.</p>
+<h3 id="the-direction-of-functional-parameter-1-tilt">The direction of Functional Parameter 1 (tilt)</h3>
+<p><code>create_tilt_frame()</code> assumes FP1 counts closure, like the Main Parameter does:
+0x00 open, 0xC8 closed. That is inferred from the shared scale, not observed.
+The ESPHome cover got this backwards until recently.</p>
+<p><strong>Experiment:</strong> on a pleated blind (Velux FML) or any slatted product, tilt the
+slats fully open from the remote and capture the frame. Read the byte at offset
+5 of the payload. <code>0x00</code> confirms the assumption; <code>0xC8</code> means both
+implementations need inverting.</p>
+<h3 id="the-execute-payload-length">The Execute payload length</h3>
+<p>Captures show both 6 and 8 payload bytes for command 0x00 - the documented
+minimum plus two more functional parameters. The parser handles both.</p>
+<p><strong>Experiment:</strong> capture a range of commands and note which lengths appear.
+Anything other than 6 or 8 is new information.</p>
+<h3 id="k9-the-2w-pairing-exchange">K9 - the 2W pairing exchange</h3>
+<p><code>pair_device_2w()</code> sends the 0x32 key transfer without the 0x3c challenge
+request that <code>docs/linklayer.md</code> shows. The crypto underneath is verified
+against a captured exchange; the frame sequence is not implemented.</p>
+<p><strong>Experiment:</strong> capture a real pairing between a controller and an actuator.
+The order and direction of 0x31/0x38, 0x3c, 0x32, 0x3d and 0x33 is what is
+missing, and it is not something to guess - a wrong guess here writes a key
+neither side can use.</p>
+<hr />
+<h2 id="5-transmitting">5. Transmitting</h2>
+<p>Only once steps 1-3 pass, and only with node IDs you know are yours.</p>
+<p><code>src/main.cpp</code> is a listener. To send, set <code>IOHC_NODE_ID</code> to an address your
+installation does not already use, set <code>IOHC_SYSTEM_KEY</code> to your installation's
+key, and call <code>controller.close(node)</code> or <code>controller.set_position(node, 50)</code>.</p>
+<p>Without the right system key the actuator will ignore you: the MAC will not
+verify. That is the protocol working, not a bug. Obtaining the key means
+capturing a pairing - see <code>docs/SECURITY-MODEL.md</code> for what that implies, and
+for why the transfer key being a public constant makes it possible at all.</p>
+<h3 id="fixed-packet-length">Fixed packet length</h3>
+<p>RadioLib's FSK mode sends exactly the programmed number of bytes, but
+io-homecontrol frames vary from 11 to 34. <code>src/main.cpp</code> programs the maximum,
+which works for receiving; for transmitting, install the length hook so each
+frame is sent at its own length:</p>
+<div class="language-cpp highlight"><span class="filename">C++</span><pre><span></span><code><span id="__span-10-1"><span class="n">controller</span><span class="p">.</span><span class="n">set_packet_length_callback</span><span class="p">(</span>
+</span><span id="__span-10-2"><span class="w">  </span><span class="p">[](</span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">len</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">ctx</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">int16_t</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-10-3"><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="n">SX1276</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">ctx</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">fixedPacketLengthMode</span><span class="p">(</span><span class="n">len</span><span class="p">);</span>
+</span><span id="__span-10-4"><span class="w">  </span><span class="p">},</span>
+</span><span id="__span-10-5"><span class="w">  </span><span class="o">&amp;</span><span class="n">radio</span><span class="p">);</span>
+</span></code></pre></div>
+<p>See <code>docs/RADIO-SETUP.md</code>.</p>
+<hr />
+<h2 id="6-reporting-back">6. Reporting back</h2>
+<p>What is useful, in descending order:</p>
+<ol>
+<li><strong>Raw captures.</strong> <code>[RAW]</code> lines with a note of what was pressed.</li>
+<li><strong>Which step failed and what it printed.</strong> The pin map and the statistics
+   line together narrow almost everything down.</li>
+<li><strong>Board and actuator model.</strong></li>
+</ol>
+<p>A capture that contradicts something in <code>docs/</code> is the most valuable thing
+here. Every fix in this library so far came from one document disagreeing with
+another.</p>
+
+
+
+
+
+
+
+  
+    
+  
+  
+
+
+  <aside class="md-source-file">
+    
+      
+  <span class="md-source-file__fact">
+    <span class="md-icon" title="Last update">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 13.1c-.1 0-.3.1-.4.2l-1 1 2.1 2.1 1-1c.2-.2.2-.6 0-.8l-1.3-1.3c-.1-.1-.2-.2-.4-.2m-1.9 1.8-6.1 6V23h2.1l6.1-6.1zM12.5 7v5.2l4 2.4-1 1L11 13V7zM11 21.9c-5.1-.5-9-4.8-9-9.9C2 6.5 6.5 2 12 2c5.3 0 9.6 4.1 10 9.3-.3-.1-.6-.2-1-.2s-.7.1-1 .2C19.6 7.2 16.2 4 12 4c-4.4 0-8 3.6-8 8 0 4.1 3.1 7.5 7.1 7.9l-.1.2z"/></svg>
+    </span>
+    <span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-timeago" title="August 6, 2026 11:02:12 UTC"><span class="timeago" datetime="2026-08-06T11:02:12+00:00" locale="en"></span></span><span class="git-revision-date-localized-plugin git-revision-date-localized-plugin-iso_date" title="August 6, 2026 11:02:12 UTC">2026-08-06</span>
+  </span>
+
+    
+    
+    
+    
+  </aside>
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../RADIO-SETUP/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Radio Setup">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Radio Setup
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../VELUX-FORMAT/" class="md-footer__link md-footer__link--next" aria-label="Next: Velux Format">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Velux Format
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      &copy; <a href="https://github.com/velocet/iown-homecontrol/">iown-homecontrol™</a>
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://discord.gg/MPEb7dTNdN" target="_blank" rel="noopener" title="discord.gg" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M492.5 69.8c-.2-.3-.4-.6-.8-.7-38.1-17.5-78.4-30-119.7-37.1-.4-.1-.8 0-1.1.1s-.6.4-.8.8c-5.5 9.9-10.5 20.2-14.9 30.6-44.6-6.8-89.9-6.8-134.4 0-4.5-10.5-9.5-20.7-15.1-30.6-.2-.3-.5-.6-.8-.8s-.7-.2-1.1-.2C162.5 39 122.2 51.5 84.1 69c-.3.1-.6.4-.8.7C7.1 183.5-13.8 294.6-3.6 404.2c0 .3.1.5.2.8s.3.4.5.6c44.4 32.9 94 58 146.8 74.2.4.1.8.1 1.1 0s.7-.4.9-.7c11.3-15.4 21.4-31.8 30-48.8.1-.2.2-.5.2-.8s0-.5-.1-.8-.2-.5-.4-.6-.4-.3-.7-.4c-15.8-6.1-31.2-13.4-45.9-21.9-.3-.2-.5-.4-.7-.6s-.3-.6-.3-.9 0-.6.2-.9.3-.5.6-.7c3.1-2.3 6.2-4.7 9.1-7.1.3-.2.6-.4.9-.4s.7 0 1 .1c96.2 43.9 200.4 43.9 295.5 0 .3-.1.7-.2 1-.2s.7.2.9.4c2.9 2.4 6 4.9 9.1 7.2.2.2.4.4.6.7s.2.6.2.9-.1.6-.3.9-.4.5-.6.6c-14.7 8.6-30 15.9-45.9 21.8-.2.1-.5.2-.7.4s-.3.4-.4.7-.1.5-.1.8.1.5.2.8c8.8 17 18.8 33.3 30 48.8.2.3.6.6.9.7s.8.1 1.1 0c52.9-16.2 102.6-41.3 147.1-74.2.2-.2.4-.4.5-.6s.2-.5.2-.8c12.3-126.8-20.5-236.9-86.9-334.5zm-302 267.7c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.4 59.2-52.8 59.2m195.4 0c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.2 59.2-52.8 59.2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://t.me/iownHomecontrol" target="_blank" rel="noopener" title="t.me" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M256 8a248 248 0 1 0 0 496 248 248 0 1 0 0-496m115 168.7c-3.7 39.2-19.9 134.4-28.1 178.3-3.5 18.6-10.3 24.8-16.9 25.4-14.4 1.3-25.3-9.5-39.3-18.7-21.8-14.3-34.2-23.2-55.3-37.2-24.5-16.1-8.6-25 5.3-39.5 3.7-3.8 67.1-61.5 68.3-66.7.2-.7.3-3.1-1.2-4.4s-3.6-.8-5.1-.5c-2.2.5-37.1 23.5-104.6 69.1-9.9 6.8-18.9 10.1-26.9 9.9-8.9-.2-25.9-5-38.6-9.1-15.5-5-27.9-7.7-26.8-16.3.6-4.5 6.7-9 18.4-13.7 72.3-31.5 120.5-52.3 144.6-62.3 68.9-28.6 83.2-33.6 92.5-33.8 2.1 0 6.6.5 9.6 2.9 2 1.7 3.2 4.1 3.5 6.7.5 3.2.6 6.5.4 9.8z"/></svg>
+    </a>
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://velocet.github.io/iown-homecontrol" target="_blank" rel="noopener" title="velocet.github.io" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+    </a>
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/velocet/iown-homecontrol" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 2A10 10 0 0 0 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33s1.71.11 2.5.33c1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "header.autohide", "navigation.footer", "navigation.instant", "navigation.instant.progress", "navigation.path", "navigation.sections", "navigation.tabs", "navigation.tabs.sticky", "navigation.top", "navigation.tracking", "search.highlight", "search.suggest", "toc.follow", "toc.integrate"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../js/timeago.min.js"></script>
+      
+        <script src="../js/timeago_mkdocs_material.js"></script>
+      
+        <script src="../assets/external/unpkg.com/tablesort@5.3.0/dist/tablesort.min.js"></script>
+      
+        <script src="../assets/javascripts/tablesort.js"></script>
+      
+    
+  </body>
+</html>

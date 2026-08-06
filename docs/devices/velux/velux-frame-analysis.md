@@ -28,12 +28,16 @@ requires the installation's AES-128 system (stack) key.
 - A **1W key transfer (0x30)** *is* present in the capture (manufacturer byte
   `0x01` = Velux). It carries the masked key + manufacturer + sequence, and **no
   MAC** — so the CRC is its only integrity check.
-- The system key is **still not confirmed** from passive captures: the documented
-  address-mask de-masking reproduces the synthetic `linklayer.md` vector but does
-  **not** reproduce this installation's command MACs (checked by brute-forcing all
-  2²⁴ mask addresses), so either the OEM masking differs or the transferred key is
-  not the one that signs commands. Key recovery remains open; hardware extraction
-  (SWD) is still the fallback, not the only hope.
+- The system key **is recovered and verified** from passive captures. De-masking
+  the 0x30 with the documented address-mask method (IV = the frame's SRC repeated,
+  `AES-ECB(TRANSFER_KEY, IV)`, XOR) yields a per-remote 1W key that reproduces the
+  1W MAC on **80 / 80** captured `0x00` commands from that remote — and none from
+  any other remote. The earlier "not confirmed" conclusion was an off-by-one in
+  the MAC **input range**, not a masking difference: the 1W MAC covers the frame
+  **from the command byte** (`cmd + origin + acei + main[2] + fp1 + fp2`), not the
+  payload after it. Keys are per-remote; SWD extraction is no longer needed. (The
+  recovered key values are the installation's secret and are deliberately not
+  recorded here.)
 
 > **Reconciled with `docs/VELUX-FORMAT.md`.** That document (from the KLF 200
 > specification) describes what a command *means* — Main Parameter direction
@@ -81,28 +85,35 @@ the component's receive (`receive_frame_` de-frames before parsing) and transmit
 (`send_frame` frames before sending). The codec is host-tested against these
 captures in `test/test_phy_framing/test_phy_framing.cpp`.
 
-### The 1W key transfer, and why the key is still not confirmed
+### The 1W key transfer, and how the key was verified
 
 One captured frame is a `0x30` Send 1W Key, de-framed to 31 bytes:
 
 ```
-fc 00 | 00013f | 2ca919 | 30 | d978a0f11b858334df2c5f357b83782d | 01 | 01 | 049a | 398d
-ctrl  | dest   | src    | cmd| encrypted key (16)               |mfr |?  | seq  | crc
+fc 00 | 00013f | 2ca919 | 30 | <16-byte encrypted key> | 01 | 01 | 049a | 398d
+ctrl  | dest   | src    | cmd| encrypted key           |mfr |?  | seq  | crc
 ```
 
 `mfr = 0x01` is Velux. There is **no MAC** — the frame is CRC-protected only, so
-nothing in it lets the recovered key verify itself. (The earlier key-capture code
-assumed a 6-byte MAC and a 35-byte frame; that was corrected to this layout.)
+the transferred key cannot verify itself *within the 0x30*. (The earlier
+key-capture code assumed a 6-byte MAC and a 35-byte frame; that was corrected to
+this layout.) It verifies instead against the **command** MACs.
 
-De-masking with the documented method — AES(TRANSFER_KEY, IV) keyed on the node
-address — is what reproduces the synthetic vector in `docs/linklayer.md`. It does
-**not** reproduce this installation's traffic: unmasking the key and using it to
-recompute the MAC of a command from the *same* remote (`2ca919`, which sends both
-the key transfer and ordinary `0x00` commands) does not match, and a brute force
-over all 2²⁴ possible mask addresses finds none that does. So either Velux masks
-the 0x30 differently from the documented 1W scheme, or the transferred key is not
-the key that signs commands. The component now prints the de-masked value as an
-explicitly **unverified candidate**, not a key to trust.
+De-masking with the documented method — `AES-ECB(TRANSFER_KEY, IV)` with the IV =
+the SRC address repeated to 16 bytes, then XOR — reproduces the synthetic vector
+in `docs/linklayer.md`, **and** reproduces this installation's traffic. Unmasking
+the key from `2ca919`'s 0x30 and recomputing the 1W MAC of `2ca919`'s ordinary
+`0x00` commands matches on **80 / 80** captured commands, and matches none from
+any other remote.
+
+An earlier pass reported this as "not confirmed" after a brute force over 2²⁴
+mask addresses found no match. That was an off-by-one in the MAC **input range**,
+not a masking difference: `create_1w_hmac` covers the frame **from the command
+byte** — `cmd + origin + acei + main[2] + fp1 + fp2` — not the payload after the
+command. With the command byte included, the documented masking and MAC both
+verify. Keys are per-remote (each remote's own 1W key), so **SWD extraction is
+not needed**. The recovered key values are the installation's secret and are
+deliberately not recorded in this repo.
 
 ---
 

@@ -19,6 +19,18 @@ requires the installation's AES-128 system (stack) key.
 - The realistic path is **hardware key extraction** (SWD) from a remote
   (EFR32FG1) or the KLF200 (STM32F427 + EFM32GG990).
 
+> **Related — and an unresolved contradiction.** `docs/VELUX-FORMAT.md` (added on
+> the expert-review branch, derived from the KLF 200 specification) documents the
+> actuator *semantics*: Main Parameter direction (up=0x0000, down=0xC800,
+> stop=0xD200), command originators, priority levels, the 16-bit node-type field.
+> That work and this one are complementary — it describes what a command *means*,
+> this describes the bytes actually seen on air. **But they do not fully reconcile:**
+> the whole repo model (that spec, `scripts/io-homecontrol.ksy`, the C++) assumes a
+> **standard frame ≤34 bytes with a KERMIT CRC trailer**, and the captures here do
+> not fit it (48 bytes, no valid CRC; the command at idx14 is a single byte `0x97`
+> for stop, not the spec's 2-byte `0xD200`). See §3 and §7 — resolving this is the
+> first thing a follow-up session should look at with fresh eyes.
+
 ---
 
 ## 1. Radio setup — confirmed correct
@@ -157,6 +169,15 @@ readback is blocked and unlocking mass-erases the key. Then only fault-injection
 check tells us immediately per device.
 
 ## 7. Open questions for a follow-up session
+- **Standard vs. extended format — the central contradiction.** The repo model
+  (`scripts/io-homecontrol.ksy`, `docs/VELUX-FORMAT.md`, the C++) assumes a
+  standard frame ≤34 bytes with a KERMIT CRC. These captures are 48 bytes and
+  validate no CRC under exhaustive testing (§2, §3), yet the demod is provably
+  good (the doc reference frames validate; the sync word is confirmed on air).
+  Either these specific BG-RC011-02 remotes use a proprietary extension, or there
+  is a demod subtlety not yet seen. Full raw captures are in [`captures/`](captures/)
+  so this can be re-examined with fresh eyes. Resolving it is the prerequisite for
+  everything downstream.
 - Is either target's debug interface actually locked? (needs a debugger + probe)
 - From a flash dump: locate the 16-byte key and reverse `construct_iv` / MAC for
   the Velux-extended format (idx20-47), then verify by reproducing a captured

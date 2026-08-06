@@ -162,7 +162,17 @@ void test_discovery_collects_multiple_devices(void) {
     iohome::frame::IoFrame answer;
     iohome::frame::init_frame(&answer, false);
 
-    const uint8_t payload[] = {0x03, 0x01, 0x00};
+    // A real Discover Answer, byte for byte as docs/commands.md lays it out:
+    //   node type/sub-type (2) | node address (3) | OEM (1) | multi info (1)
+    //   | timestamp (2)
+    // 0x0101 is a window opener with an integrated rain sensor: type 4,
+    // sub-type 1. Reading the type as one byte gives 0x01, an interior
+    // venetian blind's high byte, and reads the OEM out of the type's low half.
+    // The OEM byte is deliberately not 0x01: with Velux there, reading it from
+    // the type's low half gives the right answer by accident and the test
+    // proves nothing. 0x0C is Atlantic, and it matches the worked example in
+    // docs/commands.md.
+    const uint8_t payload[] = {0x01, 0x01, 0xAA, 0xBB, 0x03, 0x0C, 0xCC, 0x0F, 0xB8};
 
     for (uint8_t i = 1; i <= 3; i++) {
         const uint8_t src[3] = {0xAA, 0xBB, i};
@@ -179,8 +189,17 @@ void test_discovery_collects_multiple_devices(void) {
     mode2w::DiscoveredDevice device;
     TEST_ASSERT_TRUE(mgr.get_discovered_device(2, &device));
     TEST_ASSERT_EQUAL_UINT8(0x03, device.node_id[2]);
-    TEST_ASSERT_EQUAL(iohome::DeviceType::WINDOW_OPENER, device.device_type);
-    TEST_ASSERT_EQUAL_UINT8(0x01, device.manufacturer);
+
+    TEST_ASSERT_EQUAL_HEX16(static_cast<uint16_t>(iohome::NodeType::WINDOW_OPENER_RAIN_SENSOR),
+                            device.node_type);
+    TEST_ASSERT_EQUAL_UINT16(4, device.type);
+    TEST_ASSERT_EQUAL_UINT8(1, device.subtype);
+
+    // The OEM byte is at offset 5, past the node address - not at offset 1.
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(iohome::Manufacturer::ATLANTIC),
+                            device.manufacturer);
+    TEST_ASSERT_EQUAL_HEX8(0xCC, device.multi_info);
+    TEST_ASSERT_EQUAL_HEX16(0x0FB8, device.device_timestamp);
 
     TEST_ASSERT_FALSE(mgr.get_discovered_device(3, &device));
     TEST_ASSERT_FALSE(mgr.get_discovered_device(0, nullptr));

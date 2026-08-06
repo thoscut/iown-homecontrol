@@ -88,18 +88,31 @@ void test_stop_frame(void) {
   TEST_ASSERT_EQUAL_HEX16(iohome::MP_STOP, main_param_of(frame));
 }
 
-void test_emergency_close_uses_priority(void) {
+void test_protective_closes_use_the_right_originator(void) {
   velux::VeluxWindow window(WINDOW_NODE, velux::VeluxModel::GGL_ELECTRIC);
-
   iohome::frame::IoFrame frame;
-  TEST_ASSERT_TRUE(window.create_emergency_close_frame(&frame, SRC_NODE));
 
+  // A rain close names the rain sensor. The specification uses exactly this
+  // case to describe priority level 1: "rain sensor on a roof window".
+  TEST_ASSERT_TRUE(window.create_rain_close_frame(&frame, SRC_NODE));
   TEST_ASSERT_EQUAL_HEX16(iohome::MP_CLOSE, main_param_of(frame));
-  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(iohome::Originator::SENSOR_RAIN), frame.data[0]);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(iohome::Originator::SENSOR_RAIN),
+                         frame.data[iohome::EXECUTE_OFFSET_ORIGINATOR]);
+
+  // An emergency close names EMERGENCY. The function that builds it used to
+  // be the rain one under another name, so both said SENSOR_RAIN.
+  TEST_ASSERT_TRUE(window.create_emergency_close_frame(&frame, SRC_NODE));
+  TEST_ASSERT_EQUAL_HEX16(iohome::MP_CLOSE, main_param_of(frame));
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(iohome::Originator::EMERGENCY),
+                         frame.data[iohome::EXECUTE_OFFSET_ORIGINATOR]);
 
   // Priority lives in the ACEI byte, not in Control Byte 1. Regression: this
   // used to set bit 4 of Control Byte 1, which is the ACK flag.
-  const uint8_t acei = frame.data[1];
+  //
+  // Environment Protection, not Human Protection: level 0 disables every other
+  // category and the specification conditions its use on an agreement from
+  // io-homecontrol.
+  const uint8_t acei = frame.data[iohome::EXECUTE_OFFSET_ACEI];
   TEST_ASSERT_TRUE(iohome::is_acei_valid(acei));
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(iohome::PriorityLevel::ENVIRONMENT_PROTECTION),
@@ -125,32 +138,49 @@ void test_window_helpers_reject_nullptr(void) {
 }
 
 void test_rain_sensor_parsing(void) {
+  // Rain is not a query and not an answer: it is an ordinary Execute that a
+  // rain sensor originated. This used to look for command 0x58 with a
+  // DRY/RAIN/ERROR byte, which no device sends and which claimed to observe a
+  // "dry" state that nothing ever reports.
+  const uint8_t node[3] = {0x0A, 0x0B, 0x0C};
+  const uint8_t src[3] = {0x01, 0x02, 0x03};
+  velux::VeluxWindow window(node);
+
   iohome::frame::IoFrame frame;
-  iohome::frame::init_frame(&frame, true);
+  TEST_ASSERT_TRUE(window.create_rain_close_frame(&frame, src));
+  TEST_ASSERT_EQUAL(velux::RainSensorStatus::RAIN,
+                    velux::VeluxWindow::parse_rain_sensor_status(&frame));
 
-  const uint8_t dry[] = {0x01};
-  iohome::frame::set_command(&frame, velux::VELUX_CMD_GET_RAIN_SENSOR, dry, 1);
-  TEST_ASSERT_EQUAL(velux::RainSensorStatus::DRY, velux::VeluxWindow::parse_rain_sensor_status(&frame));
-
-  const uint8_t rain[] = {0x02};
-  iohome::frame::set_command(&frame, velux::VELUX_CMD_GET_RAIN_SENSOR, rain, 1);
-  TEST_ASSERT_EQUAL(velux::RainSensorStatus::RAIN, velux::VeluxWindow::parse_rain_sensor_status(&frame));
-
-  const uint8_t error[] = {0xFF};
-  iohome::frame::set_command(&frame, velux::VELUX_CMD_GET_RAIN_SENSOR, error, 1);
-  TEST_ASSERT_EQUAL(velux::RainSensorStatus::ERROR, velux::VeluxWindow::parse_rain_sensor_status(&frame));
-
-  // Wrong command, empty payload and nullptr must all report UNKNOWN.
-  iohome::frame::set_command(&frame, iohome::CMD_EXECUTE, dry, 1);
+  // The same command from a user is not a rain report.
+  TEST_ASSERT_TRUE(window.create_emergency_close_frame(&frame, src));
   TEST_ASSERT_EQUAL(velux::RainSensorStatus::UNKNOWN,
                     velux::VeluxWindow::parse_rain_sensor_status(&frame));
 
-  iohome::frame::set_command(&frame, velux::VELUX_CMD_GET_RAIN_SENSOR, nullptr, 0);
+  // Neither is a frame that is not an Execute at all, nor an empty one.
+  iohome::frame::set_command(&frame, iohome::CMD_GET_NAME, nullptr, 0);
   TEST_ASSERT_EQUAL(velux::RainSensorStatus::UNKNOWN,
                     velux::VeluxWindow::parse_rain_sensor_status(&frame));
 
   TEST_ASSERT_EQUAL(velux::RainSensorStatus::UNKNOWN,
                     velux::VeluxWindow::parse_rain_sensor_status(nullptr));
+}
+
+void test_secured_ventilation_frame(void) {
+  // The ventilation position a Velux window actually has: Main Parameter
+  // 0xD803 on the ordinary Execute, from the window opener actuator profile.
+  const uint8_t node[3] = {0x0A, 0x0B, 0x0C};
+  const uint8_t src[3] = {0x01, 0x02, 0x03};
+  velux::VeluxWindow window(node);
+
+  iohome::frame::IoFrame frame;
+  TEST_ASSERT_TRUE(window.create_secured_ventilation_frame(&frame, src));
+
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, frame.command_id);
+  TEST_ASSERT_EQUAL_HEX8(0xD8, frame.data[iohome::EXECUTE_OFFSET_MAIN_PARAM]);
+  TEST_ASSERT_EQUAL_HEX8(0x03, frame.data[iohome::EXECUTE_OFFSET_MAIN_PARAM + 1]);
+
+  TEST_ASSERT_FALSE(window.create_secured_ventilation_frame(nullptr, src));
+  TEST_ASSERT_FALSE(window.create_secured_ventilation_frame(&frame, nullptr));
 }
 
 // ---------------------------------------------------------------------------
@@ -227,14 +257,47 @@ void test_recommended_positions(void) {
 // ---------------------------------------------------------------------------
 
 void test_model_detection(void) {
-  TEST_ASSERT_EQUAL(velux::VeluxModel::GGL_ELECTRIC, velux::detect_model(0x03, 0x01));
-  TEST_ASSERT_EQUAL(velux::VeluxModel::SML, velux::detect_model(0x00, 0x01));
-  TEST_ASSERT_EQUAL(velux::VeluxModel::FML, velux::detect_model(0x04, 0x01));
-  TEST_ASSERT_EQUAL(velux::VeluxModel::MML, velux::detect_model(0x05, 0x01));
+  // A node announces its type, not its product number. detect_model() used to
+  // map "window opener" to GGL_ELECTRIC and "venetian blind" to FML - specific
+  // Velux products picked from a field that cannot tell them apart. What the
+  // type field does determine is the category.
+  using velux::VeluxCategory;
+  const uint8_t VLX = static_cast<uint8_t>(iohome::Manufacturer::VELUX);
 
-  // Another manufacturer is never a Velux model.
-  TEST_ASSERT_EQUAL(velux::VeluxModel::UNKNOWN, velux::detect_model(0x03, 0x02));
-  TEST_ASSERT_EQUAL(velux::VeluxModel::UNKNOWN, velux::detect_model(0x7F, 0x01));
+  TEST_ASSERT_EQUAL(VeluxCategory::WINDOW,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::WINDOW_OPENER), VLX));
+
+  // Every sub-type of a kind lands in the same category: a window opener with
+  // an integrated rain sensor is still a window.
+  TEST_ASSERT_EQUAL(VeluxCategory::WINDOW,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::WINDOW_OPENER_RAIN_SENSOR), VLX));
+
+  TEST_ASSERT_EQUAL(VeluxCategory::ROLLER_SHUTTER,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::ROLLER_SHUTTER), VLX));
+  TEST_ASSERT_EQUAL(VeluxCategory::ROLLER_SHUTTER,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::ROLLER_SHUTTER_ADJUSTABLE), VLX));
+  TEST_ASSERT_EQUAL(VeluxCategory::BLIND,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::INTERIOR_VENETIAN_BLIND), VLX));
+  TEST_ASSERT_EQUAL(VeluxCategory::AWNING,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::HORIZONTAL_AWNING), VLX));
+  TEST_ASSERT_EQUAL(VeluxCategory::CONTROLLER,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::REMOTE_CONTROLLER), VLX));
+
+  // Another manufacturer is never a Velux product.
+  TEST_ASSERT_EQUAL(VeluxCategory::UNKNOWN,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::WINDOW_OPENER),
+                        static_cast<uint8_t>(iohome::Manufacturer::SOMFY)));
+  TEST_ASSERT_EQUAL(VeluxCategory::UNKNOWN,
+                    velux::detect_category(
+                        static_cast<uint16_t>(iohome::NodeType::HEAT_PUMP), VLX));
 }
 
 void test_model_classification(void) {
@@ -271,9 +334,10 @@ int main(int, char**) {
   RUN_TEST(test_window_position_mapping);
   RUN_TEST(test_ventilation_levels);
   RUN_TEST(test_stop_frame);
-  RUN_TEST(test_emergency_close_uses_priority);
+  RUN_TEST(test_protective_closes_use_the_right_originator);
   RUN_TEST(test_window_helpers_reject_nullptr);
   RUN_TEST(test_rain_sensor_parsing);
+  RUN_TEST(test_secured_ventilation_frame);
 
   RUN_TEST(test_blind_position_frame);
   RUN_TEST(test_blind_position_clamps);

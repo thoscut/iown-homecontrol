@@ -115,7 +115,7 @@ bool VeluxWindow::create_stop_frame(
   return frame::set_execute_command(frame, MP_STOP);
 }
 
-bool VeluxWindow::create_emergency_close_frame(
+bool VeluxWindow::create_rain_close_frame(
   frame::IoFrame* frame,
   const uint8_t src_node[NODE_ID_SIZE]
 ) {
@@ -132,29 +132,50 @@ bool VeluxWindow::create_emergency_close_frame(
   return frame::set_execute_command(frame, MP_CLOSE, Originator::SENSOR_RAIN, acei);
 }
 
+bool VeluxWindow::create_emergency_close_frame(
+  frame::IoFrame* frame,
+  const uint8_t src_node[NODE_ID_SIZE]
+) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
+  begin_control_frame(frame, node_id_, src_node);
+
+  // Emergency is the originator, not a command of its own - and not priority
+  // level 0, which disables every other category and is not ours to use.
+  const uint8_t acei = make_acei(PriorityLevel::ENVIRONMENT_PROTECTION);
+  return frame::set_execute_command(frame, MP_CLOSE, Originator::EMERGENCY, acei);
+}
+
+bool VeluxWindow::create_secured_ventilation_frame(
+  frame::IoFrame* frame,
+  const uint8_t src_node[NODE_ID_SIZE]
+) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
+  begin_control_frame(frame, node_id_, src_node);
+  return frame::set_execute_command(frame, MP_SECURED_VENTILATION);
+}
+
 RainSensorStatus VeluxWindow::parse_rain_sensor_status(const frame::IoFrame* frame) {
   if (frame == nullptr) {
     return RainSensorStatus::UNKNOWN;
   }
 
-  if (frame->command_id != VELUX_CMD_GET_RAIN_SENSOR) {
+  // Rain shows up as an ordinary command that a rain sensor originated, not as
+  // a reply to a query. The originator is the first byte of the Execute
+  // payload, so a frame without one says nothing either way.
+  if (frame->command_id != CMD_EXECUTE || frame->data_len < 1) {
     return RainSensorStatus::UNKNOWN;
   }
 
-  if (frame->data_len < 1) {
-    return RainSensorStatus::UNKNOWN;
-  }
-
-  switch (frame->data[0]) {
-    case 0x01:
-      return RainSensorStatus::DRY;
-    case 0x02:
-      return RainSensorStatus::RAIN;
-    case 0xFF:
-      return RainSensorStatus::ERROR;
-    default:
-      return RainSensorStatus::UNKNOWN;
-  }
+  return (frame->data[EXECUTE_OFFSET_ORIGINATOR] ==
+          static_cast<uint8_t>(Originator::SENSOR_RAIN))
+           ? RainSensorStatus::RAIN
+           : RainSensorStatus::UNKNOWN;
 }
 
 // ============================================================================
@@ -268,23 +289,35 @@ bool VeluxBlind::create_tilt_frame(
 // Helper Functions
 // ============================================================================
 
-VeluxModel detect_model(uint8_t device_type, uint8_t manufacturer) {
-  // Manufacturer code 0x01 = Velux
-  if (manufacturer != 0x01) {
-    return VeluxModel::UNKNOWN;
+VeluxCategory detect_category(uint16_t node_type, uint8_t manufacturer) {
+  if (manufacturer != static_cast<uint8_t>(Manufacturer::VELUX)) {
+    return VeluxCategory::UNKNOWN;
   }
 
-  switch (static_cast<DeviceType>(device_type)) {
-    case DeviceType::WINDOW_OPENER:
-      return VeluxModel::GGL_ELECTRIC;
-    case DeviceType::ROLLER_SHUTTER:
-      return VeluxModel::SML;
-    case DeviceType::VENETIAN_BLIND:
-      return VeluxModel::FML;
-    case DeviceType::EXTERIOR_BLIND:
-      return VeluxModel::MML;
+  // Compare on the 10-bit type, so every sub-type of a kind lands in the same
+  // category: a window opener with an integrated rain sensor (0x0101) is still
+  // a window.
+  switch (node_type_of(node_type)) {
+    case node_type_of(static_cast<uint16_t>(NodeType::WINDOW_OPENER)):
+      return VeluxCategory::WINDOW;
+    case node_type_of(static_cast<uint16_t>(NodeType::ROLLER_SHUTTER)):
+    case node_type_of(static_cast<uint16_t>(NodeType::DUAL_ROLLER_SHUTTER)):
+      return VeluxCategory::ROLLER_SHUTTER;
+    case node_type_of(static_cast<uint16_t>(NodeType::INTERIOR_VENETIAN_BLIND)):
+    case node_type_of(static_cast<uint16_t>(NodeType::VERTICAL_INTERIOR_BLIND)):
+    case node_type_of(static_cast<uint16_t>(NodeType::EXTERIOR_VENETIAN_BLIND)):
+    case node_type_of(static_cast<uint16_t>(NodeType::LOUVER_BLIND)):
+      return VeluxCategory::BLIND;
+    case node_type_of(static_cast<uint16_t>(NodeType::VERTICAL_EXTERIOR_AWNING)):
+    case node_type_of(static_cast<uint16_t>(NodeType::HORIZONTAL_AWNING)):
+      return VeluxCategory::AWNING;
+    case node_type_of(static_cast<uint16_t>(NodeType::LIGHT)):
+      return VeluxCategory::LIGHT;
+    case node_type_of(static_cast<uint16_t>(NodeType::REMOTE_CONTROLLER)):
+    case node_type_of(static_cast<uint16_t>(NodeType::BEACON)):
+      return VeluxCategory::CONTROLLER;
     default:
-      return VeluxModel::UNKNOWN;
+      return VeluxCategory::UNKNOWN;
   }
 }
 

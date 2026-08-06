@@ -236,6 +236,12 @@ constexpr uint8_t EXECUTE_PAYLOAD_MIN_SIZE = 6;
 /// Bytes before the first functional parameter: originator, ACEI, main parameter.
 constexpr uint8_t EXECUTE_PAYLOAD_PREFIX_SIZE = 4;
 
+// Offsets into the Execute payload, counted from the byte after the command ID.
+constexpr uint8_t EXECUTE_OFFSET_ORIGINATOR = 0;
+constexpr uint8_t EXECUTE_OFFSET_ACEI = 1;
+constexpr uint8_t EXECUTE_OFFSET_MAIN_PARAM = 2;  // two bytes, most significant first
+constexpr uint8_t EXECUTE_OFFSET_FP1 = 4;
+
 /// Largest number of functional parameters docs/commands.md describes.
 constexpr uint8_t EXECUTE_MAX_FUNCTIONAL_PARAMS = 16;
 
@@ -349,6 +355,21 @@ constexpr uint16_t MP_SIGNED_PERCENT_MIN = 0xC900;
 constexpr uint16_t MP_SIGNED_PERCENT_MAX = 0xD0D0;
 
 /**
+ * @brief Secured ventilation, for the window opener actuator profile
+ *
+ * "A position a window can be opened to for getting some ventilation and where
+ * the window is still locked." - Velux KLF 200 API specification §14.2.1,
+ * "Alias for actuator specific parameter values", Alias ID 0xD803.
+ *
+ * This is the ventilation mechanism a Velux roof window actually has. It is a
+ * Main Parameter value on the ordinary Execute command, not a command of its
+ * own - `VELUX_CMD_SET_VENTILATION = 0x59` was invented and never existed.
+ * Values in the 0xD8xx alias range are actuator-profile specific: 0xD803 means
+ * secured ventilation only to a window opener.
+ */
+constexpr uint16_t MP_SECURED_VENTILATION = 0xD803;
+
+/**
  * @brief Convert a percentage (0-100) into a Main Parameter value.
  *
  * The io-homecontrol percentage range is 0x0000..0xC800 where 0x0000 is
@@ -374,29 +395,110 @@ constexpr uint8_t percent_closed_from_mp(uint16_t mp) {
 }
 
 // ============================================================================
-// Device Types (Actuator Subtypes)
+// Node Types
+//
+// A node announces what it is with a *16-bit* field, not a byte: ten bits of
+// type and six of sub-type.
+//
+//     type    = (field >> 6) & 0x3FF
+//     subtype =  field       & 0x3F
+//
+// Two independent sources agree on this. docs/commands.md gives the layout for
+// the Discover Answer (0x29) and the full table, and Table 49 of the Velux
+// KLF 200 API specification - docs/devices/velux/KLF200/ - gives the same
+// split as "AT9..AT0 | ST5..ST0" with the same values for every type the
+// gateway supports.
+//
+// The enumeration this replaced was a byte with values that matched neither:
+// it had WINDOW_OPENER at 0x03 where the field says 0x0100, ROLLER_SHUTTER at
+// 0x00 where the field says 0x0080, and so on for all nineteen.
 // ============================================================================
 
-enum class DeviceType : uint8_t {
-  ROLLER_SHUTTER = 0x00,
-  ADJUSTABLE_SLAT_SHUTTER = 0x01,
-  SCREEN = 0x02,
-  WINDOW_OPENER = 0x03,
-  VENETIAN_BLIND = 0x04,
-  EXTERIOR_BLIND = 0x05,
-  DUAL_SHUTTER = 0x06,
-  GARAGE_DOOR = 0x07,
-  AWNING = 0x08,
-  CURTAIN = 0x09,
-  PERGOLA = 0x0A,
-  HORIZONTAL_AWNING = 0x0B,
-  EXTERIOR_SCREEN = 0x0C,
-  LIGHT = 0x0D,
-  LOCK = 0x0E,
-  HEATING = 0x0F,
-  GATE = 0x10,
-  BEACON = 0x11,
-  SENSOR = 0x12
+/// Full 16-bit node type/sub-type as it appears on the wire.
+enum class NodeType : uint16_t {
+  NO_TYPE                       = 0x0000,  // All nodes except controllers
+  SMART_PLUG                    = 0x0033,
+  INTERIOR_VENETIAN_BLIND       = 0x0040,
+  LIGHT_SENSOR                  = 0x006A,
+  ROLLER_SHUTTER                = 0x0080,
+  ROLLER_SHUTTER_ADJUSTABLE     = 0x0081,  // with adjustable slats
+  ROLLER_SHUTTER_PROJECTION     = 0x0082,  // with projection
+  VERTICAL_EXTERIOR_AWNING      = 0x00C0,
+  WINDOW_COVERING_DEVICE        = 0x00CA,
+  WINDOW_COVERING_CONTROLLER    = 0x00CB,
+  WINDOW_OPENER                 = 0x0100,
+  WINDOW_OPENER_RAIN_SENSOR     = 0x0101,  // with integrated rain sensor
+  TEMP_HUMIDITY_SENSOR          = 0x012E,
+  GARAGE_DOOR_OPENER            = 0x0140,
+  GARAGE_DOOR_OPENER_SIMPLE     = 0x017A,  // open/close only
+  LIGHT                         = 0x0180,  // on/off + dimming
+  IAS_ZONE                      = 0x0192,
+  LIGHT_ON_OFF                  = 0x01BA,
+  GATE_OPENER                   = 0x01C0,
+  GATE_OPENER_SIMPLE            = 0x01FA,  // open/close only
+  ROLLING_DOOR_OPENER           = 0x0200,
+  DOOR_LOCK                     = 0x0240,
+  WINDOW_LOCK                   = 0x0241,
+  VERTICAL_INTERIOR_BLIND       = 0x0280,
+  SECURE_CONFIGURATION_DEVICE   = 0x0290,
+  BEACON                        = 0x0300,  // gateway / repeater
+  DUAL_ROLLER_SHUTTER           = 0x0340,
+  HEATING_TEMPERATURE_INTERFACE = 0x0380,
+  SWITCH_ON_OFF                 = 0x03C0,
+  HORIZONTAL_AWNING             = 0x0400,
+  PERGOLA_RAIL_GUIDED_AWNING    = 0x0401,
+  EXTERIOR_VENETIAN_BLIND       = 0x0440,
+  LOUVER_BLIND                  = 0x0480,
+  CURTAIN_TRACK                 = 0x04C0,
+  VENTILATION_POINT             = 0x0500,
+  AIR_INLET                     = 0x0501,
+  AIR_TRANSFER                  = 0x0502,
+  AIR_OUTLET                    = 0x0503,
+  EXTERIOR_HEATING              = 0x0540,
+  EXTERIOR_HEATING_ON_OFF       = 0x057A,
+  HEAT_PUMP                     = 0x0580,
+  INTRUSION_ALARM               = 0x05C0,
+  SWINGING_SHUTTER              = 0x0600,
+  SWINGING_SHUTTER_INDEPENDENT  = 0x0601,
+  CENTRAL_HOUSE_CONTROL         = 0x3FC0,
+  TEST_AND_EVALUATION           = 0xFC00,
+  REMOTE_CONTROLLER             = 0xFFC0
+};
+
+/// The 10-bit type half of a node type field.
+constexpr uint16_t node_type_of(uint16_t field) {
+  return static_cast<uint16_t>((field >> 6) & 0x3FF);
+}
+
+/// The 6-bit sub-type half of a node type field.
+constexpr uint8_t node_subtype_of(uint16_t field) {
+  return static_cast<uint8_t>(field & 0x3F);
+}
+
+/// Compose a node type field from its two halves.
+constexpr uint16_t make_node_type(uint16_t type, uint8_t subtype) {
+  return static_cast<uint16_t>(((type & 0x3FF) << 6) | (subtype & 0x3F));
+}
+
+// ============================================================================
+// Manufacturer IDs (docs/commands.md - "Manufacturer IDs", also "OEM ID")
+// ============================================================================
+
+enum class Manufacturer : uint8_t {
+  NONE          = 0x00,  // All nodes except controllers
+  VELUX         = 0x01,
+  SOMFY         = 0x02,
+  HONEYWELL     = 0x03,
+  HOERMANN      = 0x04,
+  ASSA_ABLOY    = 0x05,
+  NIKO          = 0x06,
+  WINDOW_MASTER = 0x07,
+  RENSON        = 0x08,
+  CIAT          = 0x09,
+  SECUYOU       = 0x0A,
+  OVERKIZ       = 0x0B,
+  ATLANTIC      = 0x0C,
+  ZEHNDER       = 0x0D
 };
 
 // ============================================================================

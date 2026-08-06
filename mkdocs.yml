@@ -48,6 +48,7 @@ nav:
       - Security Model: SECURITY-MODEL.md
       - Radio Setup: RADIO-SETUP.md
       - Hardware Bring-up: HARDWARE-BRINGUP.md
+      - Velux Format: VELUX-FORMAT.md
   - Parameter Viewer: parameter/database/README.md
   - Reference:
       - Devices: devices.md

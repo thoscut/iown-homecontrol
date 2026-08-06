@@ -21,6 +21,7 @@
 #include "protocol/iohome_constants.h"
 #include "protocol/iohome_crypto.h"
 #include "protocol/iohome_frame.h"
+#include "protocol/iohome_phy_framing.h"
 #include "protocol/iohome_2w.h"
 #include "protocol/iohome_replay_guard.h"
 #include "protocol/iohome_rolling_code_store.h"
@@ -113,8 +114,14 @@ typedef void (*LogCallback)(LogLevel level, const char* message, void* context);
  * in effect (set_system_key() has run); this is the hook to persist it so it
  * survives a reboot.
  *
- * @param key The 16-byte system key now in use
- * @param from_node The controller that sent it (3 bytes)
+ * Fires whenever this node obtains a key over the air: as a follower being
+ * pushed one (which it has already adopted, set_system_key() has run), or as a
+ * controller pulling a device's existing key (which it has *not* adopted - that
+ * is the peer's key, surfaced so the application can store it against that
+ * peer). @p from_node tells the two apart: it is the sender of the key.
+ *
+ * @param key The 16-byte key obtained
+ * @param from_node The node it came from (3 bytes)
  * @param context Opaque pointer supplied with the callback
  */
 typedef void (*KeyReceivedCallback)(const uint8_t key[16], const uint8_t from_node[3],
@@ -126,7 +133,8 @@ typedef void (*KeyReceivedCallback)(const uint8_t key[16], const uint8_t from_no
 enum class Pairing2W : uint8_t {
   IDLE = 0,
   PUSH_WAIT_CHALLENGE,  // controller sent 0x31, waiting for the device's 0x3C
-  PUSH_WAIT_ACK         // controller sent 0x32, waiting for the device's 0x33
+  PUSH_WAIT_ACK,        // controller sent 0x32, waiting for the device's 0x33
+  PULL_WAIT_KEY         // controller sent 0x38, waiting for the device's 0x32
 };
 
 /**
@@ -589,6 +597,25 @@ public:
                       const uint8_t new_system_key[AES_KEY_SIZE]);
 
   /**
+   * @brief Pull a device's existing key (2W mode, controller/collector role)
+   *
+   * The other half of pairing: instead of pushing a key, collect the one a
+   * device already holds, to then command it. Runs the documented pull:
+   *
+   *   1. this -> device:  0x38  launch key transfer, carrying a challenge
+   *   2. device -> this:  0x32  its key, masked against that challenge
+   *
+   * The recovered key is delivered to the key-received callback with the
+   * device as @c from_node. It is *not* adopted as this node's system key - it
+   * belongs to the device - so the application stores it per device. As with
+   * the push, the caller pumps the receive path until is_pairing() clears.
+   *
+   * @param dest_node Device to collect the key from (3 bytes)
+   * @return true if the opening 0x38 was sent
+   */
+  bool pull_device_key_2w(const uint8_t dest_node[NODE_ID_SIZE]);
+
+  /**
    * @brief Accept a system key pushed by a controller (2W follower role)
    *
    * With this enabled, an incoming 0x31 is answered with a fresh 0x3C challenge,
@@ -694,6 +721,13 @@ protected:
   Pairing2W pairing_state_;
   uint8_t pairing_peer_[NODE_ID_SIZE];
   uint8_t pairing_key_[AES_KEY_SIZE];
+  /// Challenge sent in our 0x38, needed to unmask the device's 0x32 (pull).
+  uint8_t pairing_challenge_[HMAC_SIZE];
+
+  /// Bytes to pull off the air per packet. A frame is at most FRAME_MAX_SIZE
+  /// logical bytes, each ten bits on the wire, so up to 43 arrive; 64 leaves
+  /// room for that and the trailing preamble the receiver sees after it.
+  static constexpr size_t RX_CAPTURE_SIZE = 64;
 
   /// True when a frame belongs to a pairing exchange and must skip the session
   /// authentication gate (the peers do not yet share the key that gate checks).

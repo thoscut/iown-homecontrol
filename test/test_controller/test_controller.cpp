@@ -473,6 +473,48 @@ void test_2w_push_pairing_transfers_the_key(void) {
   // what the controller sent, using the challenge it had itself chosen.
 }
 
+void test_2w_pull_collects_the_device_key(void) {
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t DEVICE_KEY[16] = {0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                  0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13};
+  const uint8_t CTRL_KEY[16] = {0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22,
+                                0x11, 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+
+  TEST_ASSERT_TRUE(controller.begin(CTRL, CTRL_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, DEVICE_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+
+  KeyCapture cap;
+  controller.set_key_received_callback(key_cb, &cap);
+  device.set_accept_pairing(true);
+
+  // The controller launches the pull; its first frame is 0x38, not 0x32.
+  TEST_ASSERT_TRUE(controller.pull_device_key_2w(DEV));
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_LAUNCH_KEY_TRANSFER, ctrl_radio.last_transmission[8]);
+
+  // 0x38 -> device answers with its key in a 0x32.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_LAUNCH_KEY_TRANSFER,
+                         relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, dev_radio.last_transmission[8]);
+
+  // 0x32 -> controller recovers the device's key.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_TRUE(cap.got);
+  // The surfaced key is the device's own, not the controller's - proof that
+  // pull collected the device's key and did not adopt it.
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(DEVICE_KEY, cap.key, 16);
+  TEST_ASSERT_TRUE(memcmp(cap.key, CTRL_KEY, 16) != 0);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(DEV, cap.from, 3);
+  TEST_ASSERT_FALSE(controller.is_pairing());
+}
+
 void test_2w_pairing_is_off_by_default(void) {
   // A node that has not opted in must ignore an ask-challenge, so a stranger
   // cannot make it emit a challenge or accept a key.
@@ -766,19 +808,22 @@ void test_packet_length_helper_programs_each_frame(void) {
 
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
 
-  // Narrowed to this frame's length before sending, widened again after - the
-  // radio must not be left expecting 25-byte packets.
+  // Narrowed to this frame's *wire* length before sending, widened again after.
+  // A 25-byte frame is 32 wire bytes (ten bits each), and reception widens back
+  // to the full capture size - not the frame maximum, since framed frames are
+  // longer than 34.
+  const uint8_t close_wire = static_cast<uint8_t>(iohome::phy::uart_wire_size(25));
   TEST_ASSERT_EQUAL_UINT(2, fake.lengths.size());
-  TEST_ASSERT_EQUAL_UINT8(25, fake.lengths[0]);
-  TEST_ASSERT_EQUAL_UINT8(radio.last_transmission.size(), fake.lengths[0]);
-  TEST_ASSERT_EQUAL_UINT8(iohome::FRAME_MAX_SIZE, fake.lengths[1]);
+  TEST_ASSERT_EQUAL_UINT8(close_wire, fake.lengths[0]);  // 32
+  TEST_ASSERT_EQUAL_UINT8(iohome::phy::uart_wire_size(25), fake.lengths[0]);
+  TEST_ASSERT_EQUAL_UINT8(64, fake.lengths[1]);
 
   // A longer frame programs a different length, not a constant.
   const uint8_t fps[4] = {0x80, 0xC8, 0x00, 0x00};
   TEST_ASSERT_TRUE(controller.send_execute_fp(PEER_NODE, 0xD400, fps, sizeof(fps)));
   TEST_ASSERT_EQUAL_UINT(4, fake.lengths.size());
-  TEST_ASSERT_EQUAL_UINT8(27, fake.lengths[2]);
-  TEST_ASSERT_EQUAL_UINT8(iohome::FRAME_MAX_SIZE, fake.lengths[3]);
+  TEST_ASSERT_EQUAL_UINT8(iohome::phy::uart_wire_size(27), fake.lengths[2]);  // 34
+  TEST_ASSERT_EQUAL_UINT8(64, fake.lengths[3]);
 }
 
 void test_raw_sniffer_sees_every_packet(void) {
@@ -790,6 +835,14 @@ void test_raw_sniffer_sees_every_packet(void) {
   controller.set_raw_frame_callback(sniffer_cb, &capture);
   TEST_ASSERT_EQUAL_INT(RADIOLIB_ERR_NONE, controller.start_receive());
 
+  // The sniffer sees the raw on-air bytes, framing and all, so de-frame them
+  // to compare against the logical frame the library sent.
+  auto deframed = [](const std::vector<uint8_t>& wire) {
+    uint8_t out[iohome::FRAME_MAX_SIZE];
+    const size_t n = iohome::phy::uart_decode_frame(wire.data(), wire.size(), out, sizeof out);
+    return std::vector<uint8_t>(out, out + n);
+  };
+
   // A frame that passes every check.
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
   const std::vector<uint8_t> good = radio.last_transmission;
@@ -798,8 +851,10 @@ void test_raw_sniffer_sees_every_packet(void) {
   iohome::frame::IoFrame frame;
   controller.check_received(&frame);
   TEST_ASSERT_EQUAL_INT(1, capture.calls);
-  TEST_ASSERT_EQUAL_UINT(good.size(), capture.frames[0].size());
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(good.data(), capture.frames[0].data(), good.size());
+  // What the sniffer captured is framed; de-framed it is the frame we sent.
+  const std::vector<uint8_t> seen0 = deframed(capture.frames[0]);
+  TEST_ASSERT_EQUAL_UINT(good.size(), seen0.size());
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(good.data(), seen0.data(), good.size());
 
   // A frame with a broken CRC never reaches the frame callback, but the
   // sniffer must still see it - that is the whole point of the hook.
@@ -808,11 +863,13 @@ void test_raw_sniffer_sees_every_packet(void) {
   radio.deliver(corrupted.data(), corrupted.size());
   TEST_ASSERT_FALSE(controller.check_received(&frame));
   TEST_ASSERT_EQUAL_INT(2, capture.calls);
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(corrupted.data(), capture.frames[1].data(), corrupted.size());
+  const std::vector<uint8_t> seen1 = deframed(capture.frames[1]);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(corrupted.data(), seen1.data(), corrupted.size());
 
-  // So must a frame too short to parse at all.
+  // So must a frame too short to parse at all - injected as raw wire bytes,
+  // since it is not a well-formed frame to be framed.
   const uint8_t runt[5] = {0xF8, 0x00, 0x11, 0x22, 0x33};
-  radio.deliver(runt, sizeof(runt));
+  radio.deliver_raw(runt, sizeof(runt));
   TEST_ASSERT_FALSE(controller.check_received(&frame));
   TEST_ASSERT_EQUAL_INT(3, capture.calls);
   TEST_ASSERT_EQUAL_UINT(sizeof(runt), capture.frames[2].size());
@@ -1076,14 +1133,17 @@ void test_survives_arbitrary_radio_input(void) {
   iohome::frame::IoFrame frame;
 
   for (int round = 0; round < 4000; round++) {
-    uint8_t buffer[iohome::FRAME_MAX_SIZE];
+    // Raw wire bytes, up to the full capture size, so the de-framer is fuzzed
+    // along with the parser, MAC and replay checks - the whole receive path as
+    // it runs on real hardware.
+    uint8_t buffer[64];
     const size_t len = 1 + (next_random(state) % sizeof(buffer));
 
     for (size_t i = 0; i < len; i++) {
       buffer[i] = static_cast<uint8_t>(next_random(state) & 0xFF);
     }
 
-    radio.deliver(buffer, len);
+    radio.deliver_raw(buffer, len);
     // Random bytes should never pass CRC, MAC and the replay check. If one
     // ever did, that is a 1-in-2^64 fluke or a real hole.
     TEST_ASSERT_FALSE(controller.check_received(&frame));
@@ -1163,6 +1223,7 @@ int main(int, char**) {
   RUN_TEST(test_log_passthrough_does_not_reformat);
 
   RUN_TEST(test_2w_push_pairing_transfers_the_key);
+  RUN_TEST(test_2w_pull_collects_the_device_key);
   RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_pair_device_1w_emits_two_frames);
   RUN_TEST(test_pair_rejects_nullptr);

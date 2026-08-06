@@ -191,7 +191,12 @@ void setup() {
     halt("radio.setCRC", state);
   }
 
-  state = radio.fixedPacketLengthMode(iohome::FRAME_MAX_SIZE);
+  // On air, each frame byte is sent UART-framed - a start bit, eight data bits,
+  // a stop bit - so a 34-byte frame occupies up to 43 bytes. The library frames
+  // on transmit and de-frames on receive; the radio just needs a fixed length
+  // wide enough to capture a whole framed frame. IoHomeControl narrows this to
+  // each frame's wire length before sending and widens it back afterwards.
+  state = radio.fixedPacketLengthMode(iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE) + 8);
   if (state != RADIOLIB_ERR_NONE) {
     halt("radio.fixedPacketLengthMode", state);
   }

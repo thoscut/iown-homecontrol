@@ -138,6 +138,7 @@ software".
 | V60 | Medium | `src/velux/` (K2) | The six `VELUX_CMD_*` constants at 0x58-0x5D were invented. 0x50-0x57 are four request/answer *pairs* and the six sat among them as unpaired singletons, in a metadata range, four of them claiming to be actuator control - which is command 0x00. Each function they named exists and none is a command: rain is Command Originator 0x02 on an ordinary frame, ventilation is Main Parameter 0xD803 ("Secured Ventilation"), emergency close is Originator 0xFF plus a protection priority, status is the Current access method. Set/reset limitation is real io-homecontrol functionality whose RF command ID is genuinely unknown. |
 | V61 | Medium | `src/velux/` | `parse_rain_sensor_status()` looked for command 0x58 with a DRY/RAIN/ERROR byte, so it never matched anything and claimed to observe a "dry" state nothing reports. It now detects what is actually observable: an Execute whose originator is the rain sensor. `create_emergency_close_frame()` built a *rain* close - Originator SENSOR_RAIN - under a name that said otherwise; the two are now separate functions with the right originator each. `detect_model()` derived specific product numbers (GGL_ELECTRIC, FML) from a node type that cannot distinguish them; it is `detect_category()` now. |
 | V62 | **High** | `IoHomeControl` 2W pairing (K9) | `pair_device_2w` fired a lone 0x32 key transfer masked against a challenge it generated itself - a nonce the device had never seen - so no real device could unmask the key. It now runs the documented push: 0x31 ask-challenge out, the device's 0x3C challenge in, then the 0x32 masked against *that* nonce, then the device's 0x33 ack. A `KeyReceivedCallback` plus `set_accept_pairing()` add the missing follower side: an incoming 0x31 is answered with a fresh challenge, the 0x32 is unmasked with `AuthenticationManager::recover_2w_key()`, adopted via `set_system_key()`, and acknowledged. A two-instance host test drives the whole exchange and asserts the recovered key equals the pushed key; a mutation that reinstates the self-generated challenge fails it. |
+| V63 | Medium | `IoHomeControl` | Two 2W gaps closed. **Pull**: `pull_device_key_2w()` collects a device's existing key - 0x38 launch out, the device's 0x32 back, unmasked against the challenge the 0x38 carried - and surfaces it via the key-received callback without adopting it (it is the peer's key). The follower side answers a 0x38 with its own key. **Framing**: the library now applies the UART start/stop framing on transmit and strips it on receive, the same step the ESPHome component already had - so the Arduino path is on-air-correct too. The RadioLib mock models the framed air; a two-instance pull test and the framed sniffer/fuzz paths cover it. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -188,7 +189,7 @@ model. Summary of what remains, by design of the protocol:
 | Receive path | ✅ Complete | Interrupt driven, CRC → MAC → replay, with statistics |
 | Frequency hopping | ✅ Complete | Microsecond timing |
 | Device discovery | ✅ Complete | Collects multiple devices, honours its timeout |
-| Device pairing | ✅ 1W + 2W | 2W push runs the full 0x31/0x3C/0x32/0x33 exchange, host-tested end to end; not yet tried against hardware (K1) |
+| Device pairing | ✅ 1W + 2W | 2W push (0x31/0x3C/0x32/0x33) and pull (0x38/0x32) both run end to end, host-tested; not yet tried against hardware (K1) |
 | Beacon handling | ✅ Complete | |
 | Rolling code persistence | ✅ Complete | Block-reserved NVS writes |
 | Memory management | ✅ Complete | Destructor, `nothrow`, non-copyable |
@@ -224,7 +225,7 @@ model. Summary of what remains, by design of the protocol:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ✅ 218 tests | 8 suites, ASan + UBSan by default |
+| Unit tests | ✅ 219 tests | 8 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
 | Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
 | Mutation checks | ✅ Complete | Eight deliberate regressions - inverted mode bit, wrong size bias, dropped ACEI check, disabled replay guard, always-true MAC comparison, constant-seeded RNG, ignored log level, log message used as its own format string - are each caught by the suite |

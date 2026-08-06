@@ -85,6 +85,7 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
   memset(system_key_, 0, AES_KEY_SIZE);
   memset(pairing_peer_, 0, NODE_ID_SIZE);
   memset(pairing_key_, 0, AES_KEY_SIZE);
+  memset(pairing_challenge_, 0, HMAC_SIZE);
 }
 
 IoHomeControl::~IoHomeControl() {
@@ -374,19 +375,19 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
   g_packet_flag = false;
 
   const size_t len = radio_->getPacketLength();
-  uint8_t buffer[FRAME_MAX_SIZE];
+  uint8_t wire[RX_CAPTURE_SIZE];
 
-  if (len == 0 || len > sizeof(buffer)) {
+  if (len == 0 || len > sizeof(wire)) {
     // Nothing usable; hand the radio back to receive mode.
     radio_->startReceive();
-    if (len > sizeof(buffer)) {
+    if (len > sizeof(wire)) {
       rx_stats_.malformed++;
       last_reject_ = RxReject::MALFORMED;
     }
     return false;
   }
 
-  const int16_t state = radio_->readData(buffer, len);
+  const int16_t state = radio_->readData(wire, len);
 
   // Capture the link metrics before restarting reception.
   const int16_t rssi_val = radio_->getRSSI();
@@ -403,14 +404,26 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
 
   rx_stats_.received++;
 
-  // Hand the raw bytes to the sniffer before the protocol layer forms an
-  // opinion about them - a frame that fails validation is often the one worth
-  // seeing.
+  // Hand the raw on-air bytes to the sniffer before anything is stripped or
+  // interpreted - a frame that fails validation is often the one worth seeing,
+  // and a sniffer wants the bytes exactly as the radio delivered them, framing
+  // and all.
   if (raw_frame_callback_ != nullptr) {
-    raw_frame_callback_(buffer, len, rssi_val, snr_val, raw_frame_context_);
+    raw_frame_callback_(wire, len, rssi_val, snr_val, raw_frame_context_);
   }
 
-  if (!frame::parse_frame(buffer, len, frame)) {
+  // Strip the UART start/stop framing to get the frame itself. Without this the
+  // "control byte" is really a start bit and part of ctrl0, the declared length
+  // runs 10/8 long, and the CRC never checks out.
+  uint8_t buffer[FRAME_MAX_SIZE];
+  const size_t frame_len = phy::uart_decode_frame(wire, len, buffer, sizeof(buffer));
+  if (frame_len == 0) {
+    rx_stats_.malformed++;
+    last_reject_ = RxReject::MALFORMED;
+    return false;
+  }
+
+  if (!frame::parse_frame(buffer, frame_len, frame)) {
     rx_stats_.malformed++;
     last_reject_ = RxReject::MALFORMED;
     return false;
@@ -740,25 +753,39 @@ bool IoHomeControl::transmit_frame(const frame::IoFrame* frame) {
     LOG_DEBUG("Transmitting %u bytes: %s", static_cast<unsigned>(len), hex);
   }
 
+  // Wrap the frame in the on-air UART framing every io-homecontrol node
+  // expects: each byte becomes a start bit, its eight data bits
+  // least-significant first, and a stop bit. A plain FSK radio does not add
+  // this, so it has to be done here; a device reading our un-framed bytes would
+  // see a garbage length and a failing CRC and drop the frame. See
+  // protocol/iohome_phy_framing.h.
+  uint8_t wire[RX_CAPTURE_SIZE];
+  const size_t wire_len = phy::uart_encode(buffer, len, wire, sizeof(wire));
+  if (wire_len == 0) {
+    LOG_ERROR("uart_encode failed");
+    return false;
+  }
+
   const bool was_receiving = receiving_;
   if (was_receiving) {
     stop_receive();
   }
 
   // In fixed-length FSK mode the radio sends exactly the programmed number of
-  // bytes, so narrow it to this frame and widen it again for reception.
+  // bytes, so narrow it to this frame's wire length and widen it again for
+  // reception.
   if (packet_length_callback_ != nullptr) {
     const int16_t length_state =
-      packet_length_callback_(static_cast<uint8_t>(len), packet_length_context_);
+      packet_length_callback_(static_cast<uint8_t>(wire_len), packet_length_context_);
     if (length_state != RADIOLIB_ERR_NONE) {
       LOG_WARN("packet length hook failed (%d)", length_state);
     }
   }
 
-  const int16_t state = radio_->transmit(buffer, len);
+  const int16_t state = radio_->transmit(wire, wire_len);
 
   if (packet_length_callback_ != nullptr) {
-    packet_length_callback_(FRAME_MAX_SIZE, packet_length_context_);
+    packet_length_callback_(RX_CAPTURE_SIZE, packet_length_context_);
   }
 
   if (was_receiving) {
@@ -1037,6 +1064,46 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
   return true;
 }
 
+bool IoHomeControl::pull_device_key_2w(const uint8_t dest_node[NODE_ID_SIZE]) {
+  if (dest_node == nullptr) {
+    LOG_ERROR("Invalid parameters (nullptr)");
+    return false;
+  }
+  if (auth_manager_ == nullptr || discovery_manager_ == nullptr) {
+    LOG_ERROR("2W components not initialized");
+    return false;
+  }
+
+  // The 0x38 carries a challenge the device masks its key against. We keep it to
+  // unmask the 0x32 that comes back.
+  if (!crypto::random_bytes(pairing_challenge_, HMAC_SIZE)) {
+    LOG_ERROR("no secure random source for the pull challenge");
+    return false;
+  }
+
+  LOG_INFO("Pulling device key (2W): launching key transfer");
+
+  frame::IoFrame launch;
+  frame::init_frame(&launch, false);  // 2W
+  frame::set_destination(&launch, dest_node);
+  frame::set_source(&launch, own_node_id_);
+  if (!frame::set_command(&launch, CMD_LAUNCH_KEY_TRANSFER, pairing_challenge_, HMAC_SIZE) ||
+      !frame::finalize_frame_plain(&launch)) {
+    LOG_ERROR("Failed to build the launch-key-transfer frame");
+    return false;
+  }
+
+  memcpy(pairing_peer_, dest_node, NODE_ID_SIZE);
+  pairing_state_ = Pairing2W::PULL_WAIT_KEY;
+
+  if (!transmit_frame(&launch)) {
+    pairing_state_ = Pairing2W::IDLE;
+    crypto::secure_zero(pairing_challenge_, sizeof(pairing_challenge_));
+    return false;
+  }
+  return true;
+}
+
 bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
   // Addressed to us (or broadcast), and a command that belongs to a pairing
   // exchange this node is currently part of. 0x3C and 0x33 are only diverted
@@ -1048,10 +1115,11 @@ bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
     return false;
   }
   switch (frame->command_id) {
-    case CMD_ASK_CHALLENGE:  // 0x31
+    case CMD_ASK_CHALLENGE:      // 0x31 - a controller asking us to be pushed to
+    case CMD_LAUNCH_KEY_TRANSFER:  // 0x38 - a controller pulling our key
       return accept_pairing_;
-    case CMD_KEY_TRANSFER:   // 0x32
-      return accept_pairing_;
+    case CMD_KEY_TRANSFER:   // 0x32 - pushed to us, or pulled by us
+      return accept_pairing_ || pairing_state_ == Pairing2W::PULL_WAIT_KEY;
     case CMD_CHALLENGE_REQUEST:  // 0x3C
       return pairing_state_ == Pairing2W::PUSH_WAIT_CHALLENGE;
     case CMD_KEY_TRANSFER_ACK:   // 0x33
@@ -1099,8 +1167,59 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     return;
   }
 
-  // ---- Follower (device accepting a pushed key) --------------------------
+  // ---- Collector (controller pulling a device's key) ---------------------
+  if (pairing_state_ == Pairing2W::PULL_WAIT_KEY &&
+      frame->command_id == CMD_KEY_TRANSFER && from_peer) {
+    // The device masked its key against the 0x38 we sent - its command byte
+    // followed by the challenge - and that same challenge.
+    uint8_t request[1 + HMAC_SIZE] = {CMD_LAUNCH_KEY_TRANSFER};
+    memcpy(&request[1], pairing_challenge_, HMAC_SIZE);
+
+    uint8_t recovered[AES_KEY_SIZE];
+    const bool ok = frame->data_len >= AES_KEY_SIZE &&
+                    crypto::decrypt_2w_key(frame->data, request, sizeof(request),
+                                           pairing_challenge_, recovered);
+    pairing_state_ = Pairing2W::IDLE;
+    crypto::secure_zero(pairing_challenge_, sizeof(pairing_challenge_));
+
+    if (!ok) {
+      LOG_WARN("Pull: could not recover the device's key");
+      return;
+    }
+    // Not adopted: this is the device's key, surfaced for per-device storage.
+    LOG_INFO("Pull: recovered a device key");
+    if (key_received_callback_ != nullptr) {
+      key_received_callback_(recovered, frame->src_node, key_received_context_);
+    }
+    crypto::secure_zero(recovered, sizeof(recovered));
+    return;
+  }
+
+  // ---- Follower (device accepting a pushed key, or answering a pull) ------
   if (!accept_pairing_) {
+    return;
+  }
+
+  if (frame->command_id == CMD_LAUNCH_KEY_TRANSFER) {
+    // A controller wants our key. Mask it against the challenge the 0x38 carried
+    // and reply with a 0x32. The controller unmasks it with the same challenge.
+    if (frame->data_len < HMAC_SIZE) {
+      LOG_WARN("Pull request without a challenge");
+      return;
+    }
+    uint8_t request[1 + HMAC_SIZE] = {CMD_LAUNCH_KEY_TRANSFER};
+    memcpy(&request[1], frame->data, HMAC_SIZE);
+
+    frame::IoFrame kt;
+    const bool built = discovery_manager_->create_key_transfer_2w(
+      &kt, frame->src_node, own_node_id_, system_key_, frame->data,
+      request, sizeof(request));
+    if (built) {
+      LOG_INFO("Pull: sending our key");
+      transmit_frame(&kt);
+    } else {
+      LOG_ERROR("Pull: failed to build key transfer");
+    }
     return;
   }
 

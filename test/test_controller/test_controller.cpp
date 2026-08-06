@@ -219,6 +219,26 @@ void test_position_mapping(void) {
   TEST_ASSERT_EQUAL_HEX16(0x6400, main_param);
 }
 
+void test_ventilate_sends_secured_ventilation(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+
+  // The window opener secured-ventilation alias, 0xD803. Confirmed against the
+  // KLF 200 spec and rspaargaren/iohomecontrol's Vent button.
+  TEST_ASSERT_TRUE(controller.ventilate(PEER_NODE));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, radio.last_transmission[8]);
+  const uint16_t mp = static_cast<uint16_t>(
+      (static_cast<uint16_t>(radio.last_transmission[11]) << 8) | radio.last_transmission[12]);
+  TEST_ASSERT_EQUAL_HEX16(0xD803, mp);
+
+  // Force preset: the observed 0x6400, wire-identical to a 50% position.
+  TEST_ASSERT_TRUE(controller.force(PEER_NODE));
+  const uint16_t fmp = static_cast<uint16_t>(
+      (static_cast<uint16_t>(radio.last_transmission[11]) << 8) | radio.last_transmission[12]);
+  TEST_ASSERT_EQUAL_HEX16(0x6400, fmp);
+}
+
 void test_rejects_invalid_acei(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
@@ -229,6 +249,32 @@ void test_rejects_invalid_acei(void) {
 
   controller.close(PEER_NODE);
   TEST_ASSERT_EQUAL_HEX8(0x43, radio.last_transmission[10]);
+}
+
+void test_set_priority_selects_the_acei_level(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+
+  // set_priority touches only the level bits (7-5), leaving IsValid set. From
+  // the 0x61 default, selecting USER_LEVEL_1 (level 2, "High" - the level
+  // rspaargaren/iohomecontrol's remote runs at) gives 0x41.
+  controller.set_priority(iohome::PriorityLevel::USER_LEVEL_1);
+  controller.close(PEER_NODE);
+  TEST_ASSERT_EQUAL_HEX8(0x41, radio.last_transmission[10]);
+
+  // Back to the default USER_LEVEL_2 (level 3) = 0x61.
+  controller.set_priority(iohome::PriorityLevel::USER_LEVEL_2);
+  controller.close(PEER_NODE);
+  TEST_ASSERT_EQUAL_HEX8(0x61, radio.last_transmission[10]);
+
+  // set_priority preserves the other ACEI bits: after set_acei(0x43) (which
+  // also sets Extended Info = 1), selecting USER_LEVEL_2 keeps that bit and
+  // only lifts the level, giving 0x63 rather than a reset-to-default 0x61.
+  TEST_ASSERT_TRUE(controller.set_acei(0x43));
+  controller.set_priority(iohome::PriorityLevel::USER_LEVEL_2);
+  controller.close(PEER_NODE);
+  TEST_ASSERT_EQUAL_HEX8(0x63, radio.last_transmission[10]);
 }
 
 void test_send_command_rejects_nullptr(void) {
@@ -1195,7 +1241,9 @@ int main(int, char**) {
   RUN_TEST(test_execute_frame_shape);
   RUN_TEST(test_execute_with_extra_functional_params);
   RUN_TEST(test_position_mapping);
+  RUN_TEST(test_ventilate_sends_secured_ventilation);
   RUN_TEST(test_rejects_invalid_acei);
+  RUN_TEST(test_set_priority_selects_the_acei_level);
   RUN_TEST(test_send_command_rejects_nullptr);
   RUN_TEST(test_2w_requires_handshake);
   RUN_TEST(test_2w_commands_work_after_handshake);

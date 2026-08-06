@@ -345,6 +345,25 @@ public:
   bool stop(const uint8_t dest_node[NODE_ID_SIZE]);
 
   /**
+   * @brief Move a window to its secured ventilation position
+   *
+   * The window opens far enough to air the room while staying locked. This is
+   * the "airing" position a Velux roof window (including the solar GGL/GGU
+   * models) offers - Main Parameter 0xD803, the window opener actuator profile's
+   * secured-ventilation alias. Sending it to a product that is not a window
+   * opener has no defined meaning.
+   */
+  bool ventilate(const uint8_t dest_node[NODE_ID_SIZE]);
+
+  /**
+   * @brief Send a Velux remote's "force" preset (Main Parameter 0x6400)
+   *
+   * A fixed preset a real Velux remote's dedicated button sends. Observed on
+   * air rather than derived from the specification - see MP_FORCE.
+   */
+  bool force(const uint8_t dest_node[NODE_ID_SIZE]);
+
+  /**
    * @brief Set the command originator reported in execute frames
    */
   void set_originator(Originator originator) { originator_ = originator; }
@@ -355,6 +374,27 @@ public:
    * @return false if bit 0 (IsValid) is clear; actuators would reject the frame
    */
   bool set_acei(uint8_t acei);
+
+  /**
+   * @brief Set the ACEI priority level, keeping the rest of the byte intact
+   *
+   * Only the priority level (bits 7-5) changes - the field that decides whether
+   * a command outranks another. Priority service, extended info and the IsValid
+   * bit are left as they were, so this composes with set_acei().
+   *
+   * Real remotes differ here and both are valid: our own capture and the KLF 200
+   * default sit at USER_LEVEL_2 (level 3, "Default"), while the remote
+   * rspaargaren/iohomecontrol emulates runs one step up at USER_LEVEL_1
+   * (level 2, "High") - the level in the ACEI 0x43 that docs/commands.md records
+   * from a real frame. This is the clean way to match that level. Note that
+   * rspaargaren's exact 0x43 also carries Extended Info = 1, which is not part of
+   * the priority; to reproduce the byte verbatim use set_acei(0x43) instead.
+   */
+  void set_priority(PriorityLevel level) {
+    acei_ = static_cast<uint8_t>(
+        (acei_ & ~ACEI_LEVEL_MASK) |
+        ((static_cast<uint8_t>(level) << ACEI_LEVEL_SHIFT) & ACEI_LEVEL_MASK));
+  }
 
   /**
    * @brief Get current RSSI, or 0 if no radio is attached

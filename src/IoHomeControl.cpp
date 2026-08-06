@@ -718,6 +718,16 @@ bool IoHomeControl::stop(const uint8_t dest_node[NODE_ID_SIZE]) {
   return send_execute(dest_node, MP_STOP);
 }
 
+bool IoHomeControl::ventilate(const uint8_t dest_node[NODE_ID_SIZE]) {
+  LOG_INFO("Secured ventilation");
+  return send_execute(dest_node, MP_SECURED_VENTILATION);
+}
+
+bool IoHomeControl::force(const uint8_t dest_node[NODE_ID_SIZE]) {
+  LOG_INFO("Force preset");
+  return send_execute(dest_node, MP_FORCE);
+}
+
 int16_t IoHomeControl::get_rssi() {
   return (radio_ != nullptr) ? radio_->getRSSI() : 0;
 }

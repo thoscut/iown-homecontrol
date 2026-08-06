@@ -73,60 +73,109 @@ if (rain == RainSensorStatus::RAIN) {  // an Execute a rain sensor originated
 
 ### ESPHome Configuration
 
+A complete, CI-compiled example lives in
+[`esphome/example-velux.yaml`](../../esphome/example-velux.yaml): a solar roof
+window and a roller shutter, plus buttons for the ventilation and force presets.
+The essentials:
+
 ```yaml
 external_components:
   - source:
-      type: git
-      url: https://github.com/velocet/iown-homecontrol
-    components: [iohomecontrol]
+      type: local
+      path: components
 
-iohomecontrol:
-  cs_pin: GPIO18
-  irq_pin: GPIO26
-  rst_pin: GPIO14
-  node_id: "0xABCDEF"
-  system_key: "your_key_here"
+iown_homecontrol:
+  id: iohc_hub
+  cs_pin: 18
+  rst_pin: 14
+  dio0_pin: 26
+  dio1_pin: 33
+  source_address: 0x1A380B
+  acei: 0x61            # command priority - see "Command priority" below
+  originator: USER
+  # system_key: !secret iohc_system_key   # required to drive paired actuators
 
 cover:
-  # Velux roof window with rain sensor
-  - platform: iohomecontrol
-    name: "Dachfenster Schlafzimmer"
-    node_id: "0x646575"
-    device_type: window_opener
-    velux_model: GGL_ELECTRIC
-    supports_rain_sensor: true
-    rain_protection: true  # Auto-close on rain
+  # A solar roof window (GGL/GGU Solar). Open / close / set-position through the
+  # standard cover controls.
+  - platform: iown_homecontrol
+    name: "Roof Window"
+    target_address: 0x646575
 
-  # Velux blackout blind
-  - platform: iohomecontrol
-    name: "Verdunkelungsrollo"
-    node_id: "0x111111"
-    device_type: roller_shutter
-    velux_model: DML
+  # A roller shutter (SML). No tilt - it is open or closed.
+  - platform: iown_homecontrol
+    name: "Roller Shutter"
+    target_address: 0x111111
 
-# Ventilation buttons
+# The window's own airing position is a preset, not a percentage, so it is a
+# button. id(iohc_hub) expands to the hub; ventilate() sends Main Parameter
+# 0xD803 to the actuator's address.
 button:
   - platform: template
-    name: "Lüftungsstellung 1"
+    name: "Roof Window Ventilation"
     on_press:
-      - cover.control:
-          id: bedroom_window
-          position: 10%
-
-  - platform: template
-    name: "Lüftungsstellung 2"
-    on_press:
-      - cover.control:
-          id: bedroom_window
-          position: 20%
-
-  - platform: template
-    name: "Lüftungsstellung 3"
-    on_press:
-      - cover.control:
-          id: bedroom_window
-          position: 30%
+      - lambda: 'id(iohc_hub).ventilate(0x646575);'
 ```
+
+Note the real config keys: the hub platform is `iown_homecontrol`, covers take a
+`target_address`, and there is no `velux_model`/`device_type`/`supports_rain_sensor`
+key - the product's behaviour comes from the actuator, not the gateway. The
+`velux_model` enum in the C++ library is a hint the caller supplies, not
+something the wire reports (see "A node's product model is not on the wire" in
+[`docs/VELUX-FORMAT.md`](../../docs/VELUX-FORMAT.md)).
+
+## Commands and Main Parameters
+
+There is no per-action command ID for a Velux actuator. Everything - open,
+close, stop, a position, the airing preset - is the one **Execute** command
+(`0x00`) carrying a 16-bit **Main Parameter** that says *what* to do. The six
+invented `0x58`-`0x5D` "Velux commands" never existed; see
+[`docs/VELUX-FORMAT.md`](../../docs/VELUX-FORMAT.md).
+
+| Action | Main Parameter | Library call | Notes |
+| ------ | -------------- | ------------ | ----- |
+| Open (fully) | `0x0000` | `open()` | `0x0000` is open/min - the relative scale counts *closure* |
+| Close (fully) | `0xC800` | `close()` | `0xC800` = 51200 = 100 % closed, **not** `0xFFFF` |
+| Stop | `0xD200` | `stop()` | "Current position" access method - hold where you are |
+| Position | `percent × 0x0200` | `set_position(percent_open)` | Linear 0 %..100 % over `0x0000`..`0xC800`; e.g. 50 % → `0x6400` |
+| Secured ventilation | `0xD803` | `ventilate()` | The window-opener airing position (locked, part-open). §14.2.1 alias; rspaargaren's Vent button sends the same value |
+| Force preset | `0x6400` | `force()` | Observed on air from a real remote's dedicated button (rspaargaren "ForceOpen"). Wire-identical to a 50 % position, but a fixed preset rather than a percentage - marked observed, not spec-derived |
+
+The Main Parameter range is documented once in
+[`src/protocol/iohome_constants.h`](../protocol/iohome_constants.h) (`MP_OPEN`,
+`MP_CLOSE`, `MP_STOP`, `MP_SECURED_VENTILATION`, `MP_FORCE`, and
+`mp_from_percent_closed()`), and the ESPHome copy mirrors them as
+`IOHC_PARAM_*`. A roller shutter uses exactly the same commands - it is a cover
+that goes up and down, so open/close/position/stop are the whole vocabulary.
+Slat tilt (for the blinds that have it) is the only extra: it rides in
+Functional Parameter 1 while the Main Parameter holds "current position", so the
+slats turn without the cover moving.
+
+## Command priority (ACEI)
+
+Every Execute frame carries an **ACEI** byte. Its top three bits (7-5) are the
+*priority level* - the field that decides which command wins when two arrive for
+the same actuator - and bit 0 (**IsValid**) must be set or the actuator
+silently discards the frame.
+
+| ACEI | Level | Meaning | Who sends it |
+| ---- | ----- | ------- | ------------ |
+| `0x61` | 3 | User Level 2 - "Default" | Our own captured remote, and the KLF 200 gateway. The safe default. |
+| `0x43` | 2 | User Level 1 - "High" | The remote `rspaargaren/iohomecontrol` emulates. Recorded from a real frame in [`docs/commands.md`](../../docs/commands.md). Also carries Extended Info = 1. |
+
+Both are valid remotes; a higher level only matters when something else is
+contending for the actuator (a High-priority sensor overriding your commands, or
+your gateway needing to override an automatic controller). The lower the level
+number, the higher the priority - Protection levels 0-1 sit above every user
+command, which is how a rain sensor's close outranks a user's "stay open".
+
+Set it once on the hub:
+
+- **ESPHome** - `acei: 0x61` (or `0x43`) in the `iown_homecontrol:` block. The
+  component rejects any value with bit 0 clear.
+- **C++** - `controller.set_acei(0x43)` for the exact byte, or
+  `controller.set_priority(PriorityLevel::USER_LEVEL_1)` to change only the
+  level and leave the rest of the byte intact.
 
 ## Supported Velux Models
 
@@ -449,9 +498,10 @@ For Velux-specific features and improvements:
 ## References
 
 - Velux Product Documentation: https://www.velux.com
-- io-homecontrol Protocol: ../docs/linklayer.md
-- Device Database: ../docs/devices/velux/
-- Example Configuration: ../../examples/esphome-velux-dachfenster.yaml
+- io-homecontrol Protocol: ../../docs/linklayer.md
+- Device Database: ../../docs/devices/velux/
+- Reading the format without a dump: ../../docs/VELUX-FORMAT.md
+- Example Configuration: ../../esphome/example-velux.yaml
 
 ## License
 

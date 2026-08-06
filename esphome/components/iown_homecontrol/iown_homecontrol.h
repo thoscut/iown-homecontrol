@@ -81,6 +81,11 @@ static const uint16_t IOHC_PARAM_OPEN = 0x0000;   // Min / fully open
 static const uint16_t IOHC_PARAM_CLOSE = 0xC800;  // Max / fully closed
 static const uint16_t IOHC_PARAM_STOP = 0xD200;   // Current position
 static const uint16_t IOHC_PARAM_PERCENT_MAX = 0xC800;
+// Secured ventilation, the window opener "airing" position (KLF 200 §14.2.1,
+// alias 0xD803; also what rspaargaren/iohomecontrol sends for Vent).
+static const uint16_t IOHC_PARAM_VENT = 0xD803;
+// The observed "force" preset a Velux remote's dedicated button sends.
+static const uint16_t IOHC_PARAM_FORCE = 0x6400;
 
 /// Default ACEI byte: user priority level 2, IsValid set.
 ///
@@ -229,6 +234,17 @@ class IOWNHomeControlComponent : public Component {
   /** Send a cover control command (command 0x00 with a main parameter). */
   bool send_cover_command(uint32_t target_address, uint8_t command, uint16_t main_param,
                           uint8_t fp1 = 0x00, uint8_t fp2 = 0x00);
+
+  /** Move a window to its secured ventilation position (Main Parameter 0xD803).
+   *  For window openers (including the solar GGL/GGU); see IOHC_PARAM_VENT. */
+  bool ventilate(uint32_t target_address) {
+    return this->send_cover_command(target_address, IOHC_CMD_EXECUTE, IOHC_PARAM_VENT);
+  }
+
+  /** Send a Velux remote's observed "force" preset (Main Parameter 0x6400). */
+  bool force(uint32_t target_address) {
+    return this->send_cover_command(target_address, IOHC_CMD_EXECUTE, IOHC_PARAM_FORCE);
+  }
 
   /** Convert a percentage of closure (0-100) to a main parameter value. */
   static uint16_t main_param_from_percent_closed(uint8_t percent_closed);

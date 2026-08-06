@@ -194,14 +194,15 @@ and needs the system key.
 37 C0 90 04 01 7E 51 D2 F4 8F 00 50 14 34 01 00 40 10 05 41 78 4D 93 8D 9D 44 D9 B2 D5 2F 1A CE 87 5E ED 5A 89 60 3D 6F 56 C2 75 A2 B5 5D D7 A2
 37 C0 10 04 01 7E 51 D2 F4 8F 00 50 14 34 97 00 40 10 05 41 14 54 94 34 25 35 D2 F7 7D EB 2D 45 11 1B B3 C8 A8 6A 08 1D AC 34 DE 13 AD 32 5C 42
 37 C0 90 04 01 7E 51 D2 F4 8F 00 50 14 34 27 00 40 10 05 41 34 4D 34 74 47 34 43 D6 2D 57 1A 49 3A 69 6F 19 03 0A 86 2F A9 92 11 8C FD D2 6E A0
-# 2W pairing (remote-to-remote copy), ctrl0 0x1F = 2W; ~24-byte constant block = masked key
+# NOT 2W pairing - this de-frames to a 1W 0x30 key transfer (ctrl0 0xFC, 1W bit
+# set). The raw 0x1F is the first framed byte, not a control byte. See §0/§5.
 1F C0 10 05 01 7E 46 94 AD 31 06 53 70 F4 0B 47 DB 15 0D 83 16 5F 71 A5 F5 56 5B D6 0C 3D 5A 50 14 04 41 2C D3 95 8C FB A8 80 DF 0C 6E 8F 95 97 C5 77 DB C6 33 CC 13 4E 84 15
 # 1W frames, other types
 47 C0 10 04 01 7E 46 94 AD 31 4E 40 11 05 33 20 D5 92 54 9B 5D 4A F2 9D 61 82 0B 1F D7 4F C3 A3 63 70 A8 32 DF E5 C3 7E FB 62 55 B7 90
 69 40 16 4D 3D 5B 4F D7 3C EF 60 58 10 04 01 25 C8 F5 50 16 6D 6B 4D 64 96 60 39 65 5E A2 F7 69 E3 F5 5A BF
 ```
 
-## 5. Key recovery from captures — still open, for different reasons than §5 said
+## 5. Key recovery from captures — still open, for different reasons than first thought
 
 > **Partly superseded by §0.** A 1W key transfer (0x30) *does* appear in the
 > capture — the search here missed it because it ran on the framed bytes, where
@@ -218,14 +219,43 @@ and needs the system key.
   `linklayer.md` vector but not this installation's command MACs (brute-forced
   over all 2²⁴ mask addresses, none match), so the OEM masking likely differs or
   the transferred key is not the command key.
-- **2W key transfer (0x32)** — the `1F C0` pairing frames are 2W and carry a
-  masked block. With the framing understood these can be re-examined, but the 2W
-  mask IV still depends on the requesting frame, so there is still no offline
-  anchor to check a recovered key against.
+- **2W key transfer (0x32)** — **there is none in the capture.** The `1F C0`
+  frame this was based on is not a 2W key transfer at all: de-framed it is the
+  same 1W `0x30` above (its control byte is `0xFC`, the 1W bit set, command
+  `0x30`). `0x1F` was a framing artifact of its first byte. A full scan of the
+  de-framed captures finds no `0x31`, `0x32`, `0x38` or `0x3C` — no 2W key
+  transfer and no challenge request was recorded. So there is nothing here to
+  crack a 2W key from, which is a stronger statement than "no anchor": the frame
+  was never captured.
 
 The system key is therefore still not *confirmed* from sniffing. Hardware
 extraction (§6) remains the reliable route; the 0x30 de-masked candidate is worth
 checking against later authenticated traffic before trusting it.
+
+### The 2W traffic that *was* captured
+
+De-framed, the 2W frames are a controller `7E E7 EE` (a box/gateway) talking to
+three actuators — `D5 E0 35`, `84 43 77`, `93 79 6D`:
+
+| Command | Direction | Body |
+| ------- | --------- | ---- |
+| `0x3D` challenge response | box → actuator | 6-byte nonce + CRC |
+| `0x03` private command    | box → actuator | `03 00 00` + CRC |
+| `0x04` private answer      | actuator → box | `05 …` (0x05 = OK) + status + CRC |
+
+These are ordinary 2W session frames, and they decode cleanly now — the point
+being that the "2W" side is not a different format either. What is *missing* from
+the capture is the session set-up: no `0x3C`/`0x31` challenge request precedes the
+`0x3D` responses in these recordings, so the exchange cannot be replayed or its
+MACs checked offline without the system key. A capture that includes the
+challenge request would let the 2W handshake be followed end to end.
+
+> **For the component:** the 2W handshake it speaks (`0x3C` out, `0x3D` in;
+> commands signed against the session nonce) now goes over the air correctly for
+> the first time, because `send_frame()` applies the UART framing and
+> `receive_frame_()` strips it — the same fix as for 1W. Before, the component's
+> 2W frames were transmitted un-framed and no real device could have decoded them.
+> The 0x3D challenge-response frame is one of the codec's round-trip test vectors.
 
 ## 6. Hardware key-extraction plan (the way forward)
 
@@ -258,32 +288,33 @@ readback is blocked and unlocking mass-erases the key. Then only fault-injection
 check tells us immediately per device.
 
 ## 7. Open questions for a follow-up session
-- **Standard vs. extended format — the central contradiction.** The repo model
-  (`scripts/io-homecontrol.ksy`, `docs/VELUX-FORMAT.md`, the C++) assumes a
-  standard frame ≤34 bytes with a KERMIT CRC. These captures are 48 bytes and
-  validate no CRC under exhaustive testing (§2, §3), yet the demod is provably
-  good (the doc reference frames validate; the sync word is confirmed on air).
-  Either these specific BG-RC011-02 remotes use a proprietary extension, or there
-  is a demod subtlety not yet seen. **Confirmed across both a window-opener remote
-  and a roller-shutter remote** (source `7E 5A 11`, session E) — the whole
-  installation uses this 48-byte format, so it is not one odd device. Full raw
-  captures are in [`captures/`](captures/) so this can be re-examined with fresh
-  eyes. Resolving it is the prerequisite for everything downstream.
-- **Related work — a working project with the *same crypto* but the *standard*
-  format.** `github.com/rspaargaren/iohomecontrol` (ESP32, raw SX1276) controls
-  Velux devices and shares this repo's crypto exactly: transfer key
-  `34c3466e…4373`, the same CRC-16/KERMIT (`radioPacketComputeCrc`), the same 1W
-  HMAC and `encrypt_1W_key`, radio at 38.4 kbps / 19.2 kHz dev. But its
-  `MAX_FRAME_LEN` is 32 and its frames validate — i.e. **its devices use the
-  standard format these captures do not.** Its method is the target end state:
-  the ESP generates its own 1W key and pairs *itself* to the actuator with a `0x30`
-  send, then drives it with `open`/`close`/`stop` while managing sequence numbers
-  in NVS to avoid the desync PR #1 describes. Worth asking that author whether the
-  48-byte format here is a Velux generation they recognise.
-- Is either target's debug interface actually locked? (needs a debugger + probe)
-- From a flash dump: locate the 16-byte key and reverse `construct_iv` / MAC for
-  the Velux-extended format (idx20-47), then verify by reproducing a captured
-  frame's MAC.
-- Does `handle_1w_key_transfer_`-style logic need a 2W receive counterpart once the
-  format is known? (see `docs/linklayer.md` 2W push/pull; repo has builders but no
-  receiver that stores a key.)
+
+The "central contradiction" that used to head this list — standard format vs. a
+48-byte extension — is **resolved** (§0): the format is standard, the 48 bytes
+were the UART framing. That answers, in passing, why
+`github.com/rspaargaren/iohomecontrol` sees standard 32-byte frames with the
+identical crypto (same transfer key, CRC-16/KERMIT, 1W HMAC and `encrypt_1w_key`,
+same radio) while these captures did not: its maintained CC1101 path de-frames
+the ten-bit cells (`decodeFrame`, the `*8 + *2` length maths) and this component
+did not. The window-opener and roller-shutter remotes agree because the whole
+installation is simply standard io-homecontrol.
+
+What is genuinely still open:
+
+- **The system key.** Not recoverable from these captures. The one `0x30` 1W key
+  transfer carries no MAC to confirm a de-mask, and the documented address-mask
+  does not reproduce the installation's command MACs (§5). No `0x32` 2W transfer
+  was captured at all. Hardware extraction (§6) remains the route, or a fresh
+  capture of a pairing that includes the key transfer *to a device whose address
+  is known*, so the de-mask can be checked.
+- **The 2W handshake, end to end.** The capture has `0x3D` challenge responses and
+  `0x03`/`0x04` private exchanges but no preceding `0x3C`/`0x31` challenge request
+  (§5). A capture that includes the request would let the session set-up be
+  followed and its MACs checked once a key is in hand.
+- **FP1 (tilt) direction.** `VELUX-FORMAT.md` settles the Main Parameter direction
+  from the KLF 200 spec but not the sign of Functional Parameter 1 on a tilting
+  blind. Still needs a capture of a known tilt command.
+- **Is either key-holding device's debug interface locked?** (§6; needs a probe.)
+- **A 2W key-receive counterpart.** The library has 2W key-transfer *builders* but
+  no receiver that stores a delivered key. `handle_1w_key_transfer_` is the 1W
+  equivalent; a 2W one (from a `0x32`) would complete the pairing-as-follower path.

@@ -279,10 +279,16 @@ void test_key_transfer_frames_are_valid(void) {
     TEST_ASSERT_EQUAL_UINT8(20, frame.data_len);
     TEST_ASSERT_TRUE(iohome::frame::validate_frame(&frame));
 
-    // The transported key must round-trip through the documented masking.
+    // The key is masked with the *source* (the key owner), so the receiver
+    // unmasks with the frame's source address - not the destination.
     uint8_t recovered[16];
-    TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(frame.data, dest, recovered));
+    TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(frame.data, node, recovered));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(key, recovered, 16);
+    // Masking with the destination is the bug this pins: it would not round-trip
+    // for a real receiver, which only knows the source.
+    uint8_t wrong_addr[16];
+    TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(frame.data, dest, wrong_addr));
+    TEST_ASSERT_FALSE(memcmp(key, wrong_addr, 16) == 0);
 
     // The key mask depends on the frame that requested the transfer, so the
     // same frame has to be handed to both directions.

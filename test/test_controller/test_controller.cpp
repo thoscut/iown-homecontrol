@@ -1057,9 +1057,12 @@ void test_pair_device_1w_emits_two_frames(void) {
                                               iohome::frame::AuthTrailer::NONE));
   TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed));
 
+  // A real receiver unmasks with the frame's source - us, the sender - because
+  // the key belongs to the sender. See create_key_transfer_1w.
   uint8_t recovered[16];
-  TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(parsed.data, PEER_NODE, recovered));
+  TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(parsed.data, parsed.src_node, recovered));
   TEST_ASSERT_EQUAL_UINT8_ARRAY(new_key, recovered, 16);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(OWN_NODE, parsed.src_node, 3);
 }
 
 void test_pair_rejects_nullptr(void) {

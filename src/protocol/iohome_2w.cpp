@@ -555,8 +555,16 @@ bool DiscoveryManager::create_key_transfer_1w(
 
   // Payload per docs/commands.md "30: Send 1W Key":
   //   encrypted key (16) | manufacturer (1) | reserved (1) | sequence (2)
+  //
+  // The key is masked with the *sender's* own address - the node that owns the
+  // key being transferred - not the destination. docs/linklayer.md: "an initial
+  // value that consists in its address repeated". The receiver unmasks with the
+  // frame's source, so masking with the destination hands it noise. This
+  // reproduces the documented vector (node ABCDEF -> 7E60491F...01) and matches
+  // both real captures and rspaargaren/iohomecontrol; the earlier dest_node was
+  // self-consistent in the round-trip test but would never interoperate.
   uint8_t params[AES_KEY_SIZE + 4];
-  if (!crypto::encrypt_1w_key(system_key, dest_node, params)) {
+  if (!crypto::encrypt_1w_key(system_key, src_node, params)) {
     return false;
   }
 

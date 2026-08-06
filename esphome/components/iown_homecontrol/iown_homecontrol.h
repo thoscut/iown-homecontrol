@@ -40,6 +40,7 @@
 // implementation, and a copy of it that CI keeps identical.
 #include "iohome_crypto.h"
 #include "iohome_frame.h"
+#include "iohome_phy_framing.h"
 #include "iohome_replay_guard.h"
 #include "iohome_2w.h"
 
@@ -96,15 +97,16 @@ static const size_t IOHC_MAX_FRAME_SIZE = 34;
 
 /// How many bytes fixed-length receive mode pulls off the air per packet.
 ///
-/// Deliberately larger than a frame can be. Every captured frame so far fails
-/// the CRC check, and a brute-force search over the standard CRC-16 catalogue
-/// found no algorithm, start offset or length that fits within 34 bytes - while
-/// the header itself is provably intact (two frames from the same device shared
-/// ctrl1, destination, source and command byte for byte). That leaves the
-/// possibility that frames run past 34 bytes and the real checksum is being
-/// truncated away before we ever see it. Capturing beyond the protocol maximum
-/// is what makes that testable: if the bytes past 34 repeat across receptions
-/// they are transmitted data, and if they are noise they differ every time.
+/// A frame maxes out at 34 bytes, but each byte is sent as ten bits on the wire
+/// - a start bit, the eight data bits, a stop bit (see iohome_phy_framing.h) -
+/// so the radio delivers up to ceil(34 * 10 / 8) = 43 bytes for one frame,
+/// before the trailing preamble. 64 leaves room for that plus the run-in the
+/// receiver sees after the frame ends. The raw bytes are de-framed before
+/// anything reads them as a frame.
+///
+/// This capture size is why a frame that looked like a "non-standard 48-byte
+/// format" - and failed every CRC test - turned out to be an ordinary frame
+/// wrapped in that UART framing. See docs/devices/velux/velux-frame-analysis.md.
 static const size_t IOHC_RX_CAPTURE_SIZE = 64;
 
 /// Minimum frame: ctrl0(1) + ctrl1(1) + dest(3) + src(3) + cmd(1) + crc(2).

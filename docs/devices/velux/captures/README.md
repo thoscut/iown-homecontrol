@@ -18,10 +18,12 @@ or post-frame idle, not payload.
 - `7E 5A 11` / `35 29` — a third remote (appeared during an anlern attempt)
 - actuator (destination) is `10 04 01` (a `10 05 01` variant also appears)
 
-**The open question these are here to settle:** none of these validate a
-standard CRC-16/KERMIT at any length/offset/bit-transform, and they run to
-~48 bytes (past the 34-byte max the 5-bit size field can encode), while the
-demod is provably good. See `../velux-frame-analysis.md` §3 and §7.
+**Settled.** These looked like they validated no CRC and ran to ~48 bytes
+because they still carried their UART start/stop framing (ten bits per byte;
+`docs/radio.md`). De-framed, all 173 validate CRC-16/KERMIT and decode to
+standard frames, one of them a 1W key transfer. The de-framer is
+`src/protocol/iohome_phy_framing.{h,cpp}`, host-tested against these very bytes
+in `test/test_phy_framing/`. See `../velux-frame-analysis.md` §0.
 
 
 ## Session A — known-plaintext button presses (remote 7E 51 D2): UP=idx14 0x01, STOP=0x97, DOWN=0x27

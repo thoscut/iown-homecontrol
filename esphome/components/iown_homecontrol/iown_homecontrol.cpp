@@ -581,27 +581,55 @@ void IOWNHomeControlComponent::receive_frame_() {
     return;
   }
 
-  uint8_t data[IOHC_RX_CAPTURE_SIZE];
-  const int16_t state = this->phy_->readData(data, len);
+  uint8_t raw[IOHC_RX_CAPTURE_SIZE];
+  const int16_t state = this->phy_->readData(raw, len);
 
   // Sample the link metric before handing the radio back to receive mode.
   const int16_t rssi = static_cast<int16_t>(this->phy_->getRSSI());
 
   this->phy_->startReceive();
 
-  if (state == RADIOLIB_ERR_NONE) {
-    this->parse_frame_(data, len, rssi);
-  } else if (state != RADIOLIB_ERR_RX_TIMEOUT) {
-    ESP_LOGW(TAG, "Receive error: %d", state);
+  if (state != RADIOLIB_ERR_NONE) {
+    if (state != RADIOLIB_ERR_RX_TIMEOUT) {
+      ESP_LOGW(TAG, "Receive error: %d", state);
+    }
+    return;
   }
+
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  // The raw on-air bytes, framing and all, before de-framing. This is what a
+  // capture session records; it is logged at VERBOSE so it does not drown the
+  // ordinary DEBUG frame log.
+  {
+    std::string hex;
+    hex.reserve(len * 3);
+    for (size_t i = 0; i < len; i++) {
+      char b[4];
+      snprintf(b, sizeof(b), "%02X ", raw[i]);
+      hex += b;
+    }
+    ESP_LOGV(TAG, "RAW %u bytes rssi=%d: %s", static_cast<unsigned>(len), rssi, hex.c_str());
+  }
+#endif
+
+  // The radio delivers the on-air bytes with the UART start/stop framing still
+  // on them. De-frame to the actual frame before anything reads it: without
+  // this the "control byte" is really a start bit and part of ctrl0, the length
+  // runs 10/8 too long, and the CRC never checks out. See iohome_phy_framing.h.
+  uint8_t frame[IOHC_MAX_FRAME_SIZE];
+  const size_t frame_len = iohome::phy::uart_decode_frame(raw, len, frame, sizeof frame);
+  if (frame_len == 0) {
+    ESP_LOGV(TAG, "No frame recovered from %u raw bytes", static_cast<unsigned>(len));
+    return;
+  }
+
+  this->parse_frame_(frame, frame_len, rssi);
 }
 
 void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int16_t rssi) {
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
-  // Dump every packet the radio hands over, before any interpretation. The
-  // length and CRC rules are exactly what is still in question here, so a frame
-  // that fails them is the interesting one - and it used to be discarded
-  // without ever showing its bytes.
+  // The de-framed frame, as the protocol layer sees it. The raw on-air bytes
+  // are logged separately at VERBOSE in receive_frame_().
   {
     std::string hex_str;
     hex_str.reserve(len * 3);
@@ -610,7 +638,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
       snprintf(buf, sizeof(buf), "%02X ", data[i]);
       hex_str += buf;
     }
-    ESP_LOGD(TAG, "RX %u bytes rssi=%d: %s", static_cast<unsigned>(len), rssi, hex_str.c_str());
+    ESP_LOGD(TAG, "RX frame %u bytes rssi=%d: %s", static_cast<unsigned>(len), rssi,
+             hex_str.c_str());
   }
 #endif
 
@@ -657,36 +686,14 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   const uint16_t calculated_crc = compute_crc(data, frame_len - 2);
 
   if (received_crc != calculated_crc) {
+    // A CRC mismatch here now means a genuinely corrupt reception. It used to be
+    // the normal case - every captured frame failed this check - because the
+    // bytes still carried their UART start/stop framing and this ran over the
+    // wrong data. With de-framing in receive_frame_() the CRC validates, so a
+    // failure is real: bad reception, not a mystery of the format.
     this->crc_errors_++;
     ESP_LOGW(TAG, "CRC mismatch: received=0x%04X calculated=0x%04X rssi=%d", received_crc,
              calculated_crc, rssi);
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
-    // Diagnostic dump of the *whole* received buffer, not just frame_len, so the
-    // candidate CRC ranges can be checked offline. Fixed-length receive mode
-    // always hands over IOHC_MAX_FRAME_SIZE bytes, and which of them the CRC is
-    // supposed to cover is exactly what is in question here.
-    {
-      std::string hex_str;
-      hex_str.reserve(len * 3);
-      for (size_t i = 0; i < len; i++) {
-        char buf[4];
-        snprintf(buf, sizeof(buf), "%02X ", data[i]);
-        hex_str += buf;
-      }
-      ESP_LOGD(TAG, "  ctrl0=0x%02X frame_len=%u recv_len=%u raw: %s", ctrl0,
-               static_cast<unsigned>(frame_len), static_cast<unsigned>(len), hex_str.c_str());
-    }
-#endif
-
-    // Frames from this project's own captures fail this check for reasons not
-    // yet understood, so a mismatch here is not solid evidence of corruption.
-    // A 1W key transfer is worth attempting anyway: it carries a MAC computed
-    // with the key it transports, which is a strictly stronger integrity check
-    // than the CRC. A misread frame cannot pass it.
-    if (this->key_capture_ && frame_len > 8 && data[8] == iohome::CMD_SEND_1W_KEY) {
-      ESP_LOGD(TAG, "1W key transfer with CRC mismatch - letting the MAC decide");
-      this->handle_1w_key_transfer_(data, frame_len, src_addr);
-    }
     return;
   }
 
@@ -833,64 +840,58 @@ void IOWNHomeControlComponent::handle_1w_key_transfer_(const uint8_t *data, size
     return;
   }
 
-  // Layout from the start of the frame: ctrl0 ctrl1 | dest(3) | src(3) | cmd |
-  // encrypted key(16) | ... | sequence(2) | MAC(6) | CRC(2). The bytes between
-  // the key and the sequence (manufacturer, reserved) are not fixed across
-  // devices, so the trailer is located relative to frame_len rather than by
-  // counting forward from the key.
+  // The real layout, confirmed against captured 0x30 frames once they are
+  // de-framed (docs/devices/velux/velux-frame-analysis.md, docs/commands.md):
+  //
+  //   ctrl0 ctrl1 | dest(3) | src(3) | cmd(1) | key(16) | mfr(1) | ?(1) | seq(2) | crc(2)
+  //
+  // Total 31 bytes. There is **no MAC**. Earlier code here expected one -
+  // key(16) | seq(2) | MAC(6) | CRC(2), needing 35 bytes - and would have
+  // rejected every real transfer as too short. It also claimed to "verify the
+  // recovered key against its own MAC", which cannot be done: the frame carries
+  // no MAC to check against. Only the CRC (already validated) protects it.
   constexpr size_t KEY_OFFSET = 9;
-  constexpr size_t MIN_LEN = KEY_OFFSET + iohome::AES_KEY_SIZE + iohome::ROLLING_CODE_SIZE +
-                             iohome::HMAC_SIZE + iohome::CRC_SIZE;
-  if (frame_len < MIN_LEN) {
-    ESP_LOGW(TAG, "1W key transfer too short: %u bytes, need at least %u",
-             static_cast<unsigned>(frame_len), static_cast<unsigned>(MIN_LEN));
+  constexpr size_t EXPECTED_LEN = KEY_OFFSET + iohome::AES_KEY_SIZE + 1 /*mfr*/ + 1 /*?*/ +
+                                  iohome::ROLLING_CODE_SIZE + iohome::CRC_SIZE;  // 31
+  if (frame_len < EXPECTED_LEN) {
+    ESP_LOGW(TAG, "1W key transfer too short: %u bytes, expected %u",
+             static_cast<unsigned>(frame_len), static_cast<unsigned>(EXPECTED_LEN));
     return;
   }
 
   const uint8_t *ciphertext = &data[KEY_OFFSET];
-  const uint8_t *sequence = &data[frame_len - iohome::CRC_SIZE - iohome::HMAC_SIZE -
-                                  iohome::ROLLING_CODE_SIZE];
-  const uint8_t *frame_mac = &data[frame_len - iohome::CRC_SIZE - iohome::HMAC_SIZE];
+  const uint8_t manufacturer = data[KEY_OFFSET + iohome::AES_KEY_SIZE];
   const uint8_t node[iohome::NODE_ID_SIZE] = {data[5], data[6], data[7]};
 
+  // The mask is AES(TRANSFER_KEY, IV) with the IV built from the node address
+  // the key is addressed to. This reproduces the reference vector in
+  // docs/linklayer.md, but that vector is synthetic: it has not been confirmed
+  // that a real Velux 0x30 masks the same way. So the result below is a
+  // *candidate*, printed for offline checking - not a key to trust blindly.
   uint8_t recovered[iohome::AES_KEY_SIZE];
   if (!iohome::crypto::decrypt_1w_key(ciphertext, node, recovered)) {
     ESP_LOGW(TAG, "1W key transfer: unmasking failed");
     return;
   }
 
-  // The frame carries a MAC computed with the very key it transports, so the
-  // recovered key verifies itself: if this matches, the key is right. Nothing
-  // here is guesswork, which is exactly why it is worth checking before the
-  // key is ever shown or used.
-  uint8_t mac_input[1 + iohome::AES_KEY_SIZE];
-  mac_input[0] = iohome::CMD_SEND_1W_KEY;
-  memcpy(&mac_input[1], ciphertext, iohome::AES_KEY_SIZE);
+  const auto to_hex = [](const uint8_t *b, size_t n) {
+    std::string s;
+    s.reserve(n * 2);
+    for (size_t i = 0; i < n; i++) {
+      char buf[3];
+      snprintf(buf, sizeof(buf), "%02x", b[i]);
+      s += buf;
+    }
+    return s;
+  };
 
-  uint8_t expected_mac[iohome::HMAC_SIZE];
-  const bool mac_ok = iohome::crypto::create_1w_hmac(mac_input, sizeof(mac_input), sequence,
-                                                     recovered, expected_mac) &&
-                      memcmp(expected_mac, frame_mac, iohome::HMAC_SIZE) == 0;
-
-  if (!mac_ok) {
-    ESP_LOGW(TAG, "1W key transfer from 0x%06X: MAC does not check out, key discarded",
-             static_cast<unsigned int>(src_addr));
-    iohome::crypto::secure_zero(recovered, sizeof(recovered));
-    return;
-  }
-
-  std::string key_hex;
-  key_hex.reserve(iohome::AES_KEY_SIZE * 2);
-  for (size_t i = 0; i < sizeof(recovered); i++) {
-    char buf[3];
-    snprintf(buf, sizeof(buf), "%02x", recovered[i]);
-    key_hex += buf;
-  }
-
-  ESP_LOGI(TAG, "System key recovered from 0x%06X and verified against its own MAC",
-           static_cast<unsigned int>(src_addr));
-  ESP_LOGI(TAG, "  system_key: \"%s\"", key_hex.c_str());
-  ESP_LOGI(TAG, "  Put this in your YAML, then set key_capture back to false.");
+  ESP_LOGI(TAG, "1W key transfer from 0x%06X (manufacturer 0x%02X)",
+           static_cast<unsigned int>(src_addr), manufacturer);
+  ESP_LOGI(TAG, "  encrypted key on air: %s", to_hex(ciphertext, iohome::AES_KEY_SIZE).c_str());
+  ESP_LOGI(TAG, "  de-masked candidate:  %s", to_hex(recovered, iohome::AES_KEY_SIZE).c_str());
+  ESP_LOGI(TAG, "  UNVERIFIED: the frame carries no MAC to confirm this, and the masking may");
+  ESP_LOGI(TAG, "  differ for this manufacturer. Confirm by checking that a later authenticated");
+  ESP_LOGI(TAG, "  command from a known device validates under it before putting it in YAML.");
 
   iohome::crypto::secure_zero(recovered, sizeof(recovered));
 }
@@ -943,19 +944,32 @@ bool IOWNHomeControlComponent::send_frame(const uint8_t *data, size_t len) {
     return false;
   }
 
+  // Wrap the frame in the on-air UART framing the receiver expects: each byte
+  // becomes a start bit, its eight data bits least-significant first, and a
+  // stop bit. A device that does not de-frame - as every real io-homecontrol
+  // node does - would read our un-framed bytes as a garbage-length frame with
+  // no valid CRC and drop it. See iohome_phy_framing.h.
+  uint8_t wire[iohome::phy::uart_wire_size(IOHC_MAX_FRAME_SIZE)];
+  const size_t wire_len = iohome::phy::uart_encode(data, len, wire, sizeof wire);
+  if (wire_len == 0) {
+    ESP_LOGE(TAG, "Could not frame %u bytes for transmit", static_cast<unsigned>(len));
+    return false;
+  }
+
   // Stop the interrupt from firing while we own the radio, and drop any packet
   // that arrived just before: its data is gone once we transmit.
   this->phy_->clearPacketReceivedAction();
   clear_packet_flag_();
 
   // In fixed-length mode the radio sends exactly the programmed number of
-  // bytes, so narrow it to this frame and widen it again for reception.
-  int16_t state = this->set_packet_length_(static_cast<uint8_t>(len));
+  // bytes, so narrow it to this frame's wire length and widen it again for
+  // reception.
+  int16_t state = this->set_packet_length_(static_cast<uint8_t>(wire_len));
   if (state != RADIOLIB_ERR_NONE) {
     ESP_LOGW(TAG, "Could not set packet length: %d", state);
   }
 
-  state = this->phy_->transmit(const_cast<uint8_t *>(data), len);
+  state = this->phy_->transmit(wire, wire_len);
   if (state != RADIOLIB_ERR_NONE) {
     ESP_LOGE(TAG, "Transmit failed: %d", state);
   }

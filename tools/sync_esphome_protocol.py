@@ -45,6 +45,8 @@ FILES = [
     "iohome_aes_soft.cpp",
     "iohome_frame.h",
     "iohome_frame.cpp",
+    "iohome_phy_framing.h",
+    "iohome_phy_framing.cpp",
     "iohome_2w.h",
     "iohome_2w.cpp",
     "iohome_replay_guard.h",

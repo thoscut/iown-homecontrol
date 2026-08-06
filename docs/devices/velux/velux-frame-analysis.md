@@ -5,31 +5,104 @@ Velux installation (window opener + wall remotes, model **BG-RC011-02** = KLI 31
 family). The goal is to control the actuators from the ESPHome component, which
 requires the installation's AES-128 system (stack) key.
 
-**TL;DR**
-- Radio, CRC and crypto in this repo are **proven correct** against the reference
-  vectors in `docs/linklayer.md` — the tools are not the problem.
-- The captured Velux frames are **correctly demodulated** but use a **non-standard,
-  extended frame format** (36–58 bytes, past the 34-byte max the 5-bit size field
-  can encode) that does **not** carry a standard CRC-16/KERMIT trailer.
-- The command frame header is fully mapped (addresses, command byte, device id);
-  the tail (rolling code + MAC) is cryptographically derived and **opaque without
-  the system key**.
-- The system key is **not recoverable from passive captures** for these devices
-  (no 1W key transfer occurs; the 2W transfer has no verifiable offline anchor).
-- The realistic path is **hardware key extraction** (SWD) from a remote
-  (EFR32FG1) or the KLF200 (STM32F427 + EFM32GG990).
+> **RESOLVED.** The "non-standard extended format" below was wrong, and the
+> captures themselves disprove it. The frames are ordinary io-homecontrol frames
+> wrapped in the UART start/stop bit framing this repo's own `docs/radio.md`
+> already documents (start bit `0`, eight data bits **least-significant first**,
+> stop bit `1` — ten bits per byte on air). A plain FSK radio hands those bits up
+> as bytes without removing them, so a 25-byte frame arrives as ~48 bytes whose
+> size field and CRC never match. De-framed, **all 173 captured frames validate a
+> CRC-16/KERMIT** and decode to standard frames — including a **1W key transfer
+> (0x30)**, which §6 said did not occur. The de-framing is now in the component
+> (`iohome_phy_framing.{h,cpp}`, wired into receive and transmit) and host-tested
+> against these very captures (`test/test_phy_framing/`). See **§0** for the
+> resolution; the sections after it are the original investigation, kept as a
+> record and marked where superseded.
 
-> **Related — and an unresolved contradiction.** `docs/VELUX-FORMAT.md` (added on
-> the expert-review branch, derived from the KLF 200 specification) documents the
-> actuator *semantics*: Main Parameter direction (up=0x0000, down=0xC800,
-> stop=0xD200), command originators, priority levels, the 16-bit node-type field.
-> That work and this one are complementary — it describes what a command *means*,
-> this describes the bytes actually seen on air. **But they do not fully reconcile:**
-> the whole repo model (that spec, `scripts/io-homecontrol.ksy`, the C++) assumes a
-> **standard frame ≤34 bytes with a KERMIT CRC trailer**, and the captures here do
-> not fit it (48 bytes, no valid CRC; the command at idx14 is a single byte `0x97`
-> for stop, not the spec's 2-byte `0xD200`). See §3 and §7 — resolving this is the
-> first thing a follow-up session should look at with fresh eyes.
+**TL;DR (corrected)**
+- Radio, CRC and crypto in this repo are **proven correct** against the reference
+  vectors in `docs/linklayer.md`, and now against 173 real frames.
+- The captured frames are **standard io-homecontrol frames** under a UART framing
+  the radio does not strip in hardware. De-framed, every one has a valid
+  CRC-16/KERMIT. There is no OEM "third protocol" here.
+- A **1W key transfer (0x30)** *is* present in the capture (manufacturer byte
+  `0x01` = Velux). It carries the masked key + manufacturer + sequence, and **no
+  MAC** — so the CRC is its only integrity check.
+- The system key is **still not confirmed** from passive captures: the documented
+  address-mask de-masking reproduces the synthetic `linklayer.md` vector but does
+  **not** reproduce this installation's command MACs (checked by brute-forcing all
+  2²⁴ mask addresses), so either the OEM masking differs or the transferred key is
+  not the one that signs commands. Key recovery remains open; hardware extraction
+  (SWD) is still the fallback, not the only hope.
+
+> **Reconciled with `docs/VELUX-FORMAT.md`.** That document (from the KLF 200
+> specification) describes what a command *means* — Main Parameter direction
+> (up=0x0000, down=0xC800, stop=0xD200), originators, priority levels, the 16-bit
+> node type. This document describes the bytes on air. They now agree: de-framed,
+> the "single byte `0x97` at idx14" was a framing artifact, and the frames carry
+> the standard 2-byte Main Parameter the spec describes.
+
+---
+
+## 0. Resolution — the frames are standard, under UART framing
+
+The io-homecontrol PHY sends each byte the way a UART does: a start bit (`0`),
+the eight data bits **least-significant first**, then a stop bit (`1`). This is
+in `docs/radio.md` already ("8-bit bytes with 1 start bit and a stop bit … the
+least significant bit is transmitted first"). Ten bits on the wire per logical
+byte.
+
+An SX1276 or SX1262 in plain FSK mode has no hardware that removes this framing.
+After the sync word it hands the raw bitstream up as bytes, start and stop bits
+included. Read directly, a 25-byte frame becomes ~31–48 bytes whose control-byte
+size field is wrong and whose CRC never validates — which is exactly what §3
+found and misread as a "non-standard 48-byte format".
+
+De-framing is one pass: read the bitstream most-significant-bit-first, and for
+each ten-bit cell take the eight data bits (LSB first) as one output byte,
+checking the start bit is 0 and the stop bit is 1. Applied to the raw captures in
+`captures/`:
+
+- **173 / 173** frames validate CRC-16/KERMIT.
+- Frame lengths come out 14–31 bytes, all within the 34-byte maximum.
+- Command IDs are all known: 0x00 Execute, 0x03/0x04 private, 0x2E, **0x30 Send
+  1W Key**, 0x39 Remove 1W controller, 0x3D challenge response.
+- Two decode byte-for-byte to examples in `docs/commands.md`: a `0x03` body of
+  `03 00 00`, and a `0x04` answer beginning `05` (the documented "OK" code).
+- A `0x00` Execute reads `01 61 c8 00 00 00` — originator USER, ACEI valid, Main
+  Parameter 0xC800 (close). Standard, and consistent with `VELUX-FORMAT.md`.
+
+Why the earlier brute force missed it: it searched a *uniform* bit offset across
+the whole stream. UART framing is not a uniform offset — it is a repeating
+ten-bit cell with two bits discarded per byte. Different search space.
+
+This is implemented in `src/protocol/iohome_phy_framing.{h,cpp}` and wired into
+the component's receive (`receive_frame_` de-frames before parsing) and transmit
+(`send_frame` frames before sending). The codec is host-tested against these
+captures in `test/test_phy_framing/test_phy_framing.cpp`.
+
+### The 1W key transfer, and why the key is still not confirmed
+
+One captured frame is a `0x30` Send 1W Key, de-framed to 31 bytes:
+
+```
+fc 00 | 00013f | 2ca919 | 30 | d978a0f11b858334df2c5f357b83782d | 01 | 01 | 049a | 398d
+ctrl  | dest   | src    | cmd| encrypted key (16)               |mfr |?  | seq  | crc
+```
+
+`mfr = 0x01` is Velux. There is **no MAC** — the frame is CRC-protected only, so
+nothing in it lets the recovered key verify itself. (The earlier key-capture code
+assumed a 6-byte MAC and a 35-byte frame; that was corrected to this layout.)
+
+De-masking with the documented method — AES(TRANSFER_KEY, IV) keyed on the node
+address — is what reproduces the synthetic vector in `docs/linklayer.md`. It does
+**not** reproduce this installation's traffic: unmasking the key and using it to
+recompute the MAC of a command from the *same* remote (`2ca919`, which sends both
+the key transfer and ordinary `0x00` commands) does not match, and a brute force
+over all 2²⁴ possible mask addresses finds none that does. So either Velux masks
+the 0x30 differently from the documented 1W scheme, or the transferred key is not
+the key that signs commands. The component now prints the de-masked value as an
+explicitly **unverified candidate**, not a key to trust.
 
 ---
 
@@ -66,15 +139,21 @@ Because these pass, a captured frame that fails every CRC test means the frame i
 
 ## 3. Captured frames do NOT match the standard format
 
+> **Superseded by §0.** The conclusion in this section is wrong. The frames are
+> standard; they were being read *with* their UART start/stop framing still on.
+> The exhaustive search below tested a uniform whole-stream bit offset, which is
+> not what UART framing is — a repeating ten-bit cell with two bits dropped per
+> byte — so it could not find the fit. De-framed, all 173 validate KERMIT.
+
 Exhaustively tested and all negative on real captures (18-algorithm CRC-16
 catalogue + the io native `compute_checksum`, every start offset, every trailer
 position, both bit orders, per-byte bit reversal, whole-bitstream bit offset
 0–15 with both read/regroup endianness, 7-bit LFSR whitening with all 128 seeds,
 KERMIT at every length up to the full 58 bytes). Nothing validates.
 
-Conclusion: these are the "third protocol for OEMs" hinted at in
-`docs/linklayer.md:40`. Velux frames run **36–58 bytes** — longer than the 5-bit
-size field (max 34) can describe — so the length encoding and trailer are
+Conclusion ~~(wrong — see §0)~~: these are the "third protocol for OEMs" hinted
+at in `docs/linklayer.md:40`. Velux frames run **36–58 bytes** — longer than the
+5-bit size field (max 34) can describe — so the length encoding and trailer are
 non-standard. Integrity is almost certainly the AES-MAC only (no plaintext CRC).
 
 ## 4. Velux extended command frame — field map
@@ -122,21 +201,31 @@ and needs the system key.
 69 40 16 4D 3D 5B 4F D7 3C EF 60 58 10 04 01 25 C8 F5 50 16 6D 6B 4D 64 96 60 39 65 5E A2 F7 69 E3 F5 5A BF
 ```
 
-## 5. Key recovery from captures — exhausted
+## 5. Key recovery from captures — still open, for different reasons than §5 said
 
-- **1W key transfer (0x30)** is the only format-independent crackable path (mask =
-  `AES(node-address-repeated, TRANSFER_KEY)`, self-verifying 6-byte MAC over
-  `[0x30]+ciphertext`). A validated brute force (scratchpad `keybrute.ps1`, with a
-  synthetic positive control that recovers a known key) found **no 1W key** in any
-  capture — including a deliberate actuator anlern/registration. These devices are
-  effectively **2W-only**.
-- **2W key transfer (0x32)** did occur (the `1F C0` pairing frames carry the
-  masked key), but it is **not offline-crackable here**: the mask IV and the 2W MAC
-  depend on frame-specific byte ranges of the Velux-extended format that we cannot
-  identify, so there is **no verifiable anchor** — a recovered key can't be checked.
+> **Partly superseded by §0.** A 1W key transfer (0x30) *does* appear in the
+> capture — the search here missed it because it ran on the framed bytes, where
+> no `0x30` command byte is visible. The rest of this section's conclusion (the
+> key is not confirmable from the capture) still holds, but not for the reason
+> given: the 0x30 frame carries **no MAC**, so it is not self-verifying, and the
+> documented de-masking does not reproduce this installation's traffic.
 
-The system key therefore cannot be obtained by sniffing. It must be read from a
-device that holds it.
+- **1W key transfer (0x30)** is present (§0): manufacturer `0x01` = Velux, a
+  16-byte masked key, a sequence, and **no MAC** — CRC only. The claim here that
+  it has a "self-verifying 6-byte MAC over `[0x30]+ciphertext`" is wrong; that is
+  the 1W *command* MAC, not part of the key-transfer frame. De-masking with
+  `AES(node-address-repeated, TRANSFER_KEY)` reproduces the synthetic
+  `linklayer.md` vector but not this installation's command MACs (brute-forced
+  over all 2²⁴ mask addresses, none match), so the OEM masking likely differs or
+  the transferred key is not the command key.
+- **2W key transfer (0x32)** — the `1F C0` pairing frames are 2W and carry a
+  masked block. With the framing understood these can be re-examined, but the 2W
+  mask IV still depends on the requesting frame, so there is still no offline
+  anchor to check a recovered key against.
+
+The system key is therefore still not *confirmed* from sniffing. Hardware
+extraction (§6) remains the reliable route; the 0x30 de-masked candidate is worth
+checking against later authenticated traffic before trusting it.
 
 ## 6. Hardware key-extraction plan (the way forward)
 

@@ -30,8 +30,41 @@ bool IOWNHomeControlComponent::take_packet_flag_() {
 
 void IOWNHomeControlComponent::clear_packet_flag_() { packet_flag_ = false; }
 
+void IOWNHomeControlComponent::power_up_frontend_() {
+  // Order matters. On boards that gate the radio's supply behind a GPIO, the
+  // rail has to be up before the reset pulse - a reset into an unpowered
+  // module leaves the SX126x in an undefined state that only looks like a
+  // wiring fault. The front end's LDO comes next, because its control pins do
+  // nothing until it is fed.
+  if (this->vext_pin_ >= 0) {
+    pinMode(this->vext_pin_, OUTPUT);
+    digitalWrite(this->vext_pin_, this->vext_active_high_ ? HIGH : LOW);
+    ESP_LOGD(TAG, "VEXT rail on (GPIO%d, active %s)", this->vext_pin_,
+             this->vext_active_high_ ? "high" : "low");
+  }
+
+  if (this->fem_power_pin_ >= 0) {
+    pinMode(this->fem_power_pin_, OUTPUT);
+    digitalWrite(this->fem_power_pin_, HIGH);
+  }
+  if (this->fem_enable_pin_ >= 0) {
+    pinMode(this->fem_enable_pin_, OUTPUT);
+    digitalWrite(this->fem_enable_pin_, HIGH);
+  }
+  // fem_tx_pin_ is deliberately not touched here: RadioLib owns it once
+  // setRfSwitchPins() has been told about it, and driving it from both sides
+  // would fight over the TX/RX path.
+
+  if (this->vext_pin_ >= 0 || this->fem_power_pin_ >= 0) {
+    // Let the rails settle before the first SPI transaction.
+    delay(10);
+  }
+}
+
 void IOWNHomeControlComponent::setup() {
   ESP_LOGCONFIG(TAG, "Setting up io-homecontrol...");
+
+  this->power_up_frontend_();
 
   // Initialize SPI with custom pins if configured
   if (this->sck_pin_ >= 0 && this->miso_pin_ >= 0 && this->mosi_pin_ >= 0) {
@@ -57,6 +90,16 @@ void IOWNHomeControlComponent::setup() {
     this->radio_module_ = new Module(this->cs_pin_, this->dio0_pin_, this->rst_pin_, this->dio1_pin_);
   }
 
+  // An external PA needs its TX/RX select line to follow the radio's own mode
+  // changes. RadioLib drives txEn high for transmit and low for receive, which
+  // is exactly the GC1109's CPS semantics (high = PA, low = receive bypass).
+  // This has to be registered on the Module before begin(), so the switch is
+  // already in a defined state for the calibration begin() performs.
+  if (this->fem_tx_pin_ >= 0) {
+    this->radio_module_->setRfSwitchPins(RADIOLIB_NC, this->fem_tx_pin_);
+    ESP_LOGD(TAG, "RF switch: TX enable on GPIO%d", this->fem_tx_pin_);
+  }
+
   int16_t state = RADIOLIB_ERR_UNKNOWN;
 
   switch (this->radio_type_) {
@@ -69,9 +112,21 @@ void IOWNHomeControlComponent::setup() {
     }
     case RADIO_SX1262: {
       this->sx1262_ = new SX1262(this->radio_module_);
-      state = this->sx1262_->beginFSK();
+      // The TCXO supply voltage is only settable through begin(): SX126x
+      // latches it and applies it from config(), which runs here. Everything
+      // else in this call is a placeholder - configure_phy_layer_() programs
+      // the real frequency, bit rate, deviation and preamble immediately
+      // afterwards - but the defaults have to be spelled out to reach the
+      // seventh parameter.
+      state = this->sx1262_->beginFSK(434.0f,   // frequency, overwritten below
+                                      4.8f,     // bit rate, overwritten below
+                                      5.0f,     // deviation, overwritten below
+                                      156.2f,   // RX bandwidth, overwritten below
+                                      10,       // output power, overwritten below
+                                      16,       // preamble, overwritten below
+                                      this->tcxo_voltage_);
       this->phy_ = this->sx1262_;
-      ESP_LOGD(TAG, "Radio type: SX1262");
+      ESP_LOGD(TAG, "Radio type: SX1262 (TCXO %.1f V)", this->tcxo_voltage_);
       break;
     }
     default:
@@ -136,6 +191,21 @@ void IOWNHomeControlComponent::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Frequency: %.2f MHz", this->frequency_);
   ESP_LOGCONFIG(TAG, "  Radio Type: %s", this->radio_type_ == RADIO_SX1276 ? "SX1276" : "SX1262");
+  if (this->radio_type_ == RADIO_SX1262) {
+    if (this->tcxo_voltage_ > 0.0f) {
+      ESP_LOGCONFIG(TAG, "  TCXO: %.1f V on DIO3", this->tcxo_voltage_);
+    } else {
+      ESP_LOGCONFIG(TAG, "  TCXO: disabled (crystal)");
+    }
+  }
+  if (this->vext_pin_ >= 0) {
+    ESP_LOGCONFIG(TAG, "  VEXT Pin: %d (active %s)", this->vext_pin_,
+                  this->vext_active_high_ ? "high" : "low");
+  }
+  if (this->fem_tx_pin_ >= 0) {
+    ESP_LOGCONFIG(TAG, "  RF front end: LDO %d, enable %d, TX select %d", this->fem_power_pin_,
+                  this->fem_enable_pin_, this->fem_tx_pin_);
+  }
   ESP_LOGCONFIG(TAG, "  Source Address: 0x%06X", static_cast<unsigned int>(this->source_address_));
   ESP_LOGCONFIG(TAG, "  Mode: %s", this->two_way_ ? "2W (challenge-response)" : "1W (rolling code)");
   ESP_LOGCONFIG(TAG, "  Encryption: %s", this->encryption_enabled_ ? "enabled" : "disabled");
@@ -233,7 +303,7 @@ int16_t IOWNHomeControlComponent::configure_packet_format_() {
       ESP_LOGE(TAG, "Failed to disable radio CRC: %d", state);
       return state;
     }
-    state = this->sx1276_->fixedPacketLengthMode(IOHC_MAX_FRAME_SIZE);
+    state = this->sx1276_->fixedPacketLengthMode(IOHC_RX_CAPTURE_SIZE);
   } else if (this->sx1262_ != nullptr) {
     // SX126x takes the CRC length in bytes; 0 disables it.
     state = this->sx1262_->setCRC(0);
@@ -241,7 +311,7 @@ int16_t IOWNHomeControlComponent::configure_packet_format_() {
       ESP_LOGE(TAG, "Failed to disable radio CRC: %d", state);
       return state;
     }
-    state = this->sx1262_->fixedPacketLengthMode(IOHC_MAX_FRAME_SIZE);
+    state = this->sx1262_->fixedPacketLengthMode(IOHC_RX_CAPTURE_SIZE);
   }
 
   if (state != RADIOLIB_ERR_NONE) {
@@ -506,12 +576,12 @@ void IOWNHomeControlComponent::receive_frame_() {
   }
 
   const size_t len = this->phy_->getPacketLength();
-  if (len == 0 || len > IOHC_MAX_FRAME_SIZE) {
+  if (len == 0 || len > IOHC_RX_CAPTURE_SIZE) {
     this->phy_->startReceive();
     return;
   }
 
-  uint8_t data[IOHC_MAX_FRAME_SIZE];
+  uint8_t data[IOHC_RX_CAPTURE_SIZE];
   const int16_t state = this->phy_->readData(data, len);
 
   // Sample the link metric before handing the radio back to receive mode.
@@ -527,6 +597,23 @@ void IOWNHomeControlComponent::receive_frame_() {
 }
 
 void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int16_t rssi) {
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+  // Dump every packet the radio hands over, before any interpretation. The
+  // length and CRC rules are exactly what is still in question here, so a frame
+  // that fails them is the interesting one - and it used to be discarded
+  // without ever showing its bytes.
+  {
+    std::string hex_str;
+    hex_str.reserve(len * 3);
+    for (size_t i = 0; i < len; i++) {
+      char buf[4];
+      snprintf(buf, sizeof(buf), "%02X ", data[i]);
+      hex_str += buf;
+    }
+    ESP_LOGD(TAG, "RX %u bytes rssi=%d: %s", static_cast<unsigned>(len), rssi, hex_str.c_str());
+  }
+#endif
+
   if (len < IOHC_MIN_FRAME_SIZE) {
     ESP_LOGW(TAG, "Frame too short: %u bytes", static_cast<unsigned>(len));
     return;
@@ -542,7 +629,15 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   // `Size` excludes Control Byte 0 and the CRC, so the frame is Size + 3 long.
   const size_t frame_len = static_cast<size_t>(ctrl0 & IOHC_CTRL0_SIZE_MASK) + IOHC_SIZE_BIAS;
 
-  if (frame_len < IOHC_MIN_FRAME_SIZE || frame_len > len) {
+  if (frame_len < IOHC_MIN_FRAME_SIZE) {
+    // Not the same fault as "longer than what arrived", and reporting both the
+    // same way sent this investigation looking at the wrong end of the frame.
+    ESP_LOGW(TAG, "Declared frame length %u is below the %u-byte minimum (ctrl0=0x%02X)",
+             static_cast<unsigned>(frame_len), static_cast<unsigned>(IOHC_MIN_FRAME_SIZE), ctrl0);
+    return;
+  }
+
+  if (frame_len > len) {
     ESP_LOGW(TAG, "Declared frame length %u does not fit in %u received bytes",
              static_cast<unsigned>(frame_len), static_cast<unsigned>(len));
     return;
@@ -563,7 +658,35 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
 
   if (received_crc != calculated_crc) {
     this->crc_errors_++;
-    ESP_LOGW(TAG, "CRC mismatch: received=0x%04X calculated=0x%04X", received_crc, calculated_crc);
+    ESP_LOGW(TAG, "CRC mismatch: received=0x%04X calculated=0x%04X rssi=%d", received_crc,
+             calculated_crc, rssi);
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+    // Diagnostic dump of the *whole* received buffer, not just frame_len, so the
+    // candidate CRC ranges can be checked offline. Fixed-length receive mode
+    // always hands over IOHC_MAX_FRAME_SIZE bytes, and which of them the CRC is
+    // supposed to cover is exactly what is in question here.
+    {
+      std::string hex_str;
+      hex_str.reserve(len * 3);
+      for (size_t i = 0; i < len; i++) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X ", data[i]);
+        hex_str += buf;
+      }
+      ESP_LOGD(TAG, "  ctrl0=0x%02X frame_len=%u recv_len=%u raw: %s", ctrl0,
+               static_cast<unsigned>(frame_len), static_cast<unsigned>(len), hex_str.c_str());
+    }
+#endif
+
+    // Frames from this project's own captures fail this check for reasons not
+    // yet understood, so a mismatch here is not solid evidence of corruption.
+    // A 1W key transfer is worth attempting anyway: it carries a MAC computed
+    // with the key it transports, which is a strictly stronger integrity check
+    // than the CRC. A misread frame cannot pass it.
+    if (this->key_capture_ && frame_len > 8 && data[8] == iohome::CMD_SEND_1W_KEY) {
+      ESP_LOGD(TAG, "1W key transfer with CRC mismatch - letting the MAC decide");
+      this->handle_1w_key_transfer_(data, frame_len, src_addr);
+    }
     return;
   }
 
@@ -587,6 +710,15 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
     ESP_LOGD(TAG, "Raw: %s", hex_str.c_str());
   }
 #endif
+
+  // A 1W key transfer is the one frame that cannot be checked against the
+  // configured key, because it is what carries that key. It is taken here,
+  // before the generic authentication below would drop it for having a MAC we
+  // cannot verify yet.
+  if (cmd == iohome::CMD_SEND_1W_KEY) {
+    this->handle_1w_key_transfer_(data, frame_len, src_addr);
+    return;
+  }
 
   // Authenticate before anything is allowed to act on this frame.
   //
@@ -693,6 +825,76 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   }
 }
 
+void IOWNHomeControlComponent::handle_1w_key_transfer_(const uint8_t *data, size_t frame_len,
+                                                       uint32_t src_addr) {
+  if (!this->key_capture_) {
+    ESP_LOGI(TAG, "1W key transfer seen from 0x%06X - set key_capture: true to read it",
+             static_cast<unsigned int>(src_addr));
+    return;
+  }
+
+  // Layout from the start of the frame: ctrl0 ctrl1 | dest(3) | src(3) | cmd |
+  // encrypted key(16) | ... | sequence(2) | MAC(6) | CRC(2). The bytes between
+  // the key and the sequence (manufacturer, reserved) are not fixed across
+  // devices, so the trailer is located relative to frame_len rather than by
+  // counting forward from the key.
+  constexpr size_t KEY_OFFSET = 9;
+  constexpr size_t MIN_LEN = KEY_OFFSET + iohome::AES_KEY_SIZE + iohome::ROLLING_CODE_SIZE +
+                             iohome::HMAC_SIZE + iohome::CRC_SIZE;
+  if (frame_len < MIN_LEN) {
+    ESP_LOGW(TAG, "1W key transfer too short: %u bytes, need at least %u",
+             static_cast<unsigned>(frame_len), static_cast<unsigned>(MIN_LEN));
+    return;
+  }
+
+  const uint8_t *ciphertext = &data[KEY_OFFSET];
+  const uint8_t *sequence = &data[frame_len - iohome::CRC_SIZE - iohome::HMAC_SIZE -
+                                  iohome::ROLLING_CODE_SIZE];
+  const uint8_t *frame_mac = &data[frame_len - iohome::CRC_SIZE - iohome::HMAC_SIZE];
+  const uint8_t node[iohome::NODE_ID_SIZE] = {data[5], data[6], data[7]};
+
+  uint8_t recovered[iohome::AES_KEY_SIZE];
+  if (!iohome::crypto::decrypt_1w_key(ciphertext, node, recovered)) {
+    ESP_LOGW(TAG, "1W key transfer: unmasking failed");
+    return;
+  }
+
+  // The frame carries a MAC computed with the very key it transports, so the
+  // recovered key verifies itself: if this matches, the key is right. Nothing
+  // here is guesswork, which is exactly why it is worth checking before the
+  // key is ever shown or used.
+  uint8_t mac_input[1 + iohome::AES_KEY_SIZE];
+  mac_input[0] = iohome::CMD_SEND_1W_KEY;
+  memcpy(&mac_input[1], ciphertext, iohome::AES_KEY_SIZE);
+
+  uint8_t expected_mac[iohome::HMAC_SIZE];
+  const bool mac_ok = iohome::crypto::create_1w_hmac(mac_input, sizeof(mac_input), sequence,
+                                                     recovered, expected_mac) &&
+                      memcmp(expected_mac, frame_mac, iohome::HMAC_SIZE) == 0;
+
+  if (!mac_ok) {
+    ESP_LOGW(TAG, "1W key transfer from 0x%06X: MAC does not check out, key discarded",
+             static_cast<unsigned int>(src_addr));
+    iohome::crypto::secure_zero(recovered, sizeof(recovered));
+    return;
+  }
+
+  std::string key_hex;
+  key_hex.reserve(iohome::AES_KEY_SIZE * 2);
+  for (size_t i = 0; i < sizeof(recovered); i++) {
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02x", recovered[i]);
+    key_hex += buf;
+  }
+
+  ESP_LOGI(TAG, "System key recovered from 0x%06X and verified against its own MAC",
+           static_cast<unsigned int>(src_addr));
+  ESP_LOGI(TAG, "  system_key: \"%s\"", key_hex.c_str());
+  ESP_LOGI(TAG, "  Put this in your YAML, then set key_capture back to false.");
+
+  iohome::crypto::secure_zero(recovered, sizeof(recovered));
+}
+
 void IOWNHomeControlComponent::dispatch_to_covers_(const ReceivedFrame &frame) {
   if (!this->position_feedback_) {
     return;
@@ -758,7 +960,7 @@ bool IOWNHomeControlComponent::send_frame(const uint8_t *data, size_t len) {
     ESP_LOGE(TAG, "Transmit failed: %d", state);
   }
 
-  this->set_packet_length_(IOHC_MAX_FRAME_SIZE);
+  this->set_packet_length_(IOHC_RX_CAPTURE_SIZE);
 
   // Restore receive mode
   this->phy_->setPacketReceivedAction(packet_isr_);

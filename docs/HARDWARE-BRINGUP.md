@@ -20,12 +20,36 @@ which open questions a session with real hardware can actually settle.
   | Heltec WiFi LoRa 32 V2 / V2.1 | `heltec_wifi_lora_32_V2` | SX1276 |
   | Heltec WiFi LoRa 32 V1 | `heltec_wifi_lora_32` | SX1276 |
   | Heltec WiFi LoRa 32 V3 | `heltec_wifi_lora_32_V3` | SX1262 |
-  | Heltec WiFi LoRa 32 V4 | `heltec_wifi_lora_32_V4` | SX1262, **pins unconfirmed** |
+  | Heltec WiFi LoRa 32 V4 / V4.2 | `heltec_wifi_lora_32_V4` | SX1262, see note |
   | Heltec Wireless Stick / Lite | `heltec_wireless_stick[_lite]` | SX1276 |
   | TTGO LoRa32 v1 / v2 / v2.1.6 | `ttgo-lora32-v1` / `-v2` / `-v21` | SX1276 |
   | LilyGO T-Beam | `ttgo-t-beam` | SX1276 |
 
   V2.1 is a minor revision of the V2 and uses the same environment.
+
+  The V4's radio pins are the V3's - CS 8, RST 12, BUSY 13, DIO1 14, SCK 9,
+  MISO 11, MOSI 10 - confirmed against Meshtastic's `variants/esp32s3/heltec_v4`
+  board definition rather than guessed. Two things about it are *not* like the
+  V3, and neither is handled by this firmware environment:
+
+  - **The TCXO wants 1.8 V, not RadioLib's default 1.6 V.** RadioLib applies
+    the default from `beginFSK()`, so the oscillator does start - just below
+    its rated supply. Worse, `SX126x::config()` reacts to an oscillator start
+    error by silently falling back to a plain crystal, which the V4 does not
+    have. The result is a radio that initialises without complaint and sits on
+    the wrong frequency.
+  - **The V4.2 has a GC1109 PA/LNA in front of the antenna** that has to be
+    powered (VEXT on GPIO 36, active low; FEM LDO on GPIO 7; chip enable on
+    GPIO 2) and whose TX/RX select line (GPIO 46) must follow the radio's mode.
+    Left alone, the board transmits at a fraction of its rated power.
+
+  Both are configurable through the ESPHome component (`tcxo_voltage`,
+  `vext_pin`, `rf_frontend`); see `esphome/example.yaml`. The PlatformIO
+  firmware in `src/` does not expose them yet.
+
+  The **V4.3 is a different board**: it uses a KCT8103L front end on other pins
+  and lets the SX1262's own DIO2 do the TX/RX switching. Do not apply the V4.2
+  front-end pins to it.
 
 - An io-homecontrol actuator. A Velux window or blind, a Somfy motor - anything
   that talks the protocol.

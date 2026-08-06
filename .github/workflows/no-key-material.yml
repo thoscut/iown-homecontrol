@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://github.com/SchemaStore/schemastore/raw/master/src/schemas/json/github-workflow.json
+
+# Guard against committing real io-homecontrol key material.
+#
+# A 1W key transfer (command 0x30) carries the installation's system key masked
+# only with the *public* transfer key, so a real capture of one - in docs, tests,
+# captures, anywhere - lets anyone recover that installation's key. This has
+# slipped through redaction twice, each time hiding in a hex representation an
+# earlier grep missed. The scanner checks structurally (it de-frames and parses),
+# not by pattern, and runs on EVERY change with no path filter - the original
+# leak was in docs/, which the unit-test workflow does not watch.
+
+name: No committed key material
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan for 0x30 key-transfer frames
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Scan
+        run: python3 tools/check_no_key_material.py

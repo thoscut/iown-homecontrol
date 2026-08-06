@@ -75,10 +75,16 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     channel_hopper_(nullptr),
     auth_manager_(nullptr),
     beacon_handler_(nullptr),
-    discovery_manager_(nullptr)
+    discovery_manager_(nullptr),
+    key_received_callback_(nullptr),
+    key_received_context_(nullptr),
+    accept_pairing_(false),
+    pairing_state_(Pairing2W::IDLE)
 {
   memset(own_node_id_, 0, NODE_ID_SIZE);
   memset(system_key_, 0, AES_KEY_SIZE);
+  memset(pairing_peer_, 0, NODE_ID_SIZE);
+  memset(pairing_key_, 0, AES_KEY_SIZE);
 }
 
 IoHomeControl::~IoHomeControl() {
@@ -407,6 +413,24 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
   if (!frame::parse_frame(buffer, len, frame)) {
     rx_stats_.malformed++;
     last_reject_ = RxReject::MALFORMED;
+    return false;
+  }
+
+  // Pairing frames run their own short exchange and must not go through the
+  // session authentication gate below: while a key is being transferred the
+  // peers do not yet share the key that gate verifies against. They are still
+  // CRC-checked - a corrupt one is dropped - but not MAC-checked.
+  if (is_pairing_frame(frame)) {
+    if (frame::validate_frame(frame)) {
+      rx_stats_.accepted++;
+      last_reject_ = RxReject::NONE;
+      handle_pairing_frame(frame);
+      if (rssi != nullptr) { *rssi = rssi_val; }
+      if (snr != nullptr) { *snr = snr_val; }
+      return true;
+    }
+    rx_stats_.crc_failures++;
+    last_reject_ = RxReject::CRC;
     return false;
   }
 
@@ -953,6 +977,25 @@ bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE],
   return transmit_frame(&tx_frame);
 }
 
+void IoHomeControl::set_accept_pairing(bool enabled) {
+  accept_pairing_ = enabled;
+}
+
+void IoHomeControl::set_key_received_callback(KeyReceivedCallback callback, void* context) {
+  key_received_callback_ = callback;
+  key_received_context_ = context;
+}
+
+void IoHomeControl::set_system_key(const uint8_t key[AES_KEY_SIZE]) {
+  if (key == nullptr) {
+    return;
+  }
+  memcpy(system_key_, key, AES_KEY_SIZE);
+  if (auth_manager_ != nullptr) {
+    auth_manager_->begin(key);
+  }
+}
+
 bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
                                    const uint8_t new_system_key[AES_KEY_SIZE]) {
   if (dest_node == nullptr || new_system_key == nullptr) {
@@ -965,37 +1008,145 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
     return false;
   }
 
-  LOG_INFO("Pairing device (2W mode)");
+  LOG_INFO("Pairing device (2W push): asking for a challenge");
 
-  uint8_t challenge[HMAC_SIZE];
-  if (!auth_manager_->generate_challenge(challenge, NOW_MS())) {
-    LOG_ERROR("no secure random source for the pairing challenge");
+  // Step 1 of the push: ask the device for a challenge (0x31, no parameters,
+  // plain). The device answers with 0x3C, and handle_pairing_frame() builds the
+  // 0x32 key transfer from the nonce it chose - so the mask is bound to a
+  // challenge the device actually holds. That is the piece the one-shot version
+  // was missing.
+  frame::IoFrame ask;
+  frame::init_frame(&ask, false);  // 2W
+  frame::set_destination(&ask, dest_node);
+  frame::set_source(&ask, own_node_id_);
+  if (!frame::set_command(&ask, CMD_ASK_CHALLENGE, nullptr, 0) ||
+      !frame::finalize_frame_plain(&ask)) {
+    LOG_ERROR("Failed to build the ask-challenge frame");
     return false;
   }
 
-  // The key mask is derived from the frame that asked for the transfer. In the
-  // push direction documented in docs/linklayer.md that is the device's command
-  // 0x31 (ask challenge), which carries no parameters.
-  //
-  // NOTE: this sends the 0x32 key transfer on its own. The documented exchange
-  // also has the controller send a 0x3c challenge request carrying `challenge`
-  // so the device knows which challenge to build its IV from. Until that step
-  // exists, pairing works only against a device that already holds this
-  // challenge. See PRODUCTION_READINESS.md.
-  const uint8_t request_frame[1] = {CMD_ASK_CHALLENGE};
+  memcpy(pairing_peer_, dest_node, NODE_ID_SIZE);
+  memcpy(pairing_key_, new_system_key, AES_KEY_SIZE);
+  pairing_state_ = Pairing2W::PUSH_WAIT_CHALLENGE;
 
-  frame::IoFrame tx_frame;
-  const bool built = discovery_manager_->create_key_transfer_2w(
-    &tx_frame, dest_node, own_node_id_, new_system_key, challenge,
-    request_frame, sizeof(request_frame));
-  crypto::secure_zero(challenge, sizeof(challenge));
-
-  if (!built) {
-    LOG_ERROR("Failed to create key transfer frame");
+  if (!transmit_frame(&ask)) {
+    pairing_state_ = Pairing2W::IDLE;
+    crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
     return false;
   }
+  return true;
+}
 
-  return transmit_frame(&tx_frame);
+bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
+  // Addressed to us (or broadcast), and a command that belongs to a pairing
+  // exchange this node is currently part of. 0x3C and 0x33 are only diverted
+  // while we are the initiator waiting for them; otherwise 0x3C is an ordinary
+  // session challenge and must go through the normal gate.
+  const bool for_us = memcmp(frame->dest_node, own_node_id_, NODE_ID_SIZE) == 0 ||
+                      frame::is_broadcast(frame->dest_node);
+  if (!for_us) {
+    return false;
+  }
+  switch (frame->command_id) {
+    case CMD_ASK_CHALLENGE:  // 0x31
+      return accept_pairing_;
+    case CMD_KEY_TRANSFER:   // 0x32
+      return accept_pairing_;
+    case CMD_CHALLENGE_REQUEST:  // 0x3C
+      return pairing_state_ == Pairing2W::PUSH_WAIT_CHALLENGE;
+    case CMD_KEY_TRANSFER_ACK:   // 0x33
+      return pairing_state_ == Pairing2W::PUSH_WAIT_ACK;
+    default:
+      return false;
+  }
+}
+
+void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
+  const bool from_peer = memcmp(frame->src_node, pairing_peer_, NODE_ID_SIZE) == 0;
+
+  // ---- Initiator (controller pushing its key) ----------------------------
+  if (pairing_state_ == Pairing2W::PUSH_WAIT_CHALLENGE &&
+      frame->command_id == CMD_CHALLENGE_REQUEST && from_peer) {
+    if (frame->data_len < HMAC_SIZE) {
+      LOG_WARN("Pairing: challenge too short");
+      return;
+    }
+    // Build the 0x32 with the nonce the device just chose. The IV is seeded by
+    // the ask-challenge command, matching what the device will use to unmask.
+    const uint8_t request_frame[1] = {CMD_ASK_CHALLENGE};
+    frame::IoFrame kt;
+    const bool built = discovery_manager_->create_key_transfer_2w(
+      &kt, pairing_peer_, own_node_id_, pairing_key_, frame->data,
+      request_frame, sizeof(request_frame));
+    if (!built) {
+      LOG_ERROR("Pairing: failed to build key transfer");
+      pairing_state_ = Pairing2W::IDLE;
+      return;
+    }
+    pairing_state_ = Pairing2W::PUSH_WAIT_ACK;
+    LOG_INFO("Pairing: sending key transfer");
+    transmit_frame(&kt);
+    // From now on we speak to the device under the key we just pushed.
+    set_system_key(pairing_key_);
+    return;
+  }
+
+  if (pairing_state_ == Pairing2W::PUSH_WAIT_ACK &&
+      frame->command_id == CMD_KEY_TRANSFER_ACK && from_peer) {
+    LOG_INFO("Pairing complete: device acknowledged the key");
+    pairing_state_ = Pairing2W::IDLE;
+    crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+    return;
+  }
+
+  // ---- Follower (device accepting a pushed key) --------------------------
+  if (!accept_pairing_) {
+    return;
+  }
+
+  if (frame->command_id == CMD_ASK_CHALLENGE) {
+    // Answer with a fresh challenge of our own (0x3C). create_challenge_request
+    // stores the nonce, which recover_2w_key() will need to unmask the 0x32.
+    memcpy(pairing_peer_, frame->src_node, NODE_ID_SIZE);
+    frame::IoFrame chal;
+    if (auth_manager_->create_challenge_request(&chal, frame->src_node, own_node_id_,
+                                                NOW_MS())) {
+      LOG_INFO("Pairing: answering with a challenge");
+      transmit_frame(&chal);
+    } else {
+      LOG_ERROR("Pairing: could not create a challenge (no secure random?)");
+    }
+    return;
+  }
+
+  if (frame->command_id == CMD_KEY_TRANSFER && from_peer) {
+    const uint8_t request_frame[1] = {CMD_ASK_CHALLENGE};
+    uint8_t recovered[AES_KEY_SIZE];
+    if (!auth_manager_->recover_2w_key(frame, request_frame, sizeof(request_frame),
+                                       recovered)) {
+      LOG_WARN("Pairing: could not recover the pushed key");
+      return;
+    }
+
+    set_system_key(recovered);
+
+    // Acknowledge with 0x33 so the controller knows the key landed.
+    frame::IoFrame ack;
+    frame::init_frame(&ack, false);
+    frame::set_destination(&ack, frame->src_node);
+    frame::set_source(&ack, own_node_id_);
+    if (frame::set_command(&ack, CMD_KEY_TRANSFER_ACK, nullptr, 0) &&
+        frame::finalize_frame_plain(&ack)) {
+      transmit_frame(&ack);
+    }
+
+    LOG_INFO("Pairing: adopted a pushed system key");
+    if (key_received_callback_ != nullptr) {
+      key_received_callback_(recovered, frame->src_node, key_received_context_);
+    }
+    crypto::secure_zero(recovered, sizeof(recovered));
+    return;
+  }
 }
 
 bool IoHomeControl::has_recent_beacon(unsigned long timeout_ms) {

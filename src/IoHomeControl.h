@@ -106,6 +106,30 @@ enum class LogLevel : uint8_t {
 typedef void (*LogCallback)(LogLevel level, const char* message, void* context);
 
 /**
+ * @brief Sink for a system key received during 2W pairing
+ *
+ * Fired when this node, acting as the follower in a 2W key transfer, has
+ * recovered and adopted a key pushed to it by a controller. The key is already
+ * in effect (set_system_key() has run); this is the hook to persist it so it
+ * survives a reboot.
+ *
+ * @param key The 16-byte system key now in use
+ * @param from_node The controller that sent it (3 bytes)
+ * @param context Opaque pointer supplied with the callback
+ */
+typedef void (*KeyReceivedCallback)(const uint8_t key[16], const uint8_t from_node[3],
+                                    void* context);
+
+/**
+ * @brief State of a 2W pairing exchange in progress
+ */
+enum class Pairing2W : uint8_t {
+  IDLE = 0,
+  PUSH_WAIT_CHALLENGE,  // controller sent 0x31, waiting for the device's 0x3C
+  PUSH_WAIT_ACK         // controller sent 0x32, waiting for the device's 0x33
+};
+
+/**
  * @brief Why a received frame was discarded
  */
 enum class RxReject : uint8_t {
@@ -541,10 +565,61 @@ public:
                       uint8_t manufacturer = 0x00);
 
   /**
-   * @brief Pair a device by transferring a key (2W mode)
+   * @brief Push a system key to a device (2W mode, controller/initiator role)
+   *
+   * Runs the documented push exchange rather than firing a lone frame:
+   *
+   *   1. this -> device:  0x31  ask challenge
+   *   2. device -> this:  0x3C  challenge (a nonce the device chose)
+   *   3. this -> device:  0x32  the key, masked against that nonce
+   *   4. device -> this:  0x33  key transfer acknowledged
+   *
+   * This call performs step 1 and returns; steps 2-4 are driven by the received
+   * 0x3C and 0x33, so the caller must keep pumping the receive path (with 2W
+   * frequency hopping updated) until is_pairing() goes false. On success this
+   * node adopts @p new_system_key, so its later commands to the device
+   * authenticate under it. Closes the gap where the old one-shot version sent
+   * 0x32 with a challenge the device had never seen.
+   *
+   * @param dest_node Target device node ID (3 bytes)
+   * @param new_system_key Key to push and then use (16 bytes)
+   * @return true if the opening 0x31 was sent
    */
   bool pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
                       const uint8_t new_system_key[AES_KEY_SIZE]);
+
+  /**
+   * @brief Accept a system key pushed by a controller (2W follower role)
+   *
+   * With this enabled, an incoming 0x31 is answered with a fresh 0x3C challenge,
+   * and the 0x32 that follows is unmasked, adopted as the system key, and
+   * acknowledged with 0x33. The recovered key is delivered to the callback set
+   * with set_key_received_callback() so it can be persisted.
+   *
+   * @param enabled Whether to act on pairing requests
+   */
+  void set_accept_pairing(bool enabled);
+
+  /**
+   * @brief Whether a pairing exchange is currently in progress
+   */
+  bool is_pairing() const { return pairing_state_ != Pairing2W::IDLE; }
+
+  /**
+   * @brief Install the sink for a key received during pairing
+   */
+  void set_key_received_callback(KeyReceivedCallback callback, void* context = nullptr);
+
+  /**
+   * @brief Replace the system key in use at runtime
+   *
+   * Updates both the frame authentication key and the 2W authentication
+   * manager. Pairing calls this itself; it is public so an application can apply
+   * a persisted key after begin().
+   *
+   * @param key New system key (16 bytes)
+   */
+  void set_system_key(const uint8_t key[AES_KEY_SIZE]);
 
   /**
    * @brief Check whether a beacon was received recently (2W mode)
@@ -611,6 +686,21 @@ protected:
   mode2w::AuthenticationManager* auth_manager_;
   mode2w::BeaconHandler* beacon_handler_;
   mode2w::DiscoveryManager* discovery_manager_;
+
+  // 2W pairing
+  KeyReceivedCallback key_received_callback_;
+  void* key_received_context_;
+  bool accept_pairing_;
+  Pairing2W pairing_state_;
+  uint8_t pairing_peer_[NODE_ID_SIZE];
+  uint8_t pairing_key_[AES_KEY_SIZE];
+
+  /// True when a frame belongs to a pairing exchange and must skip the session
+  /// authentication gate (the peers do not yet share the key that gate checks).
+  bool is_pairing_frame(const frame::IoFrame* frame) const;
+
+  /// Advance the pairing state machine on a received pairing frame.
+  void handle_pairing_frame(const frame::IoFrame* frame);
 
   /**
    * @brief Transmit a frame

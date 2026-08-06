@@ -315,6 +315,10 @@ What is genuinely still open:
   from the KLF 200 spec but not the sign of Functional Parameter 1 on a tilting
   blind. Still needs a capture of a known tilt command.
 - **Is either key-holding device's debug interface locked?** (§6; needs a probe.)
-- **A 2W key-receive counterpart.** The library has 2W key-transfer *builders* but
-  no receiver that stores a delivered key. `handle_1w_key_transfer_` is the 1W
-  equivalent; a 2W one (from a `0x32`) would complete the pairing-as-follower path.
+- **A 2W key-receive counterpart — now built.** `IoHomeControl` gained the
+  follower side: `set_accept_pairing()` answers a `0x31` with a challenge,
+  unmasks the `0x32` with `AuthenticationManager::recover_2w_key()`, adopts the
+  key and acknowledges with `0x33`; `pair_device_2w` runs the matching push.
+  Both are host-tested end to end in `test_controller`, pending a hardware run
+  (K1). The end-to-end 2W *handshake* above still needs a real capture to
+  confirm the on-air authentication of each pairing frame.

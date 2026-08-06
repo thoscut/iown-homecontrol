@@ -256,6 +256,22 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
   return true;
 }
 
+bool AuthenticationManager::recover_2w_key(const frame::IoFrame* key_frame,
+                                           const uint8_t* request_frame_data,
+                                           size_t request_data_len,
+                                           uint8_t key_out[AES_KEY_SIZE]) const {
+  if (key_frame == nullptr || key_out == nullptr) {
+    return false;
+  }
+  if (key_frame->command_id != CMD_KEY_TRANSFER || key_frame->data_len < AES_KEY_SIZE) {
+    return false;
+  }
+  // Uses current_challenge_ - the nonce this node put in the 0x3C it sent - plus
+  // the request frame and the public transfer key. No system key involved.
+  return crypto::decrypt_2w_key(key_frame->data, request_frame_data, request_data_len,
+                                current_challenge_, key_out);
+}
+
 bool AuthenticationManager::has_active_challenge(unsigned long now_ms) {
   const ChallengeState state = get_state(now_ms);
   return state == ChallengeState::CHALLENGE_SENT || state == ChallengeState::AUTHENTICATED;

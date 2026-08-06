@@ -391,6 +391,115 @@ void test_stray_challenge_response_does_not_break_the_session(void) {
 }
 
 // ---------------------------------------------------------------------------
+// 2W pairing: push a key from one controller to another, end to end
+// ---------------------------------------------------------------------------
+
+namespace {
+struct KeyCapture {
+  bool got = false;
+  uint8_t key[16] = {0};
+  uint8_t from[3] = {0};
+};
+void key_cb(const uint8_t key[16], const uint8_t from[3], void* ctx) {
+  auto* c = static_cast<KeyCapture*>(ctx);
+  c->got = true;
+  memcpy(c->key, key, 16);
+  memcpy(c->from, from, 3);
+}
+
+/// Carry whatever `from` just transmitted to `to`, and let `to` process it.
+/// Returns the command ID that moved, or 0xFF if nothing was sent.
+uint8_t relay(PhysicalLayer& from_radio, IoHomeControl& to, PhysicalLayer& to_radio) {
+  if (from_radio.last_transmission.empty()) {
+    return 0xFF;
+  }
+  std::vector<uint8_t> frame = from_radio.last_transmission;
+  from_radio.last_transmission.clear();
+  const uint8_t cmd = frame.size() > 8 ? frame[8] : 0xFF;
+  to_radio.deliver(frame.data(), frame.size());
+  iohome::frame::IoFrame received;
+  to.check_received(&received);
+  return cmd;
+}
+}  // namespace
+
+void test_2w_push_pairing_transfers_the_key(void) {
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+
+  TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+
+  KeyCapture cap;
+  device.set_key_received_callback(key_cb, &cap);
+  device.set_accept_pairing(true);
+
+  // Step 1: the controller asks for a challenge. The very first frame it sends
+  // must be 0x31 - not a 0x32 fired blind, which was the K9 bug.
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, ctrl_radio.last_transmission[8]);
+
+  // 0x31 -> device answers 0x3C.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, dev_radio.last_transmission[8]);
+
+  // 0x3C -> controller sends the key transfer 0x32.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, ctrl_radio.last_transmission[8]);
+
+  // 0x32 -> device recovers the key, adopts it, and acknowledges with 0x33.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_TRUE(cap.got);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(STACK_KEY, cap.key, 16);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(CTRL, cap.from, 3);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, dev_radio.last_transmission[8]);
+
+  // 0x33 -> controller finishes.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_FALSE(controller.is_pairing());
+
+  // The recovered key matching the pushed key byte for byte (asserted above via
+  // the callback) is the proof the transfer worked: the device unmasked exactly
+  // what the controller sent, using the challenge it had itself chosen.
+}
+
+void test_2w_pairing_is_off_by_default(void) {
+  // A node that has not opted in must ignore an ask-challenge, so a stranger
+  // cannot make it emit a challenge or accept a key.
+  PhysicalLayer radio;
+  IoHomeControl device(&radio);
+  TEST_ASSERT_TRUE(device.begin(OWN_NODE, SYSTEM_KEY, /*is_1w=*/false));
+  device.start_receive();
+
+  iohome::frame::IoFrame ask;
+  iohome::frame::init_frame(&ask, false);
+  iohome::frame::set_destination(&ask, OWN_NODE);
+  iohome::frame::set_source(&ask, PEER_NODE);
+  iohome::frame::set_command(&ask, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  iohome::frame::finalize_frame_plain(&ask);
+
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(&ask, buffer, sizeof(buffer));
+  radio.reset();
+  radio.deliver(buffer, len);
+
+  iohome::frame::IoFrame received;
+  device.check_received(&received);
+  // Nothing sent back.
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());
+}
+
+// ---------------------------------------------------------------------------
 // Rolling code persistence
 // ---------------------------------------------------------------------------
 
@@ -1053,6 +1162,8 @@ int main(int, char**) {
   RUN_TEST(test_log_level_filters);
   RUN_TEST(test_log_passthrough_does_not_reformat);
 
+  RUN_TEST(test_2w_push_pairing_transfers_the_key);
+  RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_pair_device_1w_emits_two_frames);
   RUN_TEST(test_pair_rejects_nullptr);
   RUN_TEST(test_discovery_transmits_request);

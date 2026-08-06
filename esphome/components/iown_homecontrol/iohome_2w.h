@@ -226,6 +226,30 @@ public:
   bool verify_challenge_response(const frame::IoFrame* frame, unsigned long now_ms);
 
   /**
+   * @brief Recover a system key pushed to us in a 2W key transfer (0x32)
+   *
+   * The counterpart to sending a key. When this node has answered a peer's
+   * "ask challenge" (0x31) with a challenge of its own (0x3C, via
+   * create_challenge_request(), which stores the nonce), the peer replies with
+   * a 0x32 carrying its key masked against an IV built from that nonce and the
+   * frame that requested the transfer. This undoes the mask.
+   *
+   * The mask uses only the public transfer key, the challenge and the request
+   * frame - never this node's system key - so it works before any key is
+   * shared, which is the whole point of a key transfer.
+   *
+   * @param key_frame The received 0x32 frame
+   * @param request_frame_data The frame that seeded the IV: for the documented
+   *        push that is the "ask challenge" command byte, {0x31}
+   * @param request_data_len Length of @p request_frame_data
+   * @param key_out Recovered key (16 bytes)
+   * @return true if the frame was a 0x32 of the right size and unmasking ran
+   */
+  bool recover_2w_key(const frame::IoFrame* key_frame,
+                      const uint8_t* request_frame_data, size_t request_data_len,
+                      uint8_t key_out[AES_KEY_SIZE]) const;
+
+  /**
    * @brief Get the current challenge (6 bytes)
    *
    * Only meaningful while has_active_challenge() is true; the buffer is zeroed

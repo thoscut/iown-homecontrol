@@ -167,7 +167,7 @@ for exactly that reason. It cannot cause an actuator to move.
 | Attacker records and replays a 1W command | **Within a power cycle** | Receive-side `ReplayGuard` rejects it while the node stays up. Its per-source sequence state is in RAM only and is *not* primed on boot, so the first replay from each source after a reboot is accepted. Harmless in this project — received 1W frames only update reported position, never actuator motion — but a receiver that *acts* on 1W commands must persist the last-accepted sequence per peer and restore it with `prime()`. |
 | Attacker replays a 2W command immediately | Yes | Recent-MAC history |
 | Attacker replays a 2W command later in the same session | **Partly** | Bounded by the session timeout, not eliminated |
-| Attacker replays a command *we sent* after we power-cycle | Yes | Our transmit rolling code is persisted in NVS with block reservation, so we never re-use a sequence the actuator has already seen (distinct from the receive-side guard in the row above) |
+| Attacker replays a command *we sent* after we power-cycle | Yes | Our transmit rolling code is persisted in NVS with block reservation, so we never reuse a sequence the actuator has already seen (distinct from the receive-side guard in the row above) |
 | Attacker learns the MAC by timing your receiver | Yes | Constant-time comparison |
 | Attacker predicts a 2W challenge | Yes | CSPRNG-backed challenges |
 | Attacker observes which devices move and when | **No** | Frames are not encrypted |

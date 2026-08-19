@@ -848,6 +848,57 @@ void test_initiator_ignores_stranger_pairing_requests(void) {
   TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
 }
 
+void test_2w_follower_rejects_unsolicited_key_transfer(void) {
+  // SECURITY: a fresh accept-pairing 2W follower must NOT adopt a key from an
+  // UNSOLICITED 0x32. Before the guards, an attacker could send one CRC-valid
+  // 0x32 from src 00:00:00 - matching the zeroed default pairing_peer_ - masked
+  // with the zero default challenge, and the follower would adopt an
+  // attacker-chosen system key with no 0x31/0x3C handshake ever occurring.
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t GROUP[3] = {0x00, 0x00, 0x00};
+  const uint8_t SYS[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                           0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+
+  PhysicalLayer dev_radio;
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(device.begin(DEV, SYS, /*is_1w=*/false));
+  device.set_accept_pairing(true);
+  KeyCapture cap;
+  device.set_key_received_callback(key_cb, &cap);
+  device.start_receive();
+
+  auto forged_key_transfer = [&](const uint8_t src[3]) {
+    iohome::frame::IoFrame kt;
+    iohome::frame::init_frame(&kt, false);
+    iohome::frame::set_destination(&kt, DEV);
+    iohome::frame::set_source(&kt, src);
+    uint8_t payload[20];  // >= AES_KEY_SIZE; attacker-controlled bytes
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = 0xAB;
+    iohome::frame::set_command(&kt, iohome::CMD_KEY_TRANSFER, payload, sizeof(payload));
+    iohome::frame::finalize_frame_plain(&kt);
+    uint8_t buf[iohome::FRAME_MAX_SIZE];
+    const size_t n = iohome::frame::serialize_frame(&kt, buf, sizeof(buf));
+    dev_radio.reset();
+    dev_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    device.check_received(&got);
+  };
+
+  // From the group address (matches the zeroed pairing_peer_): must be rejected.
+  forged_key_transfer(GROUP);
+  TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());  // no 0x33 ack -> not adopted
+  TEST_ASSERT_FALSE(cap.got);                              // no key surfaced/adopted
+
+  // From an arbitrary non-peer address (from_peer is false anyway): also rejected.
+  forged_key_transfer(CTRL);
+  TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());
+  TEST_ASSERT_FALSE(cap.got);
+
+  // The device still authenticates under its ORIGINAL key - nothing was adopted.
+  TEST_ASSERT_TRUE(speaks_key(device, dev_radio, DEV, CTRL, SYS));
+}
+
 void test_2w_pull_collects_the_device_key(void) {
   const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
   const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
@@ -1640,6 +1691,7 @@ int main(int, char**) {
   RUN_TEST(test_2w_push_adopts_new_key_only_after_ack);
   RUN_TEST(test_2w_push_transmit_failure_keeps_old_key);
   RUN_TEST(test_initiator_ignores_stranger_pairing_requests);
+  RUN_TEST(test_2w_follower_rejects_unsolicited_key_transfer);
   RUN_TEST(test_2w_pull_collects_the_device_key);
   RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);

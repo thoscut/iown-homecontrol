@@ -1190,6 +1190,15 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     return;
   }
 
+  // Reject the all-zero source address. It is the group address, never a real
+  // node's own address, and pairing_peer_ starts all-zero - so without this an
+  // attacker using src 00:00:00 would satisfy from_peer against a fresh node
+  // whose pairing_peer_ has not been set yet.
+  const uint8_t zero_addr[NODE_ID_SIZE] = {0};
+  if (memcmp(frame->src_node, zero_addr, NODE_ID_SIZE) == 0) {
+    return;
+  }
+
   const bool from_peer = memcmp(frame->src_node, pairing_peer_, NODE_ID_SIZE) == 0;
 
   // ---- Initiator (controller pushing its key) ----------------------------
@@ -1318,6 +1327,20 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
   }
 
   if (frame->command_id == CMD_KEY_TRANSFER && from_peer) {
+    // A pushed key is only legitimate if we actually challenged this peer first:
+    // the 0x32 is masked against the random nonce our own 0x3C carried. Without an
+    // active challenge - e.g. a fresh accept-pairing node that has answered no
+    // 0x31 yet - pairing_peer_ and current_challenge_ are still their all-zero
+    // defaults, so an attacker could send one unsolicited 0x32 from src 00:00:00
+    // (matching the zeroed pairing_peer_), have us unmask it with the zero
+    // challenge, and adopt an attacker-chosen system key. Requiring the challenge
+    // we generated to still be live closes that: the attacker cannot forge a 0x32
+    // bound to a random nonce it never saw.
+    if (!auth_manager_->has_active_challenge(NOW_MS())) {
+      LOG_WARN("Pairing: ignoring a key transfer we never challenged for");
+      return;
+    }
+
     const uint8_t request_frame[1] = {CMD_ASK_CHALLENGE};
     uint8_t recovered[AES_KEY_SIZE];
     if (!auth_manager_->recover_2w_key(frame, request_frame, sizeof(request_frame),

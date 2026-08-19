@@ -274,6 +274,17 @@ bool AuthenticationManager::recover_2w_key(const frame::IoFrame* key_frame,
   if (key_frame->command_id != CMD_KEY_TRANSFER || key_frame->data_len < AES_KEY_SIZE) {
     return false;
   }
+  // Never unmask against a challenge we never generated. current_challenge_ is
+  // all zeros until this node sends a 0x3C; unmasking with it would turn a
+  // fully attacker-known mask into an attacker-chosen key. An all-zero nonce is
+  // not a value the CSPRNG produces in practice, so rejecting it costs nothing.
+  bool challenge_set = false;
+  for (size_t i = 0; i < HMAC_SIZE; i++) {
+    challenge_set |= (current_challenge_[i] != 0);
+  }
+  if (!challenge_set) {
+    return false;
+  }
   // Uses current_challenge_ - the nonce this node put in the 0x3C it sent - plus
   // the request frame and the public transfer key. No system key involved.
   return crypto::decrypt_2w_key(key_frame->data, request_frame_data, request_data_len,

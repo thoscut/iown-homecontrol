@@ -776,6 +776,22 @@ protected:
   /// on the receive path so the guard runs even without a matching answer.
   void expire_stale_pairing();
 
+  /// The clock the pairing timeout reads. In production it is NOW_MS(); a host
+  /// test can pin it via set_pairing_clock_ms() to exercise the 5 s expiry,
+  /// which is otherwise unreachable (clock() cannot be advanced by a test).
+  uint32_t pairing_now_ms() const;
+  bool pairing_clock_overridden_;
+  uint32_t pairing_clock_ms_;
+
+ public:
+  /// Test seam (not for production use): pin the clock the pairing timeout reads.
+  void set_pairing_clock_ms(uint32_t ms) {
+    pairing_clock_overridden_ = true;
+    pairing_clock_ms_ = ms;
+  }
+
+ protected:
+
   /// Bytes to pull off the air per packet. A frame is at most FRAME_MAX_SIZE
   /// logical bytes, each ten bits on the wire, so up to 43 arrive; 64 leaves
   /// room for that and the trailing preamble the receiver sees after it.

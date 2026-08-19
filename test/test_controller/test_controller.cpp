@@ -595,6 +595,111 @@ void test_2w_pairing_ignores_a_stranger_challenge(void) {
   TEST_ASSERT_TRUE(controller.is_pairing());
 }
 
+void test_pairing_expires_after_timeout(void) {
+  // A stalled push handshake must reset to IDLE after PAIRING_TIMEOUT_MS (5 s) so
+  // it stops diverting unrelated 0x3C/0x32 frames from the MAC gate. The timeout
+  // reads a clock a host cannot advance (clock()), so pin it via the test seam.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+  controller.start_receive();
+
+  controller.set_pairing_clock_ms(1000);
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));  // PUSH_WAIT_CHALLENGE
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  radio.last_transmission.clear();  // drop the 0x31
+
+  // Jump well past the 5 s timeout, then deliver the peer's genuine 0x3C. Because
+  // the handshake has expired, check_received() resets it to IDLE *before*
+  // routing, so this 0x3C is no longer the awaited challenge - it goes through
+  // the normal gate and no key transfer is emitted. Were the timeout broken, the
+  // controller would instead treat it as the challenge, send its 0x32, and stay
+  // pairing - so is_pairing()==false here is exactly what the timeout buys.
+  controller.set_pairing_clock_ms(1000 + 6000);
+
+  iohome::mode2w::AuthenticationManager signer;
+  signer.begin(STACK_KEY);
+  iohome::frame::IoFrame chal;
+  TEST_ASSERT_TRUE(signer.create_challenge_request(&chal, CTRL, DEV, 1000UL));
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  const size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+  radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  controller.check_received(&got);
+
+  TEST_ASSERT_FALSE(controller.is_pairing());          // handshake abandoned
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());   // no 0x32 emitted
+}
+
+void test_pairing_rejects_truncated_frames(void) {
+  // Pairing frames are CRC-checked but NOT MAC-checked, so their contents are
+  // attacker-controlled. The data_len guards in handle_pairing_frame must reject
+  // a CRC-valid frame with a truncated data field without emitting a key or
+  // reading past the short buffer (a regression would trip ASan here).
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+
+  // Controller waiting for its challenge: a 0x3C from the peer with < HMAC_SIZE
+  // of data must be dropped, not turned into a key transfer.
+  {
+    PhysicalLayer ctrl_radio;
+    IoHomeControl controller(&ctrl_radio);
+    TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+    controller.start_receive();
+    TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));
+    ctrl_radio.last_transmission.clear();
+
+    iohome::frame::IoFrame chal;
+    iohome::frame::init_frame(&chal, false);
+    iohome::frame::set_destination(&chal, CTRL);
+    iohome::frame::set_source(&chal, DEV);
+    const uint8_t tiny[3] = {0x11, 0x22, 0x33};  // shorter than HMAC_SIZE
+    TEST_ASSERT_TRUE(
+        iohome::frame::set_command(&chal, iohome::CMD_CHALLENGE_REQUEST, tiny, sizeof(tiny)));
+    iohome::frame::finalize_frame_plain(&chal);
+    const size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+    ctrl_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    controller.check_received(&got);
+
+    TEST_ASSERT_TRUE(ctrl_radio.last_transmission.empty());  // no 0x32 built from a short nonce
+    TEST_ASSERT_TRUE(controller.is_pairing());               // state untouched
+  }
+
+  // Accept-pairing device: a 0x38 pull request with < HMAC_SIZE of data must not
+  // produce a key transfer.
+  {
+    PhysicalLayer dev_radio;
+    IoHomeControl device(&dev_radio);
+    TEST_ASSERT_TRUE(device.begin(DEV, STACK_KEY, /*is_1w=*/false));
+    device.set_accept_pairing(true);
+    device.start_receive();
+
+    iohome::frame::IoFrame launch;
+    iohome::frame::init_frame(&launch, false);
+    iohome::frame::set_destination(&launch, DEV);
+    iohome::frame::set_source(&launch, CTRL);
+    const uint8_t tiny[2] = {0x44, 0x55};  // shorter than HMAC_SIZE
+    TEST_ASSERT_TRUE(
+        iohome::frame::set_command(&launch, iohome::CMD_LAUNCH_KEY_TRANSFER, tiny, sizeof(tiny)));
+    iohome::frame::finalize_frame_plain(&launch);
+    const size_t n = iohome::frame::serialize_frame(&launch, buf, sizeof(buf));
+    dev_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    device.check_received(&got);
+
+    TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());  // no key leaked
+  }
+}
+
 void test_2w_pull_collects_the_device_key(void) {
   const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
   const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
@@ -1382,6 +1487,8 @@ int main(int, char**) {
 
   RUN_TEST(test_2w_push_pairing_transfers_the_key);
   RUN_TEST(test_2w_pairing_ignores_a_stranger_challenge);
+  RUN_TEST(test_pairing_expires_after_timeout);
+  RUN_TEST(test_pairing_rejects_truncated_frames);
   RUN_TEST(test_2w_pull_collects_the_device_key);
   RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);

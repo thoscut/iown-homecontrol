@@ -456,7 +456,17 @@ bool IOWNHomeControlComponent::is_2w_authenticated() {
 bool IOWNHomeControlComponent::ensure_2w_session_(uint32_t target_address) {
   const uint32_t now = millis();
 
-  if (this->auth_.is_authenticated(now)) {
+  uint8_t dest[iohome::NODE_ID_SIZE];
+  uint8_t src[iohome::NODE_ID_SIZE];
+  address_to_node(target_address, dest);
+  address_to_node(this->source_address_, src);
+
+  // The session must belong to THIS actuator. A session negotiated with a
+  // different cover cannot sign a frame to this one - its challenge nonce only
+  // signs frames between the two nodes that negotiated it - so reusing it would
+  // send a frame the target silently rejects while we report success. When the
+  // held session is for another peer, fall through and challenge this target.
+  if (this->auth_.is_authenticated_with(dest, now)) {
     return true;
   }
 
@@ -466,11 +476,6 @@ bool IOWNHomeControlComponent::ensure_2w_session_(uint32_t target_address) {
     ESP_LOGD(TAG, "2W handshake in progress, command not sent");
     return false;
   }
-
-  uint8_t dest[iohome::NODE_ID_SIZE];
-  uint8_t src[iohome::NODE_ID_SIZE];
-  address_to_node(target_address, dest);
-  address_to_node(this->source_address_, src);
 
   iohome::frame::IoFrame request;
   if (!this->auth_.create_challenge_request(&request, dest, src, now)) {

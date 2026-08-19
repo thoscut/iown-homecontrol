@@ -289,6 +289,16 @@ public:
   bool is_authenticated(unsigned long now_ms) { return get_state(now_ms) == ChallengeState::AUTHENTICATED; }
 
   /**
+   * @brief Whether an authenticated session exists AND it is bound to this peer
+   *
+   * A 2W session's challenge nonce only signs frames between the two nodes that
+   * negotiated it. Reusing a session established with actuator A to command
+   * actuator B produces a frame B never authenticated and silently rejects, so
+   * a caller must confirm the session belongs to the target before sending.
+   */
+  bool is_authenticated_with(const uint8_t peer[NODE_ID_SIZE], unsigned long now_ms);
+
+  /**
    * @brief Reset the authentication state and wipe the stored challenge
    */
   void reset();

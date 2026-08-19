@@ -85,9 +85,14 @@ bool IOWNCover::update_estimate_(uint32_t now) {
 
   if (arrived) {
     // For an intermediate target the actuator is still running: it was told to
-    // travel all the way, so it needs an explicit STOP at the right moment.
+    // travel all the way, so it needs an explicit STOP at the right moment. If
+    // that STOP cannot be sent (a lapsed 2W session), do NOT report arrival -
+    // the actuator keeps travelling, so leave the movement running and retry on
+    // the next tick rather than freezing the estimate at a position it overshoots.
     if (this->position > 0.01f && this->position < 0.99f) {
-      this->send_main_param_(IOHC_PARAM_STOP);
+      if (!this->send_main_param_(IOHC_PARAM_STOP)) {
+        return false;
+      }
     }
 
     this->finish_movement_();
@@ -161,7 +166,15 @@ void IOWNCover::control(const cover::CoverCall &call) {
 
   if (call.get_stop()) {
     ESP_LOGI(TAG, "STOP -> 0x%06X", static_cast<unsigned int>(this->target_address_));
-    this->send_main_param_(IOHC_PARAM_STOP);
+    if (!this->send_main_param_(IOHC_PARAM_STOP)) {
+      // The STOP did not go out - most often a 2W session lapsed mid-travel. The
+      // actuator never received it and keeps moving, so leaving the movement
+      // running lets the estimate keep tracking; freezing here would strand the
+      // reported position at a value the actuator sails past. Same gating the
+      // OPEN/CLOSE/position paths already use.
+      ESP_LOGW(TAG, "STOP not sent (2W session not ready?); cover still moving");
+      return;
+    }
 
     // Freeze at the current estimate. Read it without going through
     // update_estimate_(), which would send a second STOP if the movement

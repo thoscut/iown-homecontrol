@@ -116,7 +116,7 @@ def hex_candidates(text: str):
     # Drop 0x / \x prefixes, then treat runs of hex digits + common separators as
     # one region; strip the separators to recover the byte stream.
     text = re.sub(r"0x|\\x", "", text, flags=re.IGNORECASE)
-    for m in re.finditer(r"[0-9a-fA-F][0-9a-fA-F\s,:_\-]{38,}[0-9a-fA-F]", text):
+    for m in re.finditer(r"[0-9a-fA-F][0-9a-fA-F\s,:_|.;/\-]{38,}[0-9a-fA-F]", text):
         raw = re.sub(r"[^0-9a-fA-F]", "", m.group(0))
         if len(raw) % 2:
             raw = raw[:-1]
@@ -141,13 +141,19 @@ def main() -> int:
     hits: list = []
     for f in files:
         try:
-            text = open(f, "rb").read().decode("utf-8")
-        except (OSError, UnicodeDecodeError):
-            # Non-text file. A frame committed as data lives in a text form (hex or
-            # base64); scanning arbitrary binaries (PDFs, images, vendor firmware)
-            # only yields coincidental CRC-valid windows. Binary capture blobs are
-            # out of scope by design - see the module docstring.
+            data = open(f, "rb").read()
+        except OSError:
             continue
+        # Skip only genuinely binary files (NUL byte = git's own binary heuristic);
+        # scanning images/PDFs/firmware just yields coincidental CRC-valid windows.
+        # A file that is text with a few stray non-UTF-8 bytes (a Latin-1 degree
+        # sign from a capture tool, a stray BOM) is NOT skipped: decode leniently
+        # so its readable hex is still scanned. Skipping such a file outright let a
+        # real frame ride through while CI printed OK - the exact "hides in a
+        # representation the check does not cover" pattern this guard exists for.
+        if b"\x00" in data:
+            continue
+        text = data.decode("utf-8", errors="replace")
         # Per line: catches a framed frame on its own line (de-framed from the
         # line's start) and any single-line de-framed frame, in any separator
         # style. Whole text: catches a de-framed frame wrapped across lines.

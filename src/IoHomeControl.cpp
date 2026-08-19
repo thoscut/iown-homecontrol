@@ -80,7 +80,9 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     key_received_context_(nullptr),
     accept_pairing_(false),
     pairing_state_(Pairing2W::IDLE),
-    pairing_started_ms_(0)
+    pairing_started_ms_(0),
+    pairing_clock_overridden_(false),
+    pairing_clock_ms_(0)
 {
   memset(own_node_id_, 0, NODE_ID_SIZE);
   memset(system_key_, 0, AES_KEY_SIZE);
@@ -1072,7 +1074,7 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
   memcpy(pairing_peer_, dest_node, NODE_ID_SIZE);
   memcpy(pairing_key_, new_system_key, AES_KEY_SIZE);
   pairing_state_ = Pairing2W::PUSH_WAIT_CHALLENGE;
-  pairing_started_ms_ = static_cast<uint32_t>(NOW_MS());
+  pairing_started_ms_ = pairing_now_ms();
 
   if (!transmit_frame(&ask)) {
     pairing_state_ = Pairing2W::IDLE;
@@ -1113,7 +1115,7 @@ bool IoHomeControl::pull_device_key_2w(const uint8_t dest_node[NODE_ID_SIZE]) {
 
   memcpy(pairing_peer_, dest_node, NODE_ID_SIZE);
   pairing_state_ = Pairing2W::PULL_WAIT_KEY;
-  pairing_started_ms_ = static_cast<uint32_t>(NOW_MS());
+  pairing_started_ms_ = pairing_now_ms();
 
   if (!transmit_frame(&launch)) {
     pairing_state_ = Pairing2W::IDLE;
@@ -1158,13 +1160,17 @@ bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
   }
 }
 
+uint32_t IoHomeControl::pairing_now_ms() const {
+  return pairing_clock_overridden_ ? pairing_clock_ms_ : static_cast<uint32_t>(NOW_MS());
+}
+
 void IoHomeControl::expire_stale_pairing() {
   if (pairing_state_ == Pairing2W::IDLE) {
     return;
   }
   // 32-bit unsigned subtraction is wrap-safe across the millis() rollover (which
   // is itself 32-bit). elapsed = now - start is correct even at the wrap.
-  const uint32_t elapsed = static_cast<uint32_t>(NOW_MS()) - pairing_started_ms_;
+  const uint32_t elapsed = pairing_now_ms() - pairing_started_ms_;
   if (elapsed < PAIRING_TIMEOUT_MS) {
     return;
   }
@@ -1202,18 +1208,29 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
       pairing_state_ = Pairing2W::IDLE;
       return;
     }
-    pairing_state_ = Pairing2W::PUSH_WAIT_ACK;
-    pairing_started_ms_ = static_cast<uint32_t>(NOW_MS());
+    // Do NOT adopt the key yet. If this transmit fails or the 0x32 is lost, the
+    // device never stores the key; adopting it here would leave the controller on
+    // a key the device does not have, so every later command would fail its MAC
+    // with no signal that pairing went wrong. Stay on the old key until the
+    // device acknowledges (the 0x33 branch below), so a retry recovers cleanly.
     LOG_INFO("Pairing: sending key transfer");
-    transmit_frame(&kt);
-    // From now on we speak to the device under the key we just pushed.
-    set_system_key(pairing_key_);
+    if (!transmit_frame(&kt)) {
+      LOG_ERROR("Pairing: key transfer failed to send");
+      pairing_state_ = Pairing2W::IDLE;
+      crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+      return;
+    }
+    pairing_state_ = Pairing2W::PUSH_WAIT_ACK;
+    pairing_started_ms_ = pairing_now_ms();
     return;
   }
 
   if (pairing_state_ == Pairing2W::PUSH_WAIT_ACK &&
       frame->command_id == CMD_KEY_TRANSFER_ACK && from_peer) {
+    // The device stored the key and acknowledged. Only now is it safe to speak
+    // under it - this is what makes PUSH_WAIT_ACK meaningful.
     LOG_INFO("Pairing complete: device acknowledged the key");
+    set_system_key(pairing_key_);
     pairing_state_ = Pairing2W::IDLE;
     crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
     return;

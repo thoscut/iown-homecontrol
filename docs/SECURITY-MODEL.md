@@ -123,12 +123,18 @@ A 6-byte MAC leaves a 1-in-2^48 chance per blind forgery attempt. At the
 protocol's 38.4 kbps that is not a practical online attack, but it is well
 below what a modern design would choose, and it is fixed by the protocol.
 
-### No confidentiality for the ESPHome position feedback
+### ESPHome position feedback is authenticated, but not confidential
 
-The ESPHome component's `position_feedback` option updates cover positions from
-received frames without verifying a MAC. A spoofed frame can therefore show a
-wrong position in Home Assistant. It is off by default and marked experimental
-for exactly that reason. It cannot cause an actuator to move.
+The ESPHome component's `position_feedback` option updates a cover's reported
+position from received frames only after the frame's MAC and rolling code
+verify — the same `validate_frame()` + `ReplayGuard` gate every command goes
+through. `dispatch_to_covers_()` drops any frame that is not `authenticated`, so
+a spoofed or replayed position report cannot show a false position (this was the
+V50/V58 fix). It is off by default because it needs the system key, and it
+cannot cause an actuator to move. What it does *not* provide is confidentiality:
+the frames are unencrypted, so an observer can still see which covers report and
+when — io-homecontrol offers no confidentiality at all (the frames are plaintext
+apart from the MAC).
 
 ---
 

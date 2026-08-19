@@ -280,6 +280,12 @@ bool AuthenticationManager::has_active_challenge(unsigned long now_ms) {
   return state == ChallengeState::CHALLENGE_SENT || state == ChallengeState::AUTHENTICATED;
 }
 
+bool AuthenticationManager::is_authenticated_with(const uint8_t peer[NODE_ID_SIZE],
+                                                  unsigned long now_ms) {
+  return is_authenticated(now_ms) && peer_known_ &&
+         memcmp(peer_node_, peer, NODE_ID_SIZE) == 0;
+}
+
 ChallengeState AuthenticationManager::get_state(unsigned long now_ms) {
   // Wrap-safe: unsigned subtraction stays correct past the millis() rollover.
   const unsigned long elapsed = now_ms - state_timestamp_ms_;

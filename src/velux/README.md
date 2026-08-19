@@ -60,8 +60,11 @@ frame::IoFrame frame;
 window.create_ventilation_frame(&frame, src_node, 2);
 controller.transmit_frame(&frame);
 
-// Emergency close (on rain detection)
-window.create_emergency_close_frame(&frame, src_node);
+// Close because of rain: names the rain sensor (Command Originator 0x02) so it
+// outranks a user command. Use create_emergency_close_frame() (Originator 0xFF)
+// only for a genuine emergency, not for rain - the two carry different
+// originators and priorities.
+window.create_rain_close_frame(&frame, src_node);
 controller.transmit_frame(&frame);
 
 // Check rain sensor

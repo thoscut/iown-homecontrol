@@ -1,7 +1,7 @@
 # Hardware bring-up
 
 Everything this library claims about the io-homecontrol wire format is checked
-against captures in `docs/` and reproduced by 223 host-run tests. The core path
+against captures in `docs/` and reproduced by 227 host-run tests. The core path
 has now also been checked against a **physical actuator** on a Heltec V4: it
 pairs, it obeys open/close/position/ventilation (the actuator actually moves),
 and its own frames decode byte-correct. What a laptop still cannot close is the
@@ -222,19 +222,19 @@ they are what turns the open questions below from arguments into answers.
 
 ## 4. Open questions a capture can settle
 
-Each of these is currently marked unverified in the code. None needs pairing;
-all of them need is a capture of the right button being pressed.
+The tilt-direction and payload-length items below are still open and need only a
+capture of the right button being pressed. The other two, K2 and K9, are already
+**resolved** - they are kept here as a record of what closed them.
 
-### K2 - the Velux command IDs
+### K2 - the Velux command IDs (resolved)
 
-`src/velux/iohome_velux.h` declares `VELUX_CMD_*` at 0x58-0x5D, all marked
-`UNVERIFIED`. They appear in no document in this repository and sit in the range
-the standard uses for naming and info commands.
-
-**Experiment:** operate a Velux window through every function its remote offers
-- open, close, stop, ventilation position, rain-sensor query - and look at which
-command IDs appear. If nothing outside 0x00/0x01 shows up, these constants
-describe commands that do not exist and should be deleted.
+**Resolved and removed.** `src/velux/` once declared six `VELUX_CMD_*` constants
+at 0x58-0x5D marked `UNVERIFIED`; they were invented and are now deleted (a grep
+for `VELUX_CMD` finds nothing but the note explaining their removal). The
+functions they claimed each exist as something else - rain is Command Originator
+0x02, ventilation is Main Parameter 0xD803, and so on - not as private command
+IDs. See [`docs/VELUX-FORMAT.md`](VELUX-FORMAT.md) and the header comment in
+`src/velux/iohome_velux.h`.
 
 ### The direction of Functional Parameter 1 (tilt)
 
@@ -255,16 +255,15 @@ minimum plus two more functional parameters. The parser handles both.
 **Experiment:** capture a range of commands and note which lengths appear.
 Anything other than 6 or 8 is new information.
 
-### K9 - the 2W pairing exchange
+### K9 - the 2W pairing exchange (resolved)
 
-`pair_device_2w()` sends the 0x32 key transfer without the 0x3c challenge
-request that `docs/linklayer.md` shows. The crypto underneath is verified
-against a captured exchange; the frame sequence is not implemented.
-
-**Experiment:** capture a real pairing between a controller and an actuator.
-The order and direction of 0x31/0x38, 0x3c, 0x32, 0x3d and 0x33 is what is
-missing, and it is not something to guess - a wrong guess here writes a key
-neither side can use.
+**Implemented and host-tested.** `pair_device_2w()` runs the full documented
+push - 0x31 ask-challenge out, the device's 0x3C in, the 0x32 key transfer, then
+the device's 0x33 ack - and `pull_device_key_2w()` runs the 0x38/0x32 pull; both
+have two-instance host tests (V62/V63). The controller adopts the key only once
+the 0x33 ack arrives. The only thing left is hardware confirmation against a real
+actuator, which K1 already covers; a captured real pairing would still be
+valuable for cross-checking the exact frame timing.
 
 ---
 

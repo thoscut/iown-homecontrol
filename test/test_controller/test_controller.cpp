@@ -1084,17 +1084,18 @@ void test_rolling_code_writes_are_batched(void) {
   controller.set_rolling_code_store(&store, 8);
   TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
 
-  // begin() reserves the first block.
-  TEST_ASSERT_EQUAL_INT(1, store.saves);
-  TEST_ASSERT_EQUAL_UINT16(8, store.stored);
+  // begin() no longer reserves eagerly: a boot that transmits nothing must not
+  // touch flash (see test_rolling_code_noop_reboots_burn_nothing / V72).
+  TEST_ASSERT_EQUAL_INT(0, store.saves);
 
   // Regression: the counter used to be written on every single command, which
-  // wears out the NVS partition. Eight commands must fit in one block.
+  // wears out the NVS partition. The first command reserves one block and writes
+  // once; the next seven ride that reservation with no further writes.
   for (int i = 0; i < 8; i++) {
     controller.close(PEER_NODE);
   }
-  TEST_ASSERT_EQUAL_INT(2, store.saves);
-  TEST_ASSERT_EQUAL_UINT16(16, store.stored);
+  TEST_ASSERT_EQUAL_INT(1, store.saves);
+  TEST_ASSERT_EQUAL_UINT16(9, store.stored);  // reserved past code 8 (1 + block)
 }
 
 void test_rolling_code_resumes_past_reservation(void) {
@@ -1109,13 +1110,42 @@ void test_rolling_code_resumes_past_reservation(void) {
   }
 
   // A reboot must resume at or past every code that could have been sent, so a
-  // receiver never sees a sequence number it has already accepted.
+  // receiver never sees a sequence number it has already accepted. The first
+  // transmit reserved a block ahead of code 0 (reserved_until = 1 + block = 9)
+  // and persisted it before sending, so the restart resumes there.
   IoHomeControl restarted(&radio);
   restarted.set_rolling_code_store(&store, 8);
   restarted.begin(OWN_NODE, SYSTEM_KEY);
 
-  TEST_ASSERT_GREATER_OR_EQUAL(1, restarted.get_rolling_code());
-  TEST_ASSERT_EQUAL_UINT16(8, restarted.get_rolling_code());
+  TEST_ASSERT_GREATER_OR_EQUAL(1, restarted.get_rolling_code());  // past code 0
+  TEST_ASSERT_EQUAL_UINT16(9, restarted.get_rolling_code());
+}
+
+void test_rolling_code_noop_reboots_burn_nothing(void) {
+  PhysicalLayer radio;
+  CountingStore store;
+
+  // Twenty reboots that transmit nothing must not advance the persisted counter.
+  // Eager per-boot reservation used to burn a full block each time, so a run of
+  // brownout / re-init reboots could skip the transmit code past the receiver's
+  // bounded replay window and lock the controller out with no attacker (V72).
+  for (int i = 0; i < 20; i++) {
+    IoHomeControl controller(&radio);
+    controller.set_rolling_code_store(&store, 8);
+    TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+  }
+  TEST_ASSERT_EQUAL_INT(0, store.saves);
+  TEST_ASSERT_EQUAL_UINT16(0, store.stored);
+  TEST_ASSERT_FALSE(store.has_value);
+
+  // ...but the first real transmit still persists a reservation strictly ahead
+  // of the code it hands out, so a crash right after cannot reuse it.
+  IoHomeControl active(&radio);
+  active.set_rolling_code_store(&store, 8);
+  TEST_ASSERT_TRUE(active.begin(OWN_NODE, SYSTEM_KEY));
+  active.close(PEER_NODE);  // uses code 0
+  TEST_ASSERT_EQUAL_INT(1, store.saves);
+  TEST_ASSERT_GREATER_OR_EQUAL(1, store.stored);  // reserved past code 0
 }
 
 // ---------------------------------------------------------------------------
@@ -1727,6 +1757,7 @@ int main(int, char**) {
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_writes_are_batched);
   RUN_TEST(test_rolling_code_resumes_past_reservation);
+  RUN_TEST(test_rolling_code_noop_reboots_burn_nothing);
 
   RUN_TEST(test_accepts_valid_authenticated_frame);
   RUN_TEST(test_rejects_corrupted_frame);

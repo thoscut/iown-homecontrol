@@ -8,6 +8,13 @@
 
 #include <string.h>
 
+// For crypto::secure_zero - a plain memset of the key schedule and state at the
+// end of a block op is a dead store (the locals die on return) and the optimizer
+// removes it at -O2, leaving the raw AES key and the 176-byte schedule on the
+// stack. secure_zero writes through a volatile pointer, which the compiler may
+// not elide - the same guarantee the rest of the crypto layer relies on.
+#include "iohome_crypto.h"
+
 namespace iohome {
 namespace crypto {
 namespace soft_aes {
@@ -227,8 +234,8 @@ void encrypt_block(const uint8_t input[BLOCK_SIZE],
 
   memcpy(output, state, 16);
 
-  memset(round_key, 0, sizeof(round_key));
-  memset(state, 0, sizeof(state));
+  secure_zero(round_key, sizeof(round_key));
+  secure_zero(state, sizeof(state));
 }
 
 void decrypt_block(const uint8_t input[BLOCK_SIZE],
@@ -255,8 +262,8 @@ void decrypt_block(const uint8_t input[BLOCK_SIZE],
 
   memcpy(output, state, 16);
 
-  memset(round_key, 0, sizeof(round_key));
-  memset(state, 0, sizeof(state));
+  secure_zero(round_key, sizeof(round_key));
+  secure_zero(state, sizeof(state));
 }
 
 } // namespace soft_aes

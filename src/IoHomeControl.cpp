@@ -177,8 +177,18 @@ bool IoHomeControl::begin(
     LOG_INFO("2W mode components initialized");
   }
 
-  // Restore the persisted rolling code and reserve a fresh block, so a reboot
-  // never reuses a counter value a receiver has already seen.
+  // Restore the persisted rolling code. The stored value is the previous run's
+  // reserved-until - a code strictly greater than anything that run transmitted -
+  // so resuming there never reuses a counter a receiver has already seen.
+  //
+  // Do NOT reserve or persist a fresh block here. consume_rolling_code() reserves
+  // a block and writes it to flash *before* it hands out the first code, so the
+  // no-reuse guarantee still holds. Reserving eagerly on every begin() burned a
+  // full block per boot even when the run transmitted nothing, so a run of no-op
+  // reboots (brownouts, a re-init loop) could skip the transmit counter past the
+  // receiver's bounded replay window and lock the controller out with no attacker
+  // involved. Deferring the reservation makes a transmit-nothing boot cost zero
+  // codes. See V72.
   if (rolling_code_store_ != nullptr) {
     uint16_t stored = 0;
     if (rolling_code_store_->load(own_node_id_, stored)) {
@@ -187,8 +197,7 @@ bool IoHomeControl::begin(
       LOG_INFO("  Rolling code not found, starting at 0");
     }
     rolling_code_ = stored;
-    rolling_code_reserved_until_ = static_cast<uint16_t>(stored + rolling_code_reserve_block_);
-    rolling_code_store_->save(own_node_id_, rolling_code_reserved_until_);
+    rolling_code_reserved_until_ = stored;  // no live reservation until first use
   }
 
   if (!crypto::has_secure_random()) {

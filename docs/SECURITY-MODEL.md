@@ -121,14 +121,28 @@ these, an unsolicited 0x32 from source `00:00:00` would have unmasked against
 the zero challenge and let a passer-by set the installation key with no
 handshake — see V70.
 
-What these checks do **not** remove is a denial-of-service *during* an open
-pairing window: once the node has answered a 0x31 and is holding a live
-challenge, a forged 0x32 carrying that challenge unmasks to a garbage key and is
-adopted (the 0x32 is unauthenticated by protocol design — it carries only a CRC,
-no MAC). The attacker cannot choose the resulting key, only corrupt it, and only
-inside the operator-opened window; the node re-pairs to recover. This is
-inherent to io-homecontrol's plaintext key transfer, so keep the pairing window
-as short as the guidance above says.
+What these checks do **not** remove is a **chosen-key injection** *during* an
+open pairing window. The 2W key mask is `AES-128(TRANSFER_KEY, IV)`, and every
+input to it is attacker-known: `TRANSFER_KEY` is the public constant above, the
+ask-challenge request byte is a protocol constant, and the challenge is a nonce
+the node **broadcasts in the clear** in its own 0x3C (frames are authenticated,
+not encrypted). So an attacker who is active in the window can send its own 0x31,
+read the challenge C off the node's 0x3C, compute the mask, and send a CRC-valid
+0x32 (the 0x32 carries only a CRC, no MAC) whose payload is `K_chosen XOR mask`.
+The node unmasks it back to `K_chosen` and adopts it — a key the **attacker
+picked and therefore knows**. This is not a mere garbage-key corruption or DoS:
+the attacker now holds the node's system key and can forge authenticated 2W
+commands (open/close/ventilate/stop) and read state until the device is
+re-paired. It is the same disclosure as a passive listener recovering the
+operator's pushed key (see “A pairing frame reveals the system key” above), only
+active — and it is inherent to io-homecontrol's plaintext key transfer, not
+something these checks can close. The three checks above still matter: they stop
+the *unsolicited*, no-handshake variant (a chosen key adopted with no 0x31/0x3C
+at all — V70), which is reachable outside as well as inside the window. The
+residual is bounded to the operator-opened window, so treat that window as a
+key-disclosure risk: keep it as short as the guidance above says, pair with the
+actuator physically close, and assume anyone active during pairing owns the
+installation.
 
 ### The system key may be weak by origin
 

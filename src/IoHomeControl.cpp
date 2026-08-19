@@ -1314,10 +1314,13 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
   if (frame->command_id == CMD_ASK_CHALLENGE) {
     // Answer with a fresh challenge of our own (0x3C). create_challenge_request
     // stores the nonce, which recover_2w_key() will need to unmask the 0x32.
+    // Stamp it on the pairing clock (pairing_now_ms() == NOW_MS() in production)
+    // so the has_active_challenge expiry below is on the same clock and a host
+    // test can drive the challenge to expiry through set_pairing_clock_ms().
     memcpy(pairing_peer_, frame->src_node, NODE_ID_SIZE);
     frame::IoFrame chal;
     if (auth_manager_->create_challenge_request(&chal, frame->src_node, own_node_id_,
-                                                NOW_MS())) {
+                                                pairing_now_ms())) {
       LOG_INFO("Pairing: answering with a challenge");
       transmit_frame(&chal);
     } else {
@@ -1336,7 +1339,7 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     // challenge, and adopt an attacker-chosen system key. Requiring the challenge
     // we generated to still be live closes that: the attacker cannot forge a 0x32
     // bound to a random nonce it never saw.
-    if (!auth_manager_->has_active_challenge(NOW_MS())) {
+    if (!auth_manager_->has_active_challenge(pairing_now_ms())) {
       LOG_WARN("Pairing: ignoring a key transfer we never challenged for");
       return;
     }

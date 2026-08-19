@@ -899,6 +899,68 @@ void test_2w_follower_rejects_unsolicited_key_transfer(void) {
   TEST_ASSERT_TRUE(speaks_key(device, dev_radio, DEV, CTRL, SYS));
 }
 
+void test_2w_follower_rejects_key_transfer_after_challenge_expiry(void) {
+  // SECURITY: exercises the has_active_challenge gate in its BLOCKING role, in
+  // isolation from the other two round-6 defenses. The unsolicited test above is
+  // stopped by the all-zero-src drop and the from_peer check before it ever
+  // reaches the gate, so on its own it would still pass with the gate deleted.
+  // Here the peer IS known (the node answered its 0x31, so pairing_peer_ = the
+  // sender and from_peer is true) but the challenge has EXPIRED. recover_2w_key
+  // does not itself re-check expiry - it reads current_challenge_ directly - so
+  // the gate is the only thing that turns the stale, still-non-zero challenge
+  // into a rejection. Deleting the gate lets an attacker inject a chosen key in
+  // the window after a challenge times out but before anything polls it.
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t PEER[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t SYS[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                           0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+
+  PhysicalLayer dev_radio;
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(device.begin(DEV, SYS, /*is_1w=*/false));
+  device.set_accept_pairing(true);
+  KeyCapture cap;
+  device.set_key_received_callback(key_cb, &cap);
+  device.start_receive();
+
+  // t = 1000: the peer asks for a challenge; the node answers 0x3C and stores
+  // pairing_peer_ = PEER plus a live challenge stamped on the pairing clock.
+  device.set_pairing_clock_ms(1000);
+  auto send_plain = [&](const uint8_t src[3], uint8_t cmd,
+                        const uint8_t* data, size_t len) {
+    iohome::frame::IoFrame f;
+    iohome::frame::init_frame(&f, false);
+    iohome::frame::set_destination(&f, DEV);
+    iohome::frame::set_source(&f, src);
+    iohome::frame::set_command(&f, cmd, data, len);
+    iohome::frame::finalize_frame_plain(&f);
+    uint8_t buf[iohome::FRAME_MAX_SIZE];
+    const size_t n = iohome::frame::serialize_frame(&f, buf, sizeof(buf));
+    dev_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    device.check_received(&got);
+  };
+  send_plain(PEER, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  TEST_ASSERT_FALSE(dev_radio.last_transmission.empty());
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, dev_radio.last_transmission[8]);
+  dev_radio.last_transmission.clear();  // drop the 0x3C so a later 0x33 would show
+
+  // Advance past the 5 s challenge timeout: the challenge is now stale, but
+  // nothing has polled it, so current_challenge_ is still its non-zero value.
+  device.set_pairing_clock_ms(1000 + 5000 + 1);
+
+  // A forged 0x32 spoofing the peer address. Payload is arbitrary attacker bytes
+  // (>= AES_KEY_SIZE); if the gate were gone it would unmask to *some* key and be
+  // adopted with a 0x33 ack.
+  uint8_t payload[20];
+  for (size_t i = 0; i < sizeof(payload); i++) payload[i] = 0x5A;
+  send_plain(PEER, iohome::CMD_KEY_TRANSFER, payload, sizeof(payload));
+
+  TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());  // no 0x33 ack -> rejected
+  TEST_ASSERT_FALSE(cap.got);                             // no key surfaced/adopted
+  TEST_ASSERT_TRUE(speaks_key(device, dev_radio, DEV, PEER, SYS));  // original key kept
+}
+
 void test_2w_pull_collects_the_device_key(void) {
   const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
   const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
@@ -1692,6 +1754,7 @@ int main(int, char**) {
   RUN_TEST(test_2w_push_transmit_failure_keeps_old_key);
   RUN_TEST(test_initiator_ignores_stranger_pairing_requests);
   RUN_TEST(test_2w_follower_rejects_unsolicited_key_transfer);
+  RUN_TEST(test_2w_follower_rejects_key_transfer_after_challenge_expiry);
   RUN_TEST(test_2w_pull_collects_the_device_key);
   RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);

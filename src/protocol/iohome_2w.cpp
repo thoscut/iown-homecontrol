@@ -126,6 +126,11 @@ AuthenticationManager::AuthenticationManager()
   memset(own_node_, 0, NODE_ID_SIZE);
 }
 
+AuthenticationManager::~AuthenticationManager() {
+  crypto::secure_zero(system_key_, AES_KEY_SIZE);
+  crypto::secure_zero(current_challenge_, HMAC_SIZE);
+}
+
 bool AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
   if (system_key == nullptr) {
     return false;

@@ -496,6 +496,42 @@ void test_auth_handshake_succeeds(void) {
     TEST_ASSERT_TRUE(initiator.is_authenticated(100));
 }
 
+void test_auth_is_authenticated_with_binds_to_the_peer(void) {
+    // A session is bound to the node it was negotiated with; is_authenticated_with
+    // must say yes only for that peer. The ESPHome component relies on this to
+    // avoid signing a command to actuator B with actuator A's session nonce.
+    const uint8_t key[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                             0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+    const uint8_t controller[3] = {0x01, 0x02, 0x03};
+    const uint8_t actuator_a[3] = {0x0A, 0x0B, 0x0C};
+    const uint8_t actuator_b[3] = {0x0D, 0x0E, 0x0F};
+
+    mode2w::AuthenticationManager initiator;
+    mode2w::AuthenticationManager responder;
+    initiator.begin(key);
+    responder.begin(key);
+
+    // Before any handshake: authenticated with nobody.
+    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_a, 0));
+
+    iohome::frame::IoFrame request;
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator_a, controller, 0));
+    iohome::frame::IoFrame response;
+    TEST_ASSERT_TRUE(
+        responder.create_challenge_response(&response, controller, actuator_a, request.data));
+    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
+
+    // Authenticated with A, but NOT with B - even though a plain is_authenticated()
+    // would be true for both.
+    TEST_ASSERT_TRUE(initiator.is_authenticated(100));
+    TEST_ASSERT_TRUE(initiator.is_authenticated_with(actuator_a, 100));
+    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_b, 100));
+
+    // After reset, authenticated with nobody again.
+    initiator.reset();
+    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_a, 100));
+}
+
 void test_auth_rejects_replayed_response(void) {
     const uint8_t key[16] = {0x42};
     const uint8_t controller[3] = {0x01, 0x02, 0x03};
@@ -796,6 +832,7 @@ int main(int, char **) {
     RUN_TEST(test_auth_manager_generates_unpredictable_challenges);
     RUN_TEST(test_auth_manager_reset);
     RUN_TEST(test_auth_handshake_succeeds);
+    RUN_TEST(test_auth_is_authenticated_with_binds_to_the_peer);
     RUN_TEST(test_auth_rejects_replayed_response);
     RUN_TEST(test_challenge_stays_usable_after_handshake);
     RUN_TEST(test_failed_handshake_clears_challenge);

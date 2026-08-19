@@ -476,6 +476,24 @@ uint8_t relay(PhysicalLayer& from_radio, IoHomeControl& to, PhysicalLayer& to_ra
   to.check_received(&received);
   return cmd;
 }
+
+/// Read back which system key `node` currently holds: deliver a 0x3C signed with
+/// `key` (a 0x3C validates under the receiver's own system key) and return
+/// whether the node accepts it. `own` is the node's address, `peer` the sender.
+bool speaks_key(IoHomeControl& node, PhysicalLayer& radio,
+                const uint8_t own[3], const uint8_t peer[3], const uint8_t key[16]) {
+  iohome::mode2w::AuthenticationManager signer;
+  signer.begin(key);
+  iohome::frame::IoFrame chal;
+  if (!signer.create_challenge_request(&chal, own, peer, 1000UL)) {
+    return false;
+  }
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  const size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+  radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  return node.check_received(&got);
+}
 }  // namespace
 
 void test_2w_push_pairing_transfers_the_key(void) {
@@ -639,8 +657,11 @@ void test_pairing_expires_after_timeout(void) {
 void test_pairing_rejects_truncated_frames(void) {
   // Pairing frames are CRC-checked but NOT MAC-checked, so their contents are
   // attacker-controlled. The data_len guards in handle_pairing_frame must reject
-  // a CRC-valid frame with a truncated data field without emitting a key or
-  // reading past the short buffer (a regression would trip ASan here).
+  // a CRC-valid frame with a truncated data field without emitting a key. The
+  // guard is verified by the absence-of-transmission assertions below, not by a
+  // memory error: IoFrame::data is a fixed-size array, so dropping the guard
+  // would build a key transfer from stale buffer bytes rather than read out of
+  // bounds - a silent wrong-frame, which the "nothing transmitted" checks catch.
   const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
   const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
   const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -698,6 +719,81 @@ void test_pairing_rejects_truncated_frames(void) {
 
     TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());  // no key leaked
   }
+}
+
+void test_2w_push_adopts_new_key_only_after_ack(void) {
+  // The controller must adopt the pushed key at the 0x33 ACK, not when it sends
+  // the 0x32 - so a lost 0x32/0x33 leaves it on its old key and a retry recovers.
+  // Push a key DISTINCT from the controller's initial key so the two are
+  // distinguishable, and read back the controller's key at each step.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t OLD_KEY[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+  const uint8_t NEW_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                               0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, OLD_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+  device.set_accept_pairing(true);
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, NEW_KEY));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, relay(dev_radio, controller, ctrl_radio));
+
+  // 0x32 is sent, 0x33 not yet received: the controller must STILL be on OLD_KEY.
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, OLD_KEY));
+  TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
+
+  // Deliver the 0x32 to the device (it adopts NEW_KEY and acks), then the 0x33
+  // to the controller - only now does the controller adopt NEW_KEY.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, relay(dev_radio, controller, ctrl_radio));
+
+  TEST_ASSERT_FALSE(controller.is_pairing());
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
+  TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, OLD_KEY));
+}
+
+void test_2w_push_transmit_failure_keeps_old_key(void) {
+  // If the 0x32 key transfer cannot be sent, the controller must abandon the
+  // handshake and stay on its old key (not switch to a key the device never got).
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t OLD_KEY[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+  const uint8_t NEW_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                               0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, OLD_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+  device.set_accept_pairing(true);
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, NEW_KEY));  // 0x31 sends fine
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+
+  // Make the controller's radio fail the next transmit - the 0x32.
+  ctrl_radio.transmit_result = RADIOLIB_ERR_TX_TIMEOUT;
+  relay(dev_radio, controller, ctrl_radio);  // 0x3C in; the 0x32 fails to send
+
+  // The handshake is abandoned and the old key is retained.
+  TEST_ASSERT_FALSE(controller.is_pairing());
+  ctrl_radio.transmit_result = RADIOLIB_ERR_NONE;
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, OLD_KEY));
+  TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
 }
 
 void test_2w_pull_collects_the_device_key(void) {
@@ -1489,6 +1585,8 @@ int main(int, char**) {
   RUN_TEST(test_2w_pairing_ignores_a_stranger_challenge);
   RUN_TEST(test_pairing_expires_after_timeout);
   RUN_TEST(test_pairing_rejects_truncated_frames);
+  RUN_TEST(test_2w_push_adopts_new_key_only_after_ack);
+  RUN_TEST(test_2w_push_transmit_failure_keeps_old_key);
   RUN_TEST(test_2w_pull_collects_the_device_key);
   RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);

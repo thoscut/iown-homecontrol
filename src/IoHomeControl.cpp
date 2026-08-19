@@ -97,6 +97,9 @@ IoHomeControl::~IoHomeControl() {
   }
   destroy_2w_components();
   crypto::secure_zero(system_key_, AES_KEY_SIZE);
+  // A push/pull destroyed mid-handshake still holds key material in these.
+  crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+  crypto::secure_zero(pairing_challenge_, sizeof(pairing_challenge_));
 }
 
 void IoHomeControl::destroy_2w_components() {
@@ -1206,6 +1209,7 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     if (!built) {
       LOG_ERROR("Pairing: failed to build key transfer");
       pairing_state_ = Pairing2W::IDLE;
+      crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
       return;
     }
     // Do NOT adopt the key yet. If this transmit fails or the 0x32 is lost, the
@@ -1265,7 +1269,13 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
   }
 
   // ---- Follower (device accepting a pushed key, or answering a pull) ------
-  if (!accept_pairing_) {
+  // Only act as a follower when we are not ourselves mid-handshake as an
+  // initiator. Otherwise a third node's plain 0x31/0x38 would fall through here
+  // and overwrite pairing_peer_ (the address the initiator branches match
+  // from_peer against), stalling our own push/pull until the timeout - a
+  // remotely triggerable pairing DoS. A follower's own flow keeps pairing_state_
+  // at IDLE throughout, so this does not block legitimate follower handling.
+  if (!accept_pairing_ || pairing_state_ != Pairing2W::IDLE) {
     return;
   }
 

@@ -159,6 +159,10 @@ public:
 
   AuthenticationManager();
 
+  /// Wipes the system key and current challenge on destruction, matching the
+  /// zeroization discipline the rest of the codebase applies to key material.
+  ~AuthenticationManager();
+
   /**
    * @brief Initialize the authentication manager
    *

@@ -47,6 +47,18 @@ FRAME_SIZE_FIELD_BIAS = 3
 CMD_OFFSET = 8                    # ctrl0 ctrl1 dest[3] src[3] cmd
 
 
+def looks_binary(data: bytes) -> bool:
+    """A file is treated as binary when a meaningful fraction of a leading sample
+    is C0 control bytes (excluding tab/newline/CR). One stray byte or one embedded
+    NUL in an otherwise-text file stays well under the threshold and is scanned."""
+    sample = data[:65536]
+    if not sample:
+        return False
+    text_controls = {0x09, 0x0A, 0x0D}
+    control = sum(1 for b in sample if b < 0x20 and b not in text_controls)
+    return control / len(sample) > 0.10
+
+
 def crc16_kermit(data: bytes) -> int:
     crc = 0
     for b in data:
@@ -144,15 +156,23 @@ def main() -> int:
             data = open(f, "rb").read()
         except OSError:
             continue
-        # Skip only genuinely binary files (NUL byte = git's own binary heuristic);
-        # scanning images/PDFs/firmware just yields coincidental CRC-valid windows.
-        # A file that is text with a few stray non-UTF-8 bytes (a Latin-1 degree
-        # sign from a capture tool, a stray BOM) is NOT skipped: decode leniently
-        # so its readable hex is still scanned. Skipping such a file outright let a
-        # real frame ride through while CI printed OK - the exact "hides in a
-        # representation the check does not cover" pattern this guard exists for.
-        if b"\x00" in data:
+        # Skip genuinely binary files by CONTENT RATIO, not by the mere presence of
+        # a NUL: a real binary (PDF, image, firmware) is mostly control bytes, while
+        # a text file with one stray non-UTF-8 byte or one embedded NUL is not - and
+        # that text file must still be scanned (skipping it on the NUL alone was a
+        # coverage regression). This also keeps the scan fast: without it, decoding
+        # megabyte binaries to U+FFFD-filled text and scanning them is slow for no
+        # benefit (their raw-byte frames do not survive the decode anyway).
+        if looks_binary(data):
             continue
+        # Decode leniently rather than skipping any file. errors="replace" turns
+        # each invalid byte into U+FFFD, which is neither a hex digit nor a
+        # separator, so a genuine binary (PDF, image, firmware) has its raw-byte
+        # frames broken up and yields no candidates - while a text file that merely
+        # carries a stray non-UTF-8 byte or an embedded NUL (both of which used to
+        # get the whole file skipped) is still fully scanned. A NUL is valid UTF-8
+        # (U+0000) and left in place. Skipping on either condition let a real frame
+        # ride through while CI printed OK - the pattern this guard exists to stop.
         text = data.decode("utf-8", errors="replace")
         # Per line: catches a framed frame on its own line (de-framed from the
         # line's start) and any single-line de-framed frame, in any separator

@@ -379,9 +379,16 @@ void IOWNHomeControlComponent::restore_rolling_code_() {
     stored = 0;
   }
 
+  // Do NOT reserve or persist a block here. consume_rolling_code_() reserves and
+  // writes a block before it hands out the first code (its remaining wraps to
+  // 0xFFFF on the first call), so the no-reuse guarantee holds. Reserving eagerly
+  // on every boot burned a full block even when the run transmitted nothing, so a
+  // run of no-op reboots (brownouts, OTA/config/WiFi restarts) could skip the
+  // transmit counter past the actuator's bounded rolling-code window and lock the
+  // hub out with no attacker involved. This mirrors the library-side V72 fix in
+  // src/IoHomeControl.cpp begin().
   this->rolling_code_ = stored;
-  this->rolling_code_reserved_until_ = static_cast<uint16_t>(stored + ROLLING_CODE_RESERVE_BLOCK);
-  this->rolling_code_pref_.save(&this->rolling_code_reserved_until_);
+  this->rolling_code_reserved_until_ = stored;  // no live reservation until first use
 }
 
 uint16_t IOWNHomeControlComponent::consume_rolling_code_() {

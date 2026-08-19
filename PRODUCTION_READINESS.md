@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is verified against the byte-for-byte captures in `docs/`,
-covered by 230 host-run unit tests, and hardened against the receive path being
+covered by 231 host-run unit tests, and hardened against the receive path being
 attacker-controlled. The core path is now also confirmed on **real hardware**:
 on a Heltec V4 a physical io-homecontrol actuator pairs, obeys our
 open/close/position/ventilation commands (it actually moves), and its own frames
@@ -151,6 +151,8 @@ claim.
 
 | V68 | Low | `IoHomeControl`, `check_no_key_material.py`, tests, docs | A fourth review round (6 lenses, adversarial verification) surfaced eight confirmed findings - mostly follow-ups on round-3's own fixes; all fixed. **Guard regression (Low):** the round-3 NUL-skip narrowed coverage (a valid-UTF-8 file with one embedded NUL was skipped, though the old strict decode scanned it); replaced with a content-ratio binary heuristic so text-with-stray-bytes is still scanned while genuine binaries are skipped fast. **Follower DoS (Low):** while a node was mid-handshake as an initiator, a third node's plain 0x31/0x38 fell through to the follower branch and overwrote `pairing_peer_`, stalling the handshake; the follower section now runs only when `pairing_state_ == IDLE`. **Key hygiene (Low):** `pairing_key_`/`pairing_challenge_` are now `secure_zero`d in `~IoHomeControl()` and on the build-failure exit, and `AuthenticationManager` gained a zeroizing destructor. **Tests (+3):** the round-3 fixes were themselves under-tested - added a mutation-verified test that the controller adopts the pushed key only at the 0x33 ack (distinct old/new keys, read back via a signed 0x3C), a transmit-failure test (a failed 0x32 keeps the old key), and an `is_authenticated_with` peer-binding test. A misleading "trips ASan" comment and a phantom "K10" reference were corrected. |
 
+| V69 | Low | tests, CI | A fifth review round came back clean on all five code lenses (protocol, crypto, controller, velux/ESPHome, docs) - a convergence signal - and surfaced only two test-coverage gaps for round-4's own fixes, both now closed. **Scanner self-test (Medium test-gap):** `tools/check_no_key_material.py` had no automated tests, so on the always-clean repo it exited 0 regardless of whether detection still worked; added `tools/test_check_no_key_material.py` (a real non-placeholder 0x30/0x32 must be flagged, the ABCDEF/FEEFEE placeholder vectors must not, lone-NUL text is scanned, a control-heavy blob is skipped) and a CI step running it before the scan. Mutation-verified against both the old NUL-skip regression and a disabled detector. **Follower-guard regression test (Low):** added a test where a node is both `accept_pairing_` and mid-initiator-handshake and a stranger's plain 0x31 must not hijack `pairing_peer_`; mutation-verified (removing the `pairing_state_ == IDLE` gate fails it). |
+
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
 | ID | Severity | Component | Description | Recommended Fix |
@@ -236,7 +238,7 @@ model. Summary of what remains, by design of the protocol:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ✅ 230 tests | 9 suites, ASan + UBSan by default |
+| Unit tests | ✅ 231 tests | 9 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
 | Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
 | Mutation checks | ✅ Complete | Eight deliberate regressions - inverted mode bit, wrong size bias, dropped ACEI check, disabled replay guard, always-true MAC comparison, constant-seeded RNG, ignored log level, log message used as its own format string - are each caught by the suite |

@@ -796,6 +796,58 @@ void test_2w_push_transmit_failure_keeps_old_key(void) {
   TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
 }
 
+void test_initiator_ignores_stranger_pairing_requests(void) {
+  // A node that is BOTH accept_pairing_ AND mid-handshake as an initiator must
+  // not let a third node's plain 0x31/0x38 hijack pairing_peer_. The follower
+  // section is gated on pairing_state_ == IDLE for exactly this reason; without
+  // it, a stranger's 0x31 overwrites pairing_peer_ and stalls the real push.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STRANGER[3] = {0x11, 0x22, 0x33};
+  const uint8_t OLD_KEY[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+  const uint8_t NEW_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                               0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, OLD_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+  controller.set_accept_pairing(true);  // the initiator ALSO accepts pairing
+  device.set_accept_pairing(true);
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, NEW_KEY));   // PUSH_WAIT_CHALLENGE, peer=DEV
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+
+  // A stranger injects a plain ask-challenge while we are mid-push. It must be
+  // ignored (follower section gated on IDLE), leaving pairing_peer_ == DEV.
+  ctrl_radio.last_transmission.clear();
+  iohome::frame::IoFrame ask;
+  iohome::frame::init_frame(&ask, false);
+  iohome::frame::set_destination(&ask, CTRL);
+  iohome::frame::set_source(&ask, STRANGER);
+  iohome::frame::set_command(&ask, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  iohome::frame::finalize_frame_plain(&ask);
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  const size_t n = iohome::frame::serialize_frame(&ask, buf, sizeof(buf));
+  ctrl_radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  controller.check_received(&got);
+  TEST_ASSERT_TRUE(ctrl_radio.last_transmission.empty());  // no challenge answered
+  TEST_ASSERT_TRUE(controller.is_pairing());               // still waiting for DEV
+
+  // The real DEV's 0x3C still completes the push - proof pairing_peer_ was intact.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_FALSE(controller.is_pairing());
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
+}
+
 void test_2w_pull_collects_the_device_key(void) {
   const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
   const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
@@ -1587,6 +1639,7 @@ int main(int, char**) {
   RUN_TEST(test_pairing_rejects_truncated_frames);
   RUN_TEST(test_2w_push_adopts_new_key_only_after_ack);
   RUN_TEST(test_2w_push_transmit_failure_keeps_old_key);
+  RUN_TEST(test_initiator_ignores_stranger_pairing_requests);
   RUN_TEST(test_2w_pull_collects_the_device_key);
   RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);

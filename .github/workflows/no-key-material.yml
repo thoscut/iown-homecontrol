@@ -31,5 +31,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Self-test the scanner
+        # Proves detection still works: a real (non-placeholder) frame is flagged,
+        # a placeholder/synthetic vector is not, lone-NUL text is scanned, binaries
+        # are skipped. Without this the scan below always passes on a clean repo
+        # even if detection has regressed.
+        run: python3 tools/test_check_no_key_material.py
+
       - name: Scan
         run: python3 tools/check_no_key_material.py

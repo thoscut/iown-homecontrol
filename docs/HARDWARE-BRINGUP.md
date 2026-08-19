@@ -1,7 +1,7 @@
 # Hardware bring-up
 
 Everything this library claims about the io-homecontrol wire format is checked
-against captures in `docs/` and reproduced by 230 host-run tests. The core path
+against captures in `docs/` and reproduced by 231 host-run tests. The core path
 has now also been checked against a **physical actuator** on a Heltec V4: it
 pairs, it obeys open/close/position/ventilation (the actuator actually moves),
 and its own frames decode byte-correct. What a laptop still cannot close is the

@@ -244,8 +244,9 @@ The ESPHome cover got this backwards until recently.
 
 **Experiment:** on a pleated blind (Velux FML) or any slatted product, tilt the
 slats fully open from the remote and capture the frame. Read the byte at offset
-5 of the payload. `0x00` confirms the assumption; `0xC8` means both
-implementations need inverting.
+4 of the Execute payload - Functional Parameter 1, the byte right after the
+originator, ACEI and the two-byte Main Parameter (`EXECUTE_OFFSET_FP1`). `0x00`
+confirms the assumption; `0xC8` means both implementations need inverting.
 
 ### The Execute payload length
 

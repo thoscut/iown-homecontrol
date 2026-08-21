@@ -71,6 +71,14 @@ jobs:
         working-directory: esphome
         run: esphome compile example.yaml
 
+      - name: Validate and compile the Velux example
+        working-directory: esphome
+        # Covers the window/roller-shutter covers plus the ventilate()/force()
+        # button lambdas, which example.yaml does not exercise.
+        run: |
+          esphome config example-velux.yaml
+          esphome compile example-velux.yaml
+
       - name: Compile a cover-only 2W configuration
         working-directory: esphome
         # example.yaml uses both platforms, so it never noticed that the hub

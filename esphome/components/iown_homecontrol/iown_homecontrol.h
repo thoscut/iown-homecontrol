@@ -40,6 +40,7 @@
 // implementation, and a copy of it that CI keeps identical.
 #include "iohome_crypto.h"
 #include "iohome_frame.h"
+#include "iohome_phy_framing.h"
 #include "iohome_replay_guard.h"
 #include "iohome_2w.h"
 
@@ -80,6 +81,11 @@ static const uint16_t IOHC_PARAM_OPEN = 0x0000;   // Min / fully open
 static const uint16_t IOHC_PARAM_CLOSE = 0xC800;  // Max / fully closed
 static const uint16_t IOHC_PARAM_STOP = 0xD200;   // Current position
 static const uint16_t IOHC_PARAM_PERCENT_MAX = 0xC800;
+// Secured ventilation, the window opener "airing" position (KLF 200 §14.2.1,
+// alias 0xD803; also what rspaargaren/iohomecontrol sends for Vent).
+static const uint16_t IOHC_PARAM_VENT = 0xD803;
+// The observed "force" preset a Velux remote's dedicated button sends.
+static const uint16_t IOHC_PARAM_FORCE = 0x6400;
 
 /// Default ACEI byte: user priority level 2, IsValid set.
 ///
@@ -93,6 +99,20 @@ static const uint8_t IOHC_ORIGINATOR_USER = 0x01;
 
 /// Largest frame the 5-bit size field can describe: 31 + 3.
 static const size_t IOHC_MAX_FRAME_SIZE = 34;
+
+/// How many bytes fixed-length receive mode pulls off the air per packet.
+///
+/// A frame maxes out at 34 bytes, but each byte is sent as ten bits on the wire
+/// - a start bit, the eight data bits, a stop bit (see iohome_phy_framing.h) -
+/// so the radio delivers up to ceil(34 * 10 / 8) = 43 bytes for one frame,
+/// before the trailing preamble. 64 leaves room for that plus the run-in the
+/// receiver sees after the frame ends. The raw bytes are de-framed before
+/// anything reads them as a frame.
+///
+/// This capture size is why a frame that looked like a "non-standard 48-byte
+/// format" - and failed every CRC test - turned out to be an ordinary frame
+/// wrapped in that UART framing. See docs/devices/velux/velux-frame-analysis.md.
+static const size_t IOHC_RX_CAPTURE_SIZE = 64;
 
 /// Minimum frame: ctrl0(1) + ctrl1(1) + dest(3) + src(3) + cmd(1) + crc(2).
 static const size_t IOHC_MIN_FRAME_SIZE = 11;
@@ -166,6 +186,46 @@ class IOWNHomeControlComponent : public Component {
   /// Select 2W (challenge-response authenticated) instead of 1W.
   void set_two_way(bool enabled) { this->two_way_ = enabled; }
 
+  /// Read the system key out of a 1W key transfer (command 0x30) and log it.
+  ///
+  /// A 1W controller sends its key masked with the public TRANSFER_KEY, so a
+  /// receiver in range recovers it - that is the protocol's own pairing path,
+  /// not a weakness being exploited, but it does mean anyone listening while
+  /// you pair gets the key too. Off by default; turn it on only for the pairing
+  /// itself and off again afterwards.
+  void set_key_capture(bool enabled) { this->key_capture_ = enabled; }
+
+  /// SX126x only: the voltage the radio supplies on DIO3 to an external TCXO.
+  ///
+  /// RadioLib defaults this to 1.6 V, which is not what every board wants -
+  /// the Heltec V3 and V4 specify 1.8 V. Running the oscillator below its
+  /// rated supply is not an obvious failure: SX126x::config() falls back to
+  /// plain XTAL when the oscillator reports a start error, leaving a radio
+  /// that initialises cleanly and sits on the wrong frequency. 0 selects a
+  /// crystal and skips DIO3 entirely.
+  void set_tcxo_voltage(float volts) { this->tcxo_voltage_ = volts; }
+
+  /// Board power rail feeding the radio front end - Heltec calls it VEXT and
+  /// drives it active low. Must be on before the radio is talked to.
+  void set_vext_pin(int pin, bool active_high) {
+    this->vext_pin_ = pin;
+    this->vext_active_high_ = active_high;
+  }
+
+  /// External PA/LNA front end (Heltec V4.2: GC1109).
+  ///
+  /// @param power_pin  Enables the LDO feeding the front end (VFEM_Ctrl).
+  /// @param enable_pin Chip enable, active high (GC1109 CSD).
+  /// @param tx_pin     TX/RX path select (GC1109 CPS): high selects the PA,
+  ///                   low the receive bypass. Handed to RadioLib so it
+  ///                   follows the radio's own TX/RX transitions - holding it
+  ///                   high would route reception through the PA.
+  void set_rf_frontend(int power_pin, int enable_pin, int tx_pin) {
+    this->fem_power_pin_ = power_pin;
+    this->fem_enable_pin_ = enable_pin;
+    this->fem_tx_pin_ = tx_pin;
+  }
+
   void register_cover(IOWNCover *cover) { this->covers_.push_back(cover); }
 
   /** Send a raw frame over the radio. */
@@ -174,6 +234,17 @@ class IOWNHomeControlComponent : public Component {
   /** Send a cover control command (command 0x00 with a main parameter). */
   bool send_cover_command(uint32_t target_address, uint8_t command, uint16_t main_param,
                           uint8_t fp1 = 0x00, uint8_t fp2 = 0x00);
+
+  /** Move a window to its secured ventilation position (Main Parameter 0xD803).
+   *  For window openers (including the solar GGL/GGU); see IOHC_PARAM_VENT. */
+  bool ventilate(uint32_t target_address) {
+    return this->send_cover_command(target_address, IOHC_CMD_EXECUTE, IOHC_PARAM_VENT);
+  }
+
+  /** Send a Velux remote's observed "force" preset (Main Parameter 0x6400). */
+  bool force(uint32_t target_address) {
+    return this->send_cover_command(target_address, IOHC_CMD_EXECUTE, IOHC_PARAM_FORCE);
+  }
 
   /** Convert a percentage of closure (0-100) to a main parameter value. */
   static uint16_t main_param_from_percent_closed(uint8_t percent_closed);
@@ -243,12 +314,25 @@ class IOWNHomeControlComponent : public Component {
 
   /// Handle 0x3C / 0x3D during reception.
   void handle_challenge_frame_(const iohome::frame::IoFrame *frame);
+
+  /// Bring the board's power rail and any external front end up, before the
+  /// radio is reset or addressed over SPI.
+  void power_up_frontend_();
+
   int sck_pin_{-1};
   int mosi_pin_{-1};
   int miso_pin_{-1};
   float frequency_{IOHC_CHANNEL_2};
   RadioType radio_type_{RADIO_SX1276};
   uint32_t source_address_{0x1A380B};
+
+  /// Matches RadioLib's own default, so leaving this unset changes nothing.
+  float tcxo_voltage_{1.6f};
+  int vext_pin_{-1};
+  bool vext_active_high_{false};
+  int fem_power_pin_{-1};
+  int fem_enable_pin_{-1};
+  int fem_tx_pin_{-1};
 
   Module *radio_module_{nullptr};
   PhysicalLayer *phy_{nullptr};
@@ -261,6 +345,7 @@ class IOWNHomeControlComponent : public Component {
   bool system_key_set_{false};
   bool encryption_enabled_{false};
   bool position_feedback_{false};
+  bool key_capture_{false};
   uint8_t acei_{IOHC_ACEI_DEFAULT};
   uint8_t originator_{IOHC_ORIGINATOR_USER};
 
@@ -321,6 +406,9 @@ class IOWNHomeControlComponent : public Component {
 
   /** Feed a decoded execute frame to any cover that owns the source address. */
   void dispatch_to_covers_(const ReceivedFrame &frame);
+
+  /** Recover the system key from a 1W key transfer and verify it via its MAC. */
+  void handle_1w_key_transfer_(const uint8_t *data, size_t frame_len, uint32_t src_addr);
 
   /** Compute the 6-byte MAC for 1W mode using AES-128-ECB. */
   bool compute_hmac_(const uint8_t *frame_data, size_t data_len,

@@ -157,6 +157,15 @@ void test_execute_frame_shape(void) {
   iohome::frame::IoFrame parsed;
   TEST_ASSERT_TRUE(iohome::frame::parse_frame(tx.data(), tx.size(), &parsed));
   TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed, SYSTEM_KEY));
+
+  // What actually went on air must be UART-framed (ten bits per byte), not the
+  // raw logical frame. Without this, a regression that transmitted the un-framed
+  // buffer passed every field check above (the mock falls back to the raw bytes
+  // when de-framing fails). A 25-byte frame is 32 wire bytes, and the framed
+  // bytes must differ from the logical ones.
+  TEST_ASSERT_EQUAL_UINT(iohome::phy::uart_wire_size(25), radio.last_wire.size());
+  TEST_ASSERT_EQUAL_UINT(32, radio.last_wire.size());
+  TEST_ASSERT_TRUE(radio.last_wire != tx);
 }
 
 void test_execute_with_extra_functional_params(void) {
@@ -219,6 +228,26 @@ void test_position_mapping(void) {
   TEST_ASSERT_EQUAL_HEX16(0x6400, main_param);
 }
 
+void test_ventilate_sends_secured_ventilation(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+
+  // The window opener secured-ventilation alias, 0xD803. Confirmed against the
+  // KLF 200 spec and rspaargaren/iohomecontrol's Vent button.
+  TEST_ASSERT_TRUE(controller.ventilate(PEER_NODE));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, radio.last_transmission[8]);
+  const uint16_t mp = static_cast<uint16_t>(
+      (static_cast<uint16_t>(radio.last_transmission[11]) << 8) | radio.last_transmission[12]);
+  TEST_ASSERT_EQUAL_HEX16(0xD803, mp);
+
+  // Force preset: the observed 0x6400, wire-identical to a 50% position.
+  TEST_ASSERT_TRUE(controller.force(PEER_NODE));
+  const uint16_t fmp = static_cast<uint16_t>(
+      (static_cast<uint16_t>(radio.last_transmission[11]) << 8) | radio.last_transmission[12]);
+  TEST_ASSERT_EQUAL_HEX16(0x6400, fmp);
+}
+
 void test_rejects_invalid_acei(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
@@ -229,6 +258,32 @@ void test_rejects_invalid_acei(void) {
 
   controller.close(PEER_NODE);
   TEST_ASSERT_EQUAL_HEX8(0x43, radio.last_transmission[10]);
+}
+
+void test_set_priority_selects_the_acei_level(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+
+  // set_priority touches only the level bits (7-5), leaving IsValid set. From
+  // the 0x61 default, selecting USER_LEVEL_1 (level 2, "High" - the level
+  // rspaargaren/iohomecontrol's remote runs at) gives 0x41.
+  controller.set_priority(iohome::PriorityLevel::USER_LEVEL_1);
+  controller.close(PEER_NODE);
+  TEST_ASSERT_EQUAL_HEX8(0x41, radio.last_transmission[10]);
+
+  // Back to the default USER_LEVEL_2 (level 3) = 0x61.
+  controller.set_priority(iohome::PriorityLevel::USER_LEVEL_2);
+  controller.close(PEER_NODE);
+  TEST_ASSERT_EQUAL_HEX8(0x61, radio.last_transmission[10]);
+
+  // set_priority preserves the other ACEI bits: after set_acei(0x43) (which
+  // also sets Extended Info = 1), selecting USER_LEVEL_2 keeps that bit and
+  // only lifts the level, giving 0x63 rather than a reset-to-default 0x61.
+  TEST_ASSERT_TRUE(controller.set_acei(0x43));
+  controller.set_priority(iohome::PriorityLevel::USER_LEVEL_2);
+  controller.close(PEER_NODE);
+  TEST_ASSERT_EQUAL_HEX8(0x63, radio.last_transmission[10]);
 }
 
 void test_send_command_rejects_nullptr(void) {
@@ -391,6 +446,621 @@ void test_stray_challenge_response_does_not_break_the_session(void) {
 }
 
 // ---------------------------------------------------------------------------
+// 2W pairing: push a key from one controller to another, end to end
+// ---------------------------------------------------------------------------
+
+namespace {
+struct KeyCapture {
+  bool got = false;
+  uint8_t key[16] = {0};
+  uint8_t from[3] = {0};
+};
+void key_cb(const uint8_t key[16], const uint8_t from[3], void* ctx) {
+  auto* c = static_cast<KeyCapture*>(ctx);
+  c->got = true;
+  memcpy(c->key, key, 16);
+  memcpy(c->from, from, 3);
+}
+
+/// Carry whatever `from` just transmitted to `to`, and let `to` process it.
+/// Returns the command ID that moved, or 0xFF if nothing was sent.
+uint8_t relay(PhysicalLayer& from_radio, IoHomeControl& to, PhysicalLayer& to_radio) {
+  if (from_radio.last_transmission.empty()) {
+    return 0xFF;
+  }
+  std::vector<uint8_t> frame = from_radio.last_transmission;
+  from_radio.last_transmission.clear();
+  const uint8_t cmd = frame.size() > 8 ? frame[8] : 0xFF;
+  to_radio.deliver(frame.data(), frame.size());
+  iohome::frame::IoFrame received;
+  to.check_received(&received);
+  return cmd;
+}
+
+/// Read back which system key `node` currently holds: deliver a 0x3C signed with
+/// `key` (a 0x3C validates under the receiver's own system key) and return
+/// whether the node accepts it. `own` is the node's address, `peer` the sender.
+bool speaks_key(IoHomeControl& node, PhysicalLayer& radio,
+                const uint8_t own[3], const uint8_t peer[3], const uint8_t key[16]) {
+  iohome::mode2w::AuthenticationManager signer;
+  signer.begin(key);
+  iohome::frame::IoFrame chal;
+  if (!signer.create_challenge_request(&chal, own, peer, 1000UL)) {
+    return false;
+  }
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  const size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+  radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  return node.check_received(&got);
+}
+}  // namespace
+
+void test_2w_push_pairing_transfers_the_key(void) {
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+
+  TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+
+  KeyCapture cap;
+  device.set_key_received_callback(key_cb, &cap);
+  device.set_accept_pairing(true);
+
+  // Step 1: the controller asks for a challenge. The very first frame it sends
+  // must be 0x31 - not a 0x32 fired blind, which was the K9 bug.
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, ctrl_radio.last_transmission[8]);
+
+  // 0x31 -> device answers 0x3C.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, dev_radio.last_transmission[8]);
+
+  // 0x3C -> controller sends the key transfer 0x32.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, ctrl_radio.last_transmission[8]);
+
+  // 0x32 -> device recovers the key, adopts it, and acknowledges with 0x33.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_TRUE(cap.got);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(STACK_KEY, cap.key, 16);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(CTRL, cap.from, 3);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, dev_radio.last_transmission[8]);
+
+  // 0x33 -> controller finishes.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_FALSE(controller.is_pairing());
+
+  // The recovered key matching the pushed key byte for byte (asserted above via
+  // the callback) is the proof the transfer worked: the device unmasked exactly
+  // what the controller sent, using the challenge it had itself chosen.
+
+  // ...but the callback only shows the device *recovered* the key; a
+  // set_system_key() that dropped it on the floor would pass that check too.
+  // Prove the device actually STORED it: an independent signer holding STACK_KEY
+  // builds a challenge request, and the device validates its 0x3C MAC under its
+  // own stored key - so it accepts this only if that key really is STACK_KEY.
+  iohome::mode2w::AuthenticationManager signer;
+  signer.begin(STACK_KEY);
+  iohome::frame::IoFrame chal;
+  TEST_ASSERT_TRUE(signer.create_challenge_request(&chal, DEV, CTRL, 1000UL));
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+  dev_radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  TEST_ASSERT_TRUE(device.check_received(&got));  // accepted under the adopted key
+
+  // Negative control: the same request signed under a different key is rejected,
+  // so the accept above is the adopted key at work, not an open door.
+  const uint8_t OTHER_KEY[16] = {0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
+                                 0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF};
+  iohome::mode2w::AuthenticationManager wrong;
+  wrong.begin(OTHER_KEY);
+  iohome::frame::IoFrame chal2;
+  TEST_ASSERT_TRUE(wrong.create_challenge_request(&chal2, DEV, CTRL, 2000UL));
+  n = iohome::frame::serialize_frame(&chal2, buf, sizeof(buf));
+  dev_radio.deliver(buf, n);
+  TEST_ASSERT_FALSE(device.check_received(&got));
+  TEST_ASSERT_EQUAL(RxReject::MAC, device.last_reject_reason());
+}
+
+void test_2w_pairing_ignores_a_stranger_challenge(void) {
+  // While a controller waits for its peer's 0x3C, a 0x3C from a DIFFERENT node
+  // must not drive the exchange. The handler's `from_peer` guard is what stops
+  // a stranger from injecting the challenge the controller masks its key
+  // against; without it the controller would fire its 0x32 - the masked system
+  // key - in response to any node's challenge.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STRANGER[3] = {0x11, 0x22, 0x33};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+
+  PhysicalLayer ctrl_radio;
+  IoHomeControl controller(&ctrl_radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+  controller.start_receive();
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  ctrl_radio.last_transmission.clear();  // drop the 0x31 we just sent
+
+  // A stranger's 0x3C, addressed to us. Its MAC is irrelevant - pairing frames
+  // bypass the MAC gate, so only the from_peer check stands between it and our
+  // key transfer.
+  iohome::mode2w::AuthenticationManager stranger;
+  stranger.begin(STACK_KEY);
+  iohome::frame::IoFrame stray;
+  TEST_ASSERT_TRUE(stranger.create_challenge_request(&stray, CTRL, STRANGER, 1000UL));
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  const size_t n = iohome::frame::serialize_frame(&stray, buf, sizeof(buf));
+  ctrl_radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  controller.check_received(&got);
+
+  // No key transfer went out, and we are still waiting for the real peer.
+  TEST_ASSERT_TRUE(ctrl_radio.last_transmission.empty());
+  TEST_ASSERT_TRUE(controller.is_pairing());
+}
+
+void test_pairing_expires_after_timeout(void) {
+  // A stalled push handshake must reset to IDLE after PAIRING_TIMEOUT_MS (5 s) so
+  // it stops diverting unrelated 0x3C/0x32 frames from the MAC gate. The timeout
+  // reads a clock a host cannot advance (clock()), so pin it via the test seam.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+  controller.start_receive();
+
+  controller.set_pairing_clock_ms(1000);
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));  // PUSH_WAIT_CHALLENGE
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  radio.last_transmission.clear();  // drop the 0x31
+
+  // Jump well past the 5 s timeout, then deliver the peer's genuine 0x3C. Because
+  // the handshake has expired, check_received() resets it to IDLE *before*
+  // routing, so this 0x3C is no longer the awaited challenge - it goes through
+  // the normal gate and no key transfer is emitted. Were the timeout broken, the
+  // controller would instead treat it as the challenge, send its 0x32, and stay
+  // pairing - so is_pairing()==false here is exactly what the timeout buys.
+  controller.set_pairing_clock_ms(1000 + 6000);
+
+  iohome::mode2w::AuthenticationManager signer;
+  signer.begin(STACK_KEY);
+  iohome::frame::IoFrame chal;
+  TEST_ASSERT_TRUE(signer.create_challenge_request(&chal, CTRL, DEV, 1000UL));
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  const size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+  radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  controller.check_received(&got);
+
+  TEST_ASSERT_FALSE(controller.is_pairing());          // handshake abandoned
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());   // no 0x32 emitted
+}
+
+void test_pairing_rejects_truncated_frames(void) {
+  // Pairing frames are CRC-checked but NOT MAC-checked, so their contents are
+  // attacker-controlled. The data_len guards in handle_pairing_frame must reject
+  // a CRC-valid frame with a truncated data field without emitting a key. The
+  // guard is verified by the absence-of-transmission assertions below, not by a
+  // memory error: IoFrame::data is a fixed-size array, so dropping the guard
+  // would build a key transfer from stale buffer bytes rather than read out of
+  // bounds - a silent wrong-frame, which the "nothing transmitted" checks catch.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+
+  // Controller waiting for its challenge: a 0x3C from the peer with < HMAC_SIZE
+  // of data must be dropped, not turned into a key transfer.
+  {
+    PhysicalLayer ctrl_radio;
+    IoHomeControl controller(&ctrl_radio);
+    TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+    controller.start_receive();
+    TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));
+    ctrl_radio.last_transmission.clear();
+
+    iohome::frame::IoFrame chal;
+    iohome::frame::init_frame(&chal, false);
+    iohome::frame::set_destination(&chal, CTRL);
+    iohome::frame::set_source(&chal, DEV);
+    const uint8_t tiny[3] = {0x11, 0x22, 0x33};  // shorter than HMAC_SIZE
+    TEST_ASSERT_TRUE(
+        iohome::frame::set_command(&chal, iohome::CMD_CHALLENGE_REQUEST, tiny, sizeof(tiny)));
+    iohome::frame::finalize_frame_plain(&chal);
+    const size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+    ctrl_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    controller.check_received(&got);
+
+    TEST_ASSERT_TRUE(ctrl_radio.last_transmission.empty());  // no 0x32 built from a short nonce
+    TEST_ASSERT_TRUE(controller.is_pairing());               // state untouched
+  }
+
+  // Accept-pairing device: a 0x38 pull request with < HMAC_SIZE of data must not
+  // produce a key transfer.
+  {
+    PhysicalLayer dev_radio;
+    IoHomeControl device(&dev_radio);
+    TEST_ASSERT_TRUE(device.begin(DEV, STACK_KEY, /*is_1w=*/false));
+    device.set_accept_pairing(true);
+    device.start_receive();
+
+    iohome::frame::IoFrame launch;
+    iohome::frame::init_frame(&launch, false);
+    iohome::frame::set_destination(&launch, DEV);
+    iohome::frame::set_source(&launch, CTRL);
+    const uint8_t tiny[2] = {0x44, 0x55};  // shorter than HMAC_SIZE
+    TEST_ASSERT_TRUE(
+        iohome::frame::set_command(&launch, iohome::CMD_LAUNCH_KEY_TRANSFER, tiny, sizeof(tiny)));
+    iohome::frame::finalize_frame_plain(&launch);
+    const size_t n = iohome::frame::serialize_frame(&launch, buf, sizeof(buf));
+    dev_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    device.check_received(&got);
+
+    TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());  // no key leaked
+  }
+}
+
+void test_2w_push_adopts_new_key_only_after_ack(void) {
+  // The controller must adopt the pushed key at the 0x33 ACK, not when it sends
+  // the 0x32 - so a lost 0x32/0x33 leaves it on its old key and a retry recovers.
+  // Push a key DISTINCT from the controller's initial key so the two are
+  // distinguishable, and read back the controller's key at each step.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t OLD_KEY[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+  const uint8_t NEW_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                               0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, OLD_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+  device.set_accept_pairing(true);
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, NEW_KEY));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, relay(dev_radio, controller, ctrl_radio));
+
+  // 0x32 is sent, 0x33 not yet received: the controller must STILL be on OLD_KEY.
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, OLD_KEY));
+  TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
+
+  // Deliver the 0x32 to the device (it adopts NEW_KEY and acks), then the 0x33
+  // to the controller - only now does the controller adopt NEW_KEY.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, relay(dev_radio, controller, ctrl_radio));
+
+  TEST_ASSERT_FALSE(controller.is_pairing());
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
+  TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, OLD_KEY));
+}
+
+void test_2w_push_transmit_failure_keeps_old_key(void) {
+  // If the 0x32 key transfer cannot be sent, the controller must abandon the
+  // handshake and stay on its old key (not switch to a key the device never got).
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t OLD_KEY[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+  const uint8_t NEW_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                               0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, OLD_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+  device.set_accept_pairing(true);
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, NEW_KEY));  // 0x31 sends fine
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+
+  // Make the controller's radio fail the next transmit - the 0x32.
+  ctrl_radio.transmit_result = RADIOLIB_ERR_TX_TIMEOUT;
+  relay(dev_radio, controller, ctrl_radio);  // 0x3C in; the 0x32 fails to send
+
+  // The handshake is abandoned and the old key is retained.
+  TEST_ASSERT_FALSE(controller.is_pairing());
+  ctrl_radio.transmit_result = RADIOLIB_ERR_NONE;
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, OLD_KEY));
+  TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
+}
+
+void test_initiator_ignores_stranger_pairing_requests(void) {
+  // A node that is BOTH accept_pairing_ AND mid-handshake as an initiator must
+  // not let a third node's plain 0x31/0x38 hijack pairing_peer_. The follower
+  // section is gated on pairing_state_ == IDLE for exactly this reason; without
+  // it, a stranger's 0x31 overwrites pairing_peer_ and stalls the real push.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STRANGER[3] = {0x11, 0x22, 0x33};
+  const uint8_t OLD_KEY[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+  const uint8_t NEW_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                               0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NO_KEY[16] = {0};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, OLD_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, NO_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+  controller.set_accept_pairing(true);  // the initiator ALSO accepts pairing
+  device.set_accept_pairing(true);
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, NEW_KEY));   // PUSH_WAIT_CHALLENGE, peer=DEV
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_ASK_CHALLENGE, relay(ctrl_radio, device, dev_radio));
+
+  // A stranger injects a plain ask-challenge while we are mid-push. It must be
+  // ignored (follower section gated on IDLE), leaving pairing_peer_ == DEV.
+  ctrl_radio.last_transmission.clear();
+  iohome::frame::IoFrame ask;
+  iohome::frame::init_frame(&ask, false);
+  iohome::frame::set_destination(&ask, CTRL);
+  iohome::frame::set_source(&ask, STRANGER);
+  iohome::frame::set_command(&ask, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  iohome::frame::finalize_frame_plain(&ask);
+  uint8_t buf[iohome::FRAME_MAX_SIZE];
+  const size_t n = iohome::frame::serialize_frame(&ask, buf, sizeof(buf));
+  ctrl_radio.deliver(buf, n);
+  iohome::frame::IoFrame got;
+  controller.check_received(&got);
+  TEST_ASSERT_TRUE(ctrl_radio.last_transmission.empty());  // no challenge answered
+  TEST_ASSERT_TRUE(controller.is_pairing());               // still waiting for DEV
+
+  // The real DEV's 0x3C still completes the push - proof pairing_peer_ was intact.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER_ACK, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_FALSE(controller.is_pairing());
+  TEST_ASSERT_TRUE(speaks_key(controller, ctrl_radio, CTRL, DEV, NEW_KEY));
+}
+
+void test_2w_follower_rejects_unsolicited_key_transfer(void) {
+  // SECURITY: a fresh accept-pairing 2W follower must NOT adopt a key from an
+  // UNSOLICITED 0x32. Before the guards, an attacker could send one CRC-valid
+  // 0x32 from src 00:00:00 - matching the zeroed default pairing_peer_ - masked
+  // with the zero default challenge, and the follower would adopt an
+  // attacker-chosen system key with no 0x31/0x3C handshake ever occurring.
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t GROUP[3] = {0x00, 0x00, 0x00};
+  const uint8_t SYS[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                           0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+
+  PhysicalLayer dev_radio;
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(device.begin(DEV, SYS, /*is_1w=*/false));
+  device.set_accept_pairing(true);
+  KeyCapture cap;
+  device.set_key_received_callback(key_cb, &cap);
+  device.start_receive();
+
+  auto forged_key_transfer = [&](const uint8_t src[3]) {
+    iohome::frame::IoFrame kt;
+    iohome::frame::init_frame(&kt, false);
+    iohome::frame::set_destination(&kt, DEV);
+    iohome::frame::set_source(&kt, src);
+    uint8_t payload[20];  // >= AES_KEY_SIZE; attacker-controlled bytes
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = 0xAB;
+    iohome::frame::set_command(&kt, iohome::CMD_KEY_TRANSFER, payload, sizeof(payload));
+    iohome::frame::finalize_frame_plain(&kt);
+    uint8_t buf[iohome::FRAME_MAX_SIZE];
+    const size_t n = iohome::frame::serialize_frame(&kt, buf, sizeof(buf));
+    dev_radio.reset();
+    dev_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    device.check_received(&got);
+  };
+
+  // From the group address (matches the zeroed pairing_peer_): must be rejected.
+  forged_key_transfer(GROUP);
+  TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());  // no 0x33 ack -> not adopted
+  TEST_ASSERT_FALSE(cap.got);                              // no key surfaced/adopted
+
+  // From an arbitrary non-peer address (from_peer is false anyway): also rejected.
+  forged_key_transfer(CTRL);
+  TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());
+  TEST_ASSERT_FALSE(cap.got);
+
+  // The device still authenticates under its ORIGINAL key - nothing was adopted.
+  TEST_ASSERT_TRUE(speaks_key(device, dev_radio, DEV, CTRL, SYS));
+}
+
+void test_2w_follower_rejects_key_transfer_after_challenge_expiry(void) {
+  // SECURITY: exercises the has_active_challenge gate in its BLOCKING role, in
+  // isolation from the other two round-6 defenses. The unsolicited test above is
+  // stopped by the all-zero-src drop and the from_peer check before it ever
+  // reaches the gate, so on its own it would still pass with the gate deleted.
+  // Here the peer IS known (the node answered its 0x31, so pairing_peer_ = the
+  // sender and from_peer is true) but the challenge has EXPIRED. recover_2w_key
+  // does not itself re-check expiry - it reads current_challenge_ directly - so
+  // the gate is the only thing that turns the stale, still-non-zero challenge
+  // into a rejection. Deleting the gate lets an attacker inject a chosen key in
+  // the window after a challenge times out but before anything polls it.
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t PEER[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t SYS[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                           0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+
+  PhysicalLayer dev_radio;
+  IoHomeControl device(&dev_radio);
+  TEST_ASSERT_TRUE(device.begin(DEV, SYS, /*is_1w=*/false));
+  device.set_accept_pairing(true);
+  KeyCapture cap;
+  device.set_key_received_callback(key_cb, &cap);
+  device.start_receive();
+
+  // t = 1000: the peer asks for a challenge; the node answers 0x3C and stores
+  // pairing_peer_ = PEER plus a live challenge stamped on the pairing clock.
+  device.set_pairing_clock_ms(1000);
+  auto send_plain = [&](const uint8_t src[3], uint8_t cmd,
+                        const uint8_t* data, size_t len) {
+    iohome::frame::IoFrame f;
+    iohome::frame::init_frame(&f, false);
+    iohome::frame::set_destination(&f, DEV);
+    iohome::frame::set_source(&f, src);
+    iohome::frame::set_command(&f, cmd, data, len);
+    iohome::frame::finalize_frame_plain(&f);
+    uint8_t buf[iohome::FRAME_MAX_SIZE];
+    const size_t n = iohome::frame::serialize_frame(&f, buf, sizeof(buf));
+    dev_radio.deliver(buf, n);
+    iohome::frame::IoFrame got;
+    device.check_received(&got);
+  };
+  send_plain(PEER, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  TEST_ASSERT_FALSE(dev_radio.last_transmission.empty());
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, dev_radio.last_transmission[8]);
+  dev_radio.last_transmission.clear();  // drop the 0x3C so a later 0x33 would show
+
+  // Advance past the 5 s challenge timeout: the challenge is now stale, but
+  // nothing has polled it, so current_challenge_ is still its non-zero value.
+  device.set_pairing_clock_ms(1000 + 5000 + 1);
+
+  // A forged 0x32 spoofing the peer address. Payload is arbitrary attacker bytes
+  // (>= AES_KEY_SIZE); if the gate were gone it would unmask to *some* key and be
+  // adopted with a 0x33 ack.
+  uint8_t payload[20];
+  for (size_t i = 0; i < sizeof(payload); i++) payload[i] = 0x5A;
+  send_plain(PEER, iohome::CMD_KEY_TRANSFER, payload, sizeof(payload));
+
+  TEST_ASSERT_TRUE(dev_radio.last_transmission.empty());  // no 0x33 ack -> rejected
+  TEST_ASSERT_FALSE(cap.got);                             // no key surfaced/adopted
+  TEST_ASSERT_TRUE(speaks_key(device, dev_radio, DEV, PEER, SYS));  // original key kept
+}
+
+void test_2w_pull_collects_the_device_key(void) {
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t DEVICE_KEY[16] = {0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                  0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13};
+  const uint8_t CTRL_KEY[16] = {0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22,
+                                0x11, 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+
+  PhysicalLayer ctrl_radio, dev_radio;
+  IoHomeControl controller(&ctrl_radio);
+  IoHomeControl device(&dev_radio);
+
+  TEST_ASSERT_TRUE(controller.begin(CTRL, CTRL_KEY, /*is_1w=*/false));
+  TEST_ASSERT_TRUE(device.begin(DEV, DEVICE_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  device.start_receive();
+
+  KeyCapture cap;
+  controller.set_key_received_callback(key_cb, &cap);
+  device.set_accept_pairing(true);
+
+  // The controller launches the pull; its first frame is 0x38, not 0x32.
+  TEST_ASSERT_TRUE(controller.pull_device_key_2w(DEV));
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_LAUNCH_KEY_TRANSFER, ctrl_radio.last_transmission[8]);
+
+  // 0x38 -> device answers with its key in a 0x32.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_LAUNCH_KEY_TRANSFER,
+                         relay(ctrl_radio, device, dev_radio));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, dev_radio.last_transmission[8]);
+
+  // 0x32 -> controller recovers the device's key.
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, relay(dev_radio, controller, ctrl_radio));
+  TEST_ASSERT_TRUE(cap.got);
+  // The surfaced key is the device's own, not the controller's - proof that
+  // pull collected the device's key and did not adopt it.
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(DEVICE_KEY, cap.key, 16);
+  TEST_ASSERT_TRUE(memcmp(cap.key, CTRL_KEY, 16) != 0);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(DEV, cap.from, 3);
+  TEST_ASSERT_FALSE(controller.is_pairing());
+}
+
+void test_2w_pairing_is_off_by_default(void) {
+  // A node that has not opted in must ignore an ask-challenge, so a stranger
+  // cannot make it emit a challenge or accept a key.
+  PhysicalLayer radio;
+  IoHomeControl device(&radio);
+  TEST_ASSERT_TRUE(device.begin(OWN_NODE, SYSTEM_KEY, /*is_1w=*/false));
+  device.start_receive();
+
+  iohome::frame::IoFrame ask;
+  iohome::frame::init_frame(&ask, false);
+  iohome::frame::set_destination(&ask, OWN_NODE);
+  iohome::frame::set_source(&ask, PEER_NODE);
+  iohome::frame::set_command(&ask, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  iohome::frame::finalize_frame_plain(&ask);
+
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(&ask, buffer, sizeof(buffer));
+  radio.reset();
+  radio.deliver(buffer, len);
+
+  iohome::frame::IoFrame received;
+  device.check_received(&received);
+  // Nothing sent back.
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());
+}
+
+void test_1w_node_ignores_pairing_frames_without_crashing(void) {
+  // A node begun in 1W mode has no auth_manager_/discovery_manager_. If it also
+  // has accept_pairing_ set, an unauthenticated ask-challenge (0x31) must NOT be
+  // routed into the 2W pairing machine - doing so dereferenced a null manager
+  // and crashed the node. A single such frame (broadcast or addressed) could
+  // take down every 1W node. The frame must be a harmless no-op instead.
+  PhysicalLayer radio;
+  IoHomeControl device(&radio);
+  TEST_ASSERT_TRUE(device.begin(OWN_NODE, SYSTEM_KEY, /*is_1w=*/true));
+  device.set_accept_pairing(true);
+  device.start_receive();
+
+  iohome::frame::IoFrame ask;
+  iohome::frame::init_frame(&ask, false);
+  iohome::frame::set_destination(&ask, OWN_NODE);
+  iohome::frame::set_source(&ask, PEER_NODE);
+  iohome::frame::set_command(&ask, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  iohome::frame::finalize_frame_plain(&ask);
+
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(&ask, buffer, sizeof(buffer));
+  radio.reset();
+  radio.deliver(buffer, len);
+
+  iohome::frame::IoFrame received;
+  device.check_received(&received);  // must not crash
+
+  TEST_ASSERT_FALSE(device.is_pairing());
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());  // no challenge emitted
+}
+
+// ---------------------------------------------------------------------------
 // Rolling code persistence
 // ---------------------------------------------------------------------------
 
@@ -414,17 +1084,18 @@ void test_rolling_code_writes_are_batched(void) {
   controller.set_rolling_code_store(&store, 8);
   TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
 
-  // begin() reserves the first block.
-  TEST_ASSERT_EQUAL_INT(1, store.saves);
-  TEST_ASSERT_EQUAL_UINT16(8, store.stored);
+  // begin() no longer reserves eagerly: a boot that transmits nothing must not
+  // touch flash (see test_rolling_code_noop_reboots_burn_nothing / V72).
+  TEST_ASSERT_EQUAL_INT(0, store.saves);
 
   // Regression: the counter used to be written on every single command, which
-  // wears out the NVS partition. Eight commands must fit in one block.
+  // wears out the NVS partition. The first command reserves one block and writes
+  // once; the next seven ride that reservation with no further writes.
   for (int i = 0; i < 8; i++) {
     controller.close(PEER_NODE);
   }
-  TEST_ASSERT_EQUAL_INT(2, store.saves);
-  TEST_ASSERT_EQUAL_UINT16(16, store.stored);
+  TEST_ASSERT_EQUAL_INT(1, store.saves);
+  TEST_ASSERT_EQUAL_UINT16(9, store.stored);  // reserved past code 8 (1 + block)
 }
 
 void test_rolling_code_resumes_past_reservation(void) {
@@ -439,13 +1110,42 @@ void test_rolling_code_resumes_past_reservation(void) {
   }
 
   // A reboot must resume at or past every code that could have been sent, so a
-  // receiver never sees a sequence number it has already accepted.
+  // receiver never sees a sequence number it has already accepted. The first
+  // transmit reserved a block ahead of code 0 (reserved_until = 1 + block = 9)
+  // and persisted it before sending, so the restart resumes there.
   IoHomeControl restarted(&radio);
   restarted.set_rolling_code_store(&store, 8);
   restarted.begin(OWN_NODE, SYSTEM_KEY);
 
-  TEST_ASSERT_GREATER_OR_EQUAL(1, restarted.get_rolling_code());
-  TEST_ASSERT_EQUAL_UINT16(8, restarted.get_rolling_code());
+  TEST_ASSERT_GREATER_OR_EQUAL(1, restarted.get_rolling_code());  // past code 0
+  TEST_ASSERT_EQUAL_UINT16(9, restarted.get_rolling_code());
+}
+
+void test_rolling_code_noop_reboots_burn_nothing(void) {
+  PhysicalLayer radio;
+  CountingStore store;
+
+  // Twenty reboots that transmit nothing must not advance the persisted counter.
+  // Eager per-boot reservation used to burn a full block each time, so a run of
+  // brownout / re-init reboots could skip the transmit code past the receiver's
+  // bounded replay window and lock the controller out with no attacker (V72).
+  for (int i = 0; i < 20; i++) {
+    IoHomeControl controller(&radio);
+    controller.set_rolling_code_store(&store, 8);
+    TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+  }
+  TEST_ASSERT_EQUAL_INT(0, store.saves);
+  TEST_ASSERT_EQUAL_UINT16(0, store.stored);
+  TEST_ASSERT_FALSE(store.has_value);
+
+  // ...but the first real transmit still persists a reservation strictly ahead
+  // of the code it hands out, so a crash right after cannot reuse it.
+  IoHomeControl active(&radio);
+  active.set_rolling_code_store(&store, 8);
+  TEST_ASSERT_TRUE(active.begin(OWN_NODE, SYSTEM_KEY));
+  active.close(PEER_NODE);  // uses code 0
+  TEST_ASSERT_EQUAL_INT(1, store.saves);
+  TEST_ASSERT_GREATER_OR_EQUAL(1, store.stored);  // reserved past code 0
 }
 
 // ---------------------------------------------------------------------------
@@ -657,19 +1357,22 @@ void test_packet_length_helper_programs_each_frame(void) {
 
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
 
-  // Narrowed to this frame's length before sending, widened again after - the
-  // radio must not be left expecting 25-byte packets.
+  // Narrowed to this frame's *wire* length before sending, widened again after.
+  // A 25-byte frame is 32 wire bytes (ten bits each), and reception widens back
+  // to the full capture size - not the frame maximum, since framed frames are
+  // longer than 34.
+  // Assert the literal wire sizes, not uart_wire_size() on both sides of the
+  // comparison (which would agree with itself even if that helper were wrong).
   TEST_ASSERT_EQUAL_UINT(2, fake.lengths.size());
-  TEST_ASSERT_EQUAL_UINT8(25, fake.lengths[0]);
-  TEST_ASSERT_EQUAL_UINT8(radio.last_transmission.size(), fake.lengths[0]);
-  TEST_ASSERT_EQUAL_UINT8(iohome::FRAME_MAX_SIZE, fake.lengths[1]);
+  TEST_ASSERT_EQUAL_UINT8(32, fake.lengths[0]);  // == uart_wire_size(25)
+  TEST_ASSERT_EQUAL_UINT8(64, fake.lengths[1]);
 
   // A longer frame programs a different length, not a constant.
   const uint8_t fps[4] = {0x80, 0xC8, 0x00, 0x00};
   TEST_ASSERT_TRUE(controller.send_execute_fp(PEER_NODE, 0xD400, fps, sizeof(fps)));
   TEST_ASSERT_EQUAL_UINT(4, fake.lengths.size());
-  TEST_ASSERT_EQUAL_UINT8(27, fake.lengths[2]);
-  TEST_ASSERT_EQUAL_UINT8(iohome::FRAME_MAX_SIZE, fake.lengths[3]);
+  TEST_ASSERT_EQUAL_UINT8(34, fake.lengths[2]);  // == uart_wire_size(27)
+  TEST_ASSERT_EQUAL_UINT8(64, fake.lengths[3]);
 }
 
 void test_raw_sniffer_sees_every_packet(void) {
@@ -681,6 +1384,14 @@ void test_raw_sniffer_sees_every_packet(void) {
   controller.set_raw_frame_callback(sniffer_cb, &capture);
   TEST_ASSERT_EQUAL_INT(RADIOLIB_ERR_NONE, controller.start_receive());
 
+  // The sniffer sees the raw on-air bytes, framing and all, so de-frame them
+  // to compare against the logical frame the library sent.
+  auto deframed = [](const std::vector<uint8_t>& wire) {
+    uint8_t out[iohome::FRAME_MAX_SIZE];
+    const size_t n = iohome::phy::uart_decode_frame(wire.data(), wire.size(), out, sizeof out);
+    return std::vector<uint8_t>(out, out + n);
+  };
+
   // A frame that passes every check.
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
   const std::vector<uint8_t> good = radio.last_transmission;
@@ -689,8 +1400,10 @@ void test_raw_sniffer_sees_every_packet(void) {
   iohome::frame::IoFrame frame;
   controller.check_received(&frame);
   TEST_ASSERT_EQUAL_INT(1, capture.calls);
-  TEST_ASSERT_EQUAL_UINT(good.size(), capture.frames[0].size());
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(good.data(), capture.frames[0].data(), good.size());
+  // What the sniffer captured is framed; de-framed it is the frame we sent.
+  const std::vector<uint8_t> seen0 = deframed(capture.frames[0]);
+  TEST_ASSERT_EQUAL_UINT(good.size(), seen0.size());
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(good.data(), seen0.data(), good.size());
 
   // A frame with a broken CRC never reaches the frame callback, but the
   // sniffer must still see it - that is the whole point of the hook.
@@ -699,11 +1412,13 @@ void test_raw_sniffer_sees_every_packet(void) {
   radio.deliver(corrupted.data(), corrupted.size());
   TEST_ASSERT_FALSE(controller.check_received(&frame));
   TEST_ASSERT_EQUAL_INT(2, capture.calls);
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(corrupted.data(), capture.frames[1].data(), corrupted.size());
+  const std::vector<uint8_t> seen1 = deframed(capture.frames[1]);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(corrupted.data(), seen1.data(), corrupted.size());
 
-  // So must a frame too short to parse at all.
+  // So must a frame too short to parse at all - injected as raw wire bytes,
+  // since it is not a well-formed frame to be framed.
   const uint8_t runt[5] = {0xF8, 0x00, 0x11, 0x22, 0x33};
-  radio.deliver(runt, sizeof(runt));
+  radio.deliver_raw(runt, sizeof(runt));
   TEST_ASSERT_FALSE(controller.check_received(&frame));
   TEST_ASSERT_EQUAL_INT(3, capture.calls);
   TEST_ASSERT_EQUAL_UINT(sizeof(runt), capture.frames[2].size());
@@ -891,9 +1606,12 @@ void test_pair_device_1w_emits_two_frames(void) {
                                               iohome::frame::AuthTrailer::NONE));
   TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed));
 
+  // A real receiver unmasks with the frame's source - us, the sender - because
+  // the key belongs to the sender. See create_key_transfer_1w.
   uint8_t recovered[16];
-  TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(parsed.data, PEER_NODE, recovered));
+  TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(parsed.data, parsed.src_node, recovered));
   TEST_ASSERT_EQUAL_UINT8_ARRAY(new_key, recovered, 16);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(OWN_NODE, parsed.src_node, 3);
 }
 
 void test_pair_rejects_nullptr(void) {
@@ -967,14 +1685,17 @@ void test_survives_arbitrary_radio_input(void) {
   iohome::frame::IoFrame frame;
 
   for (int round = 0; round < 4000; round++) {
-    uint8_t buffer[iohome::FRAME_MAX_SIZE];
+    // Raw wire bytes, up to the full capture size, so the de-framer is fuzzed
+    // along with the parser, MAC and replay checks - the whole receive path as
+    // it runs on real hardware.
+    uint8_t buffer[64];
     const size_t len = 1 + (next_random(state) % sizeof(buffer));
 
     for (size_t i = 0; i < len; i++) {
       buffer[i] = static_cast<uint8_t>(next_random(state) & 0xFF);
     }
 
-    radio.deliver(buffer, len);
+    radio.deliver_raw(buffer, len);
     // Random bytes should never pass CRC, MAC and the replay check. If one
     // ever did, that is a 1-in-2^64 fluke or a real hole.
     TEST_ASSERT_FALSE(controller.check_received(&frame));
@@ -1023,7 +1744,9 @@ int main(int, char**) {
   RUN_TEST(test_execute_frame_shape);
   RUN_TEST(test_execute_with_extra_functional_params);
   RUN_TEST(test_position_mapping);
+  RUN_TEST(test_ventilate_sends_secured_ventilation);
   RUN_TEST(test_rejects_invalid_acei);
+  RUN_TEST(test_set_priority_selects_the_acei_level);
   RUN_TEST(test_send_command_rejects_nullptr);
   RUN_TEST(test_2w_requires_handshake);
   RUN_TEST(test_2w_commands_work_after_handshake);
@@ -1034,6 +1757,7 @@ int main(int, char**) {
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_writes_are_batched);
   RUN_TEST(test_rolling_code_resumes_past_reservation);
+  RUN_TEST(test_rolling_code_noop_reboots_burn_nothing);
 
   RUN_TEST(test_accepts_valid_authenticated_frame);
   RUN_TEST(test_rejects_corrupted_frame);
@@ -1053,6 +1777,18 @@ int main(int, char**) {
   RUN_TEST(test_log_level_filters);
   RUN_TEST(test_log_passthrough_does_not_reformat);
 
+  RUN_TEST(test_2w_push_pairing_transfers_the_key);
+  RUN_TEST(test_2w_pairing_ignores_a_stranger_challenge);
+  RUN_TEST(test_pairing_expires_after_timeout);
+  RUN_TEST(test_pairing_rejects_truncated_frames);
+  RUN_TEST(test_2w_push_adopts_new_key_only_after_ack);
+  RUN_TEST(test_2w_push_transmit_failure_keeps_old_key);
+  RUN_TEST(test_initiator_ignores_stranger_pairing_requests);
+  RUN_TEST(test_2w_follower_rejects_unsolicited_key_transfer);
+  RUN_TEST(test_2w_follower_rejects_key_transfer_after_challenge_expiry);
+  RUN_TEST(test_2w_pull_collects_the_device_key);
+  RUN_TEST(test_2w_pairing_is_off_by_default);
+  RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);
   RUN_TEST(test_pair_device_1w_emits_two_frames);
   RUN_TEST(test_pair_rejects_nullptr);
   RUN_TEST(test_discovery_transmits_request);

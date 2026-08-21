@@ -21,6 +21,7 @@
 #include "protocol/iohome_constants.h"
 #include "protocol/iohome_crypto.h"
 #include "protocol/iohome_frame.h"
+#include "protocol/iohome_phy_framing.h"
 #include "protocol/iohome_2w.h"
 #include "protocol/iohome_replay_guard.h"
 #include "protocol/iohome_rolling_code_store.h"
@@ -104,6 +105,37 @@ enum class LogLevel : uint8_t {
  * @param context Opaque pointer supplied with the callback
  */
 typedef void (*LogCallback)(LogLevel level, const char* message, void* context);
+
+/**
+ * @brief Sink for a system key received during 2W pairing
+ *
+ * Fired when this node, acting as the follower in a 2W key transfer, has
+ * recovered and adopted a key pushed to it by a controller. The key is already
+ * in effect (set_system_key() has run); this is the hook to persist it so it
+ * survives a reboot.
+ *
+ * Fires whenever this node obtains a key over the air: as a follower being
+ * pushed one (which it has already adopted, set_system_key() has run), or as a
+ * controller pulling a device's existing key (which it has *not* adopted - that
+ * is the peer's key, surfaced so the application can store it against that
+ * peer). @p from_node tells the two apart: it is the sender of the key.
+ *
+ * @param key The 16-byte key obtained
+ * @param from_node The node it came from (3 bytes)
+ * @param context Opaque pointer supplied with the callback
+ */
+typedef void (*KeyReceivedCallback)(const uint8_t key[16], const uint8_t from_node[3],
+                                    void* context);
+
+/**
+ * @brief State of a 2W pairing exchange in progress
+ */
+enum class Pairing2W : uint8_t {
+  IDLE = 0,
+  PUSH_WAIT_CHALLENGE,  // controller sent 0x31, waiting for the device's 0x3C
+  PUSH_WAIT_ACK,        // controller sent 0x32, waiting for the device's 0x33
+  PULL_WAIT_KEY         // controller sent 0x38, waiting for the device's 0x32
+};
 
 /**
  * @brief Why a received frame was discarded
@@ -313,6 +345,25 @@ public:
   bool stop(const uint8_t dest_node[NODE_ID_SIZE]);
 
   /**
+   * @brief Move a window to its secured ventilation position
+   *
+   * The window opens far enough to air the room while staying locked. This is
+   * the "airing" position a Velux roof window (including the solar GGL/GGU
+   * models) offers - Main Parameter 0xD803, the window opener actuator profile's
+   * secured-ventilation alias. Sending it to a product that is not a window
+   * opener has no defined meaning.
+   */
+  bool ventilate(const uint8_t dest_node[NODE_ID_SIZE]);
+
+  /**
+   * @brief Send a Velux remote's "force" preset (Main Parameter 0x6400)
+   *
+   * A fixed preset a real Velux remote's dedicated button sends. Observed on
+   * air rather than derived from the specification - see MP_FORCE.
+   */
+  bool force(const uint8_t dest_node[NODE_ID_SIZE]);
+
+  /**
    * @brief Set the command originator reported in execute frames
    */
   void set_originator(Originator originator) { originator_ = originator; }
@@ -323,6 +374,27 @@ public:
    * @return false if bit 0 (IsValid) is clear; actuators would reject the frame
    */
   bool set_acei(uint8_t acei);
+
+  /**
+   * @brief Set the ACEI priority level, keeping the rest of the byte intact
+   *
+   * Only the priority level (bits 7-5) changes - the field that decides whether
+   * a command outranks another. Priority service, extended info and the IsValid
+   * bit are left as they were, so this composes with set_acei().
+   *
+   * Real remotes differ here and both are valid: our own capture and the KLF 200
+   * default sit at USER_LEVEL_2 (level 3, "Default"), while the remote
+   * rspaargaren/iohomecontrol emulates runs one step up at USER_LEVEL_1
+   * (level 2, "High") - the level in the ACEI 0x43 that docs/commands.md records
+   * from a real frame. This is the clean way to match that level. Note that
+   * rspaargaren's exact 0x43 also carries Extended Info = 1, which is not part of
+   * the priority; to reproduce the byte verbatim use set_acei(0x43) instead.
+   */
+  void set_priority(PriorityLevel level) {
+    acei_ = static_cast<uint8_t>(
+        (acei_ & ~ACEI_LEVEL_MASK) |
+        ((static_cast<uint8_t>(level) << ACEI_LEVEL_SHIFT) & ACEI_LEVEL_MASK));
+  }
 
   /**
    * @brief Get current RSSI, or 0 if no radio is attached
@@ -541,10 +613,80 @@ public:
                       uint8_t manufacturer = 0x00);
 
   /**
-   * @brief Pair a device by transferring a key (2W mode)
+   * @brief Push a system key to a device (2W mode, controller/initiator role)
+   *
+   * Runs the documented push exchange rather than firing a lone frame:
+   *
+   *   1. this -> device:  0x31  ask challenge
+   *   2. device -> this:  0x3C  challenge (a nonce the device chose)
+   *   3. this -> device:  0x32  the key, masked against that nonce
+   *   4. device -> this:  0x33  key transfer acknowledged
+   *
+   * This call performs step 1 and returns; steps 2-4 are driven by the received
+   * 0x3C and 0x33, so the caller must keep pumping the receive path (with 2W
+   * frequency hopping updated) until is_pairing() goes false. On success this
+   * node adopts @p new_system_key, so its later commands to the device
+   * authenticate under it. Closes the gap where the old one-shot version sent
+   * 0x32 with a challenge the device had never seen.
+   *
+   * @param dest_node Target device node ID (3 bytes)
+   * @param new_system_key Key to push and then use (16 bytes)
+   * @return true if the opening 0x31 was sent
    */
   bool pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
                       const uint8_t new_system_key[AES_KEY_SIZE]);
+
+  /**
+   * @brief Pull a device's existing key (2W mode, controller/collector role)
+   *
+   * The other half of pairing: instead of pushing a key, collect the one a
+   * device already holds, to then command it. Runs the documented pull:
+   *
+   *   1. this -> device:  0x38  launch key transfer, carrying a challenge
+   *   2. device -> this:  0x32  its key, masked against that challenge
+   *
+   * The recovered key is delivered to the key-received callback with the
+   * device as @c from_node. It is *not* adopted as this node's system key - it
+   * belongs to the device - so the application stores it per device. As with
+   * the push, the caller pumps the receive path until is_pairing() clears.
+   *
+   * @param dest_node Device to collect the key from (3 bytes)
+   * @return true if the opening 0x38 was sent
+   */
+  bool pull_device_key_2w(const uint8_t dest_node[NODE_ID_SIZE]);
+
+  /**
+   * @brief Accept a system key pushed by a controller (2W follower role)
+   *
+   * With this enabled, an incoming 0x31 is answered with a fresh 0x3C challenge,
+   * and the 0x32 that follows is unmasked, adopted as the system key, and
+   * acknowledged with 0x33. The recovered key is delivered to the callback set
+   * with set_key_received_callback() so it can be persisted.
+   *
+   * @param enabled Whether to act on pairing requests
+   */
+  void set_accept_pairing(bool enabled);
+
+  /**
+   * @brief Whether a pairing exchange is currently in progress
+   */
+  bool is_pairing() const { return pairing_state_ != Pairing2W::IDLE; }
+
+  /**
+   * @brief Install the sink for a key received during pairing
+   */
+  void set_key_received_callback(KeyReceivedCallback callback, void* context = nullptr);
+
+  /**
+   * @brief Replace the system key in use at runtime
+   *
+   * Updates both the frame authentication key and the 2W authentication
+   * manager. Pairing calls this itself; it is public so an application can apply
+   * a persisted key after begin().
+   *
+   * @param key New system key (16 bytes)
+   */
+  void set_system_key(const uint8_t key[AES_KEY_SIZE]);
 
   /**
    * @brief Check whether a beacon was received recently (2W mode)
@@ -611,6 +753,56 @@ protected:
   mode2w::AuthenticationManager* auth_manager_;
   mode2w::BeaconHandler* beacon_handler_;
   mode2w::DiscoveryManager* discovery_manager_;
+
+  // 2W pairing
+  KeyReceivedCallback key_received_callback_;
+  void* key_received_context_;
+  bool accept_pairing_;
+  Pairing2W pairing_state_;
+  uint8_t pairing_peer_[NODE_ID_SIZE];
+  uint8_t pairing_key_[AES_KEY_SIZE];
+  /// Challenge sent in our 0x38, needed to unmask the device's 0x32 (pull).
+  uint8_t pairing_challenge_[HMAC_SIZE];
+  /// When the current pairing wait began, so a stalled peer cannot leave us
+  /// stuck. See expire_stale_pairing() / PAIRING_TIMEOUT_MS.
+  uint32_t pairing_started_ms_;
+
+  /// A pairing handshake that has not completed within this long is abandoned.
+  /// Long enough for a slow device to answer, short enough that a dropped peer
+  /// does not keep diverting unrelated 0x3C/0x32 frames from MAC screening.
+  static constexpr uint32_t PAIRING_TIMEOUT_MS = 5000;
+
+  /// Reset a pairing handshake to IDLE if it has been waiting too long. Called
+  /// on the receive path so the guard runs even without a matching answer.
+  void expire_stale_pairing();
+
+  /// The clock the pairing timeout reads. In production it is NOW_MS(); a host
+  /// test can pin it via set_pairing_clock_ms() to exercise the 5 s expiry,
+  /// which is otherwise unreachable (clock() cannot be advanced by a test).
+  uint32_t pairing_now_ms() const;
+  bool pairing_clock_overridden_;
+  uint32_t pairing_clock_ms_;
+
+ public:
+  /// Test seam (not for production use): pin the clock the pairing timeout reads.
+  void set_pairing_clock_ms(uint32_t ms) {
+    pairing_clock_overridden_ = true;
+    pairing_clock_ms_ = ms;
+  }
+
+ protected:
+
+  /// Bytes to pull off the air per packet. A frame is at most FRAME_MAX_SIZE
+  /// logical bytes, each ten bits on the wire, so up to 43 arrive; 64 leaves
+  /// room for that and the trailing preamble the receiver sees after it.
+  static constexpr size_t RX_CAPTURE_SIZE = 64;
+
+  /// True when a frame belongs to a pairing exchange and must skip the session
+  /// authentication gate (the peers do not yet share the key that gate checks).
+  bool is_pairing_frame(const frame::IoFrame* frame) const;
+
+  /// Advance the pairing state machine on a received pairing frame.
+  void handle_pairing_frame(const frame::IoFrame* frame);
 
   /**
    * @brief Transmit a frame

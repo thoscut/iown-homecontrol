@@ -23,6 +23,14 @@
 
 #include <vector>
 
+// The mock stands in for the *air*, not just the chip: a real io-homecontrol
+// frame travels UART-framed (start/stop bits, LSB first), and the library now
+// frames on transmit and de-frames on receive. So the mock frames what a test
+// delivers and de-frames what the library transmits, presenting tests the
+// logical frame either way. deliver_raw()/last_transmission still expose the
+// on-air bytes for the tests that care about them.
+#include "protocol/iohome_phy_framing.h"
+
 // Error codes, copied verbatim from RadioLib 7.x src/TypeDef.h.
 //
 // These MUST match the real values. An earlier version of this mock invented
@@ -126,7 +134,17 @@ class PhysicalLayer {
 
   virtual int16_t transmit(const uint8_t* data, size_t len, uint8_t addr = 0) {
     (void) addr;
-    last_transmission.assign(data, data + len);
+    // The library transmits UART-framed wire bytes. Record both the raw wire
+    // and the frame it decodes to, so field assertions can read the logical
+    // frame while last_wire keeps what actually went out.
+    last_wire.assign(data, data + len);
+    uint8_t frame[64];
+    const size_t frame_len = iohome::phy::uart_decode_frame(data, len, frame, sizeof frame);
+    if (frame_len > 0) {
+      last_transmission.assign(frame, frame + frame_len);
+    } else {
+      last_transmission.assign(data, data + len);  // not a frame; keep raw
+    }
     transmissions.push_back(last_transmission);
     return transmit_result;
   }
@@ -152,8 +170,20 @@ class PhysicalLayer {
 
   // --- Test helpers --------------------------------------------------------
 
-  /// Queue a frame and fire the packet interrupt, as a real radio would.
+  /// Deliver a logical frame: frame it as the air would and fire the interrupt.
   void deliver(const uint8_t* data, size_t len) {
+    uint8_t wire[64];
+    const size_t wire_len = iohome::phy::uart_encode(data, len, wire, sizeof wire);
+    if (wire_len > 0) {
+      deliver_raw(wire, wire_len);
+    } else {
+      deliver_raw(data, len);  // too long to frame; deliver as-is
+    }
+  }
+
+  /// Deliver raw on-air bytes unchanged - for malformed or noise injection that
+  /// is not a well-formed logical frame.
+  void deliver_raw(const uint8_t* data, size_t len) {
     rx_buffer.assign(data, data + len);
     if (packet_action != nullptr) {
       packet_action();
@@ -163,6 +193,7 @@ class PhysicalLayer {
   void reset() {
     transmissions.clear();
     last_transmission.clear();
+    last_wire.clear();
     rx_buffer.clear();
     receive_started = 0;
     standby_calls = 0;
@@ -180,7 +211,8 @@ class PhysicalLayer {
 
   // Recorded traffic
   std::vector<std::vector<uint8_t>> transmissions;
-  std::vector<uint8_t> last_transmission;
+  std::vector<uint8_t> last_transmission;  // de-framed logical frame
+  std::vector<uint8_t> last_wire;          // raw UART-framed bytes as sent
   std::vector<uint8_t> rx_buffer;
 
   // Call counters

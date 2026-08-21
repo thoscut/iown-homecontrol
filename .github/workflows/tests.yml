@@ -14,8 +14,10 @@ on:
     branches: ["main"]
     paths:
       - "src/**"
+      - "include/**"
       - "test/**"
       - "tools/**"
+      - "scripts/**"
       - "esphome/**"
       - "library.json"
       - "platformio.ini"
@@ -23,8 +25,10 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "include/**"
       - "test/**"
       - "tools/**"
+      - "scripts/**"
       - "esphome/**"
       - "library.json"
       - "platformio.ini"

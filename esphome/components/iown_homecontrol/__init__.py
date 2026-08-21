@@ -55,6 +55,20 @@ CONF_ACEI = "acei"
 CONF_ORIGINATOR = "originator"
 CONF_POSITION_FEEDBACK = "position_feedback"
 CONF_TWO_WAY = "two_way"
+CONF_KEY_CAPTURE = "key_capture"
+CONF_TCXO_VOLTAGE = "tcxo_voltage"
+CONF_VEXT_PIN = "vext_pin"
+CONF_VEXT_ACTIVE_HIGH = "vext_active_high"
+CONF_RF_FRONTEND = "rf_frontend"
+CONF_POWER_PIN = "power_pin"
+CONF_ENABLE_PIN = "enable_pin"
+CONF_TX_PIN = "tx_pin"
+
+# SX126x drives its TCXO from DIO3 and only supports these discrete supply
+# voltages; anything else makes setTCXO() return RADIOLIB_ERR_INVALID_TCXO_VOLTAGE
+# at runtime. 0 disables TCXO control and selects a plain crystal.
+# (RadioLib 7.7.1, SX126x.h - setTCXO)
+TCXO_VOLTAGES = (0.0, 1.6, 1.7, 1.8, 2.2, 2.4, 2.7, 3.0, 3.3)
 
 # The three io-homecontrol channels. 1W traffic only ever uses channel 2.
 IOHC_CHANNELS = (868.25, 868.95, 869.85)
@@ -182,9 +196,43 @@ def _validate_radio_pins(config):
     return config
 
 
+def _validate_tcxo_voltage(value):
+    """Validate the DIO3 TCXO supply voltage against what SX126x can produce."""
+    value = cv.float_(value)
+    if not any(abs(value - v) < 0.001 for v in TCXO_VOLTAGES):
+        allowed = ", ".join(f"{v:g}" for v in TCXO_VOLTAGES)
+        raise cv.Invalid(
+            f"{value:g} V is not one of the voltages an SX126x can put on DIO3. "
+            f"Allowed: {allowed} (0 disables TCXO control)."
+        )
+    return value
+
+
+# The front end is only meaningful as a complete set: powering the LDO without
+# asserting chip enable leaves the PA off, and leaving tx_pin out would keep the
+# TX/RX select line floating.
+RF_FRONTEND_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_POWER_PIN): cv.int_range(min=0, max=48),
+        cv.Required(CONF_ENABLE_PIN): cv.int_range(min=0, max=48),
+        cv.Required(CONF_TX_PIN): cv.int_range(min=0, max=48),
+    }
+)
+
+
 def _validate_config(config):
     """Cross-field checks that a per-key validator cannot express."""
     _validate_radio_pins(config)
+
+    # DIO3 is an SX126x feature. An SX127x has a crystal wired to XTAL1/XTAL2
+    # and no software control over it, so accepting the option there would
+    # silently do nothing.
+    if CONF_TCXO_VOLTAGE in config and config[CONF_RADIO_TYPE] != "SX1262":
+        raise cv.Invalid(
+            "tcxo_voltage only applies to SX126x radios - an SX127x has no "
+            "software-controlled oscillator supply",
+            path=[CONF_TCXO_VOLTAGE],
+        )
 
     if config[CONF_TWO_WAY] and CONF_SYSTEM_KEY not in config:
         raise cv.Invalid(
@@ -244,6 +292,17 @@ CONFIG_SCHEMA = cv.All(
             # moments earlier, so a recorded frame stops working when the
             # session ends. 1W relies on a rolling code instead.
             cv.Optional(CONF_TWO_WAY, default=False): cv.boolean,
+            # Pairing aid: log the system key a 1W controller broadcasts while
+            # it is in key-copy mode. The key ends up in the ESPHome log in
+            # clear text, so this is meant to be switched on for the pairing
+            # and off again straight after.
+            cv.Optional(CONF_KEY_CAPTURE, default=False): cv.boolean,
+            # Left unset, RadioLib's own 1.6 V default applies - which is what
+            # this component did before the option existed.
+            cv.Optional(CONF_TCXO_VOLTAGE): _validate_tcxo_voltage,
+            cv.Optional(CONF_VEXT_PIN): cv.int_range(min=0, max=48),
+            cv.Optional(CONF_VEXT_ACTIVE_HIGH, default=False): cv.boolean,
+            cv.Optional(CONF_RF_FRONTEND): RF_FRONTEND_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_config,
@@ -268,6 +327,23 @@ async def to_code(config):
     cg.add(var.set_originator(config[CONF_ORIGINATOR]))
     cg.add(var.set_position_feedback(config[CONF_POSITION_FEEDBACK]))
     cg.add(var.set_two_way(config[CONF_TWO_WAY]))
+    cg.add(var.set_key_capture(config[CONF_KEY_CAPTURE]))
+
+    if CONF_TCXO_VOLTAGE in config:
+        cg.add(var.set_tcxo_voltage(config[CONF_TCXO_VOLTAGE]))
+
+    if CONF_VEXT_PIN in config:
+        cg.add(var.set_vext_pin(config[CONF_VEXT_PIN], config[CONF_VEXT_ACTIVE_HIGH]))
+
+    if CONF_RF_FRONTEND in config:
+        frontend = config[CONF_RF_FRONTEND]
+        cg.add(
+            var.set_rf_frontend(
+                frontend[CONF_POWER_PIN],
+                frontend[CONF_ENABLE_PIN],
+                frontend[CONF_TX_PIN],
+            )
+        )
 
     if CONF_SCK_PIN in config:
         cg.add(var.set_sck_pin(config[CONF_SCK_PIN]))

@@ -116,7 +116,11 @@ public:
 
 protected:
   ChannelState current_channel_;
-  unsigned long last_hop_time_us_;
+  // Stored as a fixed 32 bits so the wrap happens at 2^32 on every platform,
+  // matching Arduino micros() (a 32-bit unsigned long). On a 64-bit host,
+  // `unsigned long` is 64 bits and would only wrap at 2^64, so the timestamp
+  // math is done in uint32_t regardless of the caller's type.
+  uint32_t last_hop_time_us_;
   unsigned long hop_interval_us_;
   bool enabled_;
 
@@ -154,6 +158,10 @@ public:
   static constexpr uint32_t DEFAULT_CHALLENGE_TIMEOUT_MS = 5000;
 
   AuthenticationManager();
+
+  /// Wipes the system key and current challenge on destruction, matching the
+  /// zeroization discipline the rest of the codebase applies to key material.
+  ~AuthenticationManager();
 
   /**
    * @brief Initialize the authentication manager
@@ -226,6 +234,30 @@ public:
   bool verify_challenge_response(const frame::IoFrame* frame, unsigned long now_ms);
 
   /**
+   * @brief Recover a system key pushed to us in a 2W key transfer (0x32)
+   *
+   * The counterpart to sending a key. When this node has answered a peer's
+   * "ask challenge" (0x31) with a challenge of its own (0x3C, via
+   * create_challenge_request(), which stores the nonce), the peer replies with
+   * a 0x32 carrying its key masked against an IV built from that nonce and the
+   * frame that requested the transfer. This undoes the mask.
+   *
+   * The mask uses only the public transfer key, the challenge and the request
+   * frame - never this node's system key - so it works before any key is
+   * shared, which is the whole point of a key transfer.
+   *
+   * @param key_frame The received 0x32 frame
+   * @param request_frame_data The frame that seeded the IV: for the documented
+   *        push that is the "ask challenge" command byte, {0x31}
+   * @param request_data_len Length of @p request_frame_data
+   * @param key_out Recovered key (16 bytes)
+   * @return true if the frame was a 0x32 of the right size and unmasking ran
+   */
+  bool recover_2w_key(const frame::IoFrame* key_frame,
+                      const uint8_t* request_frame_data, size_t request_data_len,
+                      uint8_t key_out[AES_KEY_SIZE]) const;
+
+  /**
    * @brief Get the current challenge (6 bytes)
    *
    * Only meaningful while has_active_challenge() is true; the buffer is zeroed
@@ -259,6 +291,16 @@ public:
    * @brief Whether the session is currently authenticated
    */
   bool is_authenticated(unsigned long now_ms) { return get_state(now_ms) == ChallengeState::AUTHENTICATED; }
+
+  /**
+   * @brief Whether an authenticated session exists AND it is bound to this peer
+   *
+   * A 2W session's challenge nonce only signs frames between the two nodes that
+   * negotiated it. Reusing a session established with actuator A to command
+   * actuator B produces a frame B never authenticated and silently rejects, so
+   * a caller must confirm the session belongs to the target before sending.
+   */
+  bool is_authenticated_with(const uint8_t peer[NODE_ID_SIZE], unsigned long now_ms);
 
   /**
    * @brief Reset the authentication state and wipe the stored challenge

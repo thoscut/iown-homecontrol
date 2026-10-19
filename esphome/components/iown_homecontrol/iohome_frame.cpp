@@ -246,16 +246,20 @@ void set_rolling_code(IoFrame* frame, uint16_t code) {
   if (frame == nullptr) {
     return;
   }
-  frame->rolling_code[0] = static_cast<uint8_t>(code & 0xFF);         // LSB first
-  frame->rolling_code[1] = static_cast<uint8_t>((code >> 8) & 0xFF);
+  // High byte first. Every captured 1W command keeps its first sequence byte
+  // fixed while the second steps per press (Velux 7E4694: 04 9B..04 A2), so the
+  // second byte is the low one. The MAC covers the two bytes in wire order and
+  // does not care; the receiver's freshness check does.
+  frame->rolling_code[0] = static_cast<uint8_t>((code >> 8) & 0xFF);
+  frame->rolling_code[1] = static_cast<uint8_t>(code & 0xFF);
 }
 
 uint16_t get_rolling_code(const IoFrame* frame) {
   if (frame == nullptr) {
     return 0;
   }
-  return static_cast<uint16_t>(frame->rolling_code[0] |
-                               (static_cast<uint16_t>(frame->rolling_code[1]) << 8));
+  return static_cast<uint16_t>((static_cast<uint16_t>(frame->rolling_code[0]) << 8) |
+                               frame->rolling_code[1]);
 }
 
 bool finalize_frame(IoFrame* frame, const uint8_t system_key[AES_KEY_SIZE], const uint8_t* challenge) {

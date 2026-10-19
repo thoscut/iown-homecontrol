@@ -648,6 +648,10 @@ bool IoHomeControl::send_command(
   }
 
   if (is_1w_mode_) {
+    // Real 1W commands carry order bits 11 in ctrl0 (0xF6 on a Velux remote's
+    // Execute). An actuator ignores an otherwise valid command sent as order
+    // 00: MAC and CRC still check out, so nothing reports an error.
+    frame::set_order(&tx_frame, FrameOrder::GROUP_END);
     frame::set_rolling_code(&tx_frame, consume_rolling_code());
 
     if (!frame::finalize_frame(&tx_frame, system_key_)) {

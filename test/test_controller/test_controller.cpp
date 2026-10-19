@@ -142,6 +142,10 @@ void test_execute_frame_shape(void) {
   TEST_ASSERT_TRUE((tx[0] & iohome::CTRL0_ONE_WAY_MASK) != 0);
   TEST_ASSERT_EQUAL_UINT8(25 - 3, tx[0] & iohome::CTRL0_LENGTH_MASK);
 
+  // Order bits 11, as on every captured remote command (ctrl0 0xF6). An
+  // actuator ignores an order-00 command although its MAC and CRC check out.
+  TEST_ASSERT_EQUAL_HEX8(0xF6, tx[0]);
+
   TEST_ASSERT_EQUAL_HEX8(0x70, tx[2]);  // destination
   TEST_ASSERT_EQUAL_HEX8(0x1A, tx[5]);  // source
 
@@ -1076,6 +1080,21 @@ void test_rolling_code_increments(void) {
   TEST_ASSERT_EQUAL_UINT16(2, controller.get_rolling_code());
 }
 
+void test_rolling_code_goes_high_byte_first(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+  controller.set_rolling_code(0x0412);
+
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  const std::vector<uint8_t>& tx = radio.last_transmission;
+  TEST_ASSERT_EQUAL_UINT(25, tx.size());
+
+  // Real remotes keep the first sequence byte and step the second.
+  TEST_ASSERT_EQUAL_HEX8(0x04, tx[15]);
+  TEST_ASSERT_EQUAL_HEX8(0x12, tx[16]);
+}
+
 void test_rolling_code_writes_are_batched(void) {
   PhysicalLayer radio;
   CountingStore store;
@@ -1755,6 +1774,7 @@ int main(int, char**) {
   RUN_TEST(test_stray_challenge_response_does_not_break_the_session);
 
   RUN_TEST(test_rolling_code_increments);
+  RUN_TEST(test_rolling_code_goes_high_byte_first);
   RUN_TEST(test_rolling_code_writes_are_batched);
   RUN_TEST(test_rolling_code_resumes_past_reservation);
   RUN_TEST(test_rolling_code_noop_reboots_burn_nothing);

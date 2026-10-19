@@ -1,13 +1,17 @@
 # Hardware bring-up
 
 Everything this library claims about the io-homecontrol wire format is checked
-against captures in `docs/` and reproduced by 198 host-run tests. None of it has
-been checked against a physical actuator. That is the single largest open item
-in `PRODUCTION_READINESS.md` (**K1**), and it is the one thing a laptop cannot
-close.
+against captures in `docs/` and reproduced by 234 host-run tests. The core path
+has now also been checked against a **physical actuator** on a Heltec V4: it
+pairs, it obeys open/close/position/ventilation (the actuator actually moves),
+and its own frames decode byte-correct. What a laptop still cannot close is the
+FP1 tilt *direction* on a slatted product, and broader coverage across actuator
+models and the full 2W session - the remainder of **K1** in
+`PRODUCTION_READINESS.md`.
 
-This document is the order to do it in, what a pass looks like at each step, and
-which open questions a session with real hardware can actually settle.
+This document is the order to bring up a new board in, what a pass looks like at
+each step, and which open questions a session with real hardware can still
+settle.
 
 ---
 
@@ -20,12 +24,36 @@ which open questions a session with real hardware can actually settle.
   | Heltec WiFi LoRa 32 V2 / V2.1 | `heltec_wifi_lora_32_V2` | SX1276 |
   | Heltec WiFi LoRa 32 V1 | `heltec_wifi_lora_32` | SX1276 |
   | Heltec WiFi LoRa 32 V3 | `heltec_wifi_lora_32_V3` | SX1262 |
-  | Heltec WiFi LoRa 32 V4 | `heltec_wifi_lora_32_V4` | SX1262, **pins unconfirmed** |
+  | Heltec WiFi LoRa 32 V4 / V4.2 | `heltec_wifi_lora_32_V4` | SX1262, see note |
   | Heltec Wireless Stick / Lite | `heltec_wireless_stick[_lite]` | SX1276 |
   | TTGO LoRa32 v1 / v2 / v2.1.6 | `ttgo-lora32-v1` / `-v2` / `-v21` | SX1276 |
   | LilyGO T-Beam | `ttgo-t-beam` | SX1276 |
 
   V2.1 is a minor revision of the V2 and uses the same environment.
+
+  The V4's radio pins are the V3's - CS 8, RST 12, BUSY 13, DIO1 14, SCK 9,
+  MISO 11, MOSI 10 - confirmed against Meshtastic's `variants/esp32s3/heltec_v4`
+  board definition rather than guessed. Two things about it are *not* like the
+  V3, and neither is handled by this firmware environment:
+
+  - **The TCXO wants 1.8 V, not RadioLib's default 1.6 V.** RadioLib applies
+    the default from `beginFSK()`, so the oscillator does start - just below
+    its rated supply. Worse, `SX126x::config()` reacts to an oscillator start
+    error by silently falling back to a plain crystal, which the V4 does not
+    have. The result is a radio that initialises without complaint and sits on
+    the wrong frequency.
+  - **The V4.2 has a GC1109 PA/LNA in front of the antenna** that has to be
+    powered (VEXT on GPIO 36, active low; FEM LDO on GPIO 7; chip enable on
+    GPIO 2) and whose TX/RX select line (GPIO 46) must follow the radio's mode.
+    Left alone, the board transmits at a fraction of its rated power.
+
+  Both are configurable through the ESPHome component (`tcxo_voltage`,
+  `vext_pin`, `rf_frontend`); see `esphome/example.yaml`. The PlatformIO
+  firmware in `src/` does not expose them yet.
+
+  The **V4.3 is a different board**: it uses a KCT8103L front end on other pins
+  and lets the SX1262's own DIO2 do the TX/RX switching. Do not apply the V4.2
+  front-end pins to it.
 
 - An io-homecontrol actuator. A Velux window or blind, a Somfy motor - anything
   that talks the protocol.
@@ -194,19 +222,19 @@ they are what turns the open questions below from arguments into answers.
 
 ## 4. Open questions a capture can settle
 
-Each of these is currently marked unverified in the code. None needs pairing;
-all of them need is a capture of the right button being pressed.
+The tilt-direction and payload-length items below are still open and need only a
+capture of the right button being pressed. The other two, K2 and K9, are already
+**resolved** - they are kept here as a record of what closed them.
 
-### K2 - the Velux command IDs
+### K2 - the Velux command IDs (resolved)
 
-`src/velux/iohome_velux.h` declares `VELUX_CMD_*` at 0x58-0x5D, all marked
-`UNVERIFIED`. They appear in no document in this repository and sit in the range
-the standard uses for naming and info commands.
-
-**Experiment:** operate a Velux window through every function its remote offers
-- open, close, stop, ventilation position, rain-sensor query - and look at which
-command IDs appear. If nothing outside 0x00/0x01 shows up, these constants
-describe commands that do not exist and should be deleted.
+**Resolved and removed.** `src/velux/` once declared six `VELUX_CMD_*` constants
+at 0x58-0x5D marked `UNVERIFIED`; they were invented and are now deleted (a grep
+for `VELUX_CMD` finds nothing but the note explaining their removal). The
+functions they claimed each exist as something else - rain is Command Originator
+0x02, ventilation is Main Parameter 0xD803, and so on - not as private command
+IDs. See [`docs/VELUX-FORMAT.md`](VELUX-FORMAT.md) and the header comment in
+`src/velux/iohome_velux.h`.
 
 ### The direction of Functional Parameter 1 (tilt)
 
@@ -216,8 +244,9 @@ The ESPHome cover got this backwards until recently.
 
 **Experiment:** on a pleated blind (Velux FML) or any slatted product, tilt the
 slats fully open from the remote and capture the frame. Read the byte at offset
-5 of the payload. `0x00` confirms the assumption; `0xC8` means both
-implementations need inverting.
+4 of the Execute payload - Functional Parameter 1, the byte right after the
+originator, ACEI and the two-byte Main Parameter (`EXECUTE_OFFSET_FP1`). `0x00`
+confirms the assumption; `0xC8` means both implementations need inverting.
 
 ### The Execute payload length
 
@@ -227,16 +256,15 @@ minimum plus two more functional parameters. The parser handles both.
 **Experiment:** capture a range of commands and note which lengths appear.
 Anything other than 6 or 8 is new information.
 
-### K9 - the 2W pairing exchange
+### K9 - the 2W pairing exchange (resolved)
 
-`pair_device_2w()` sends the 0x32 key transfer without the 0x3c challenge
-request that `docs/linklayer.md` shows. The crypto underneath is verified
-against a captured exchange; the frame sequence is not implemented.
-
-**Experiment:** capture a real pairing between a controller and an actuator.
-The order and direction of 0x31/0x38, 0x3c, 0x32, 0x3d and 0x33 is what is
-missing, and it is not something to guess - a wrong guess here writes a key
-neither side can use.
+**Implemented and host-tested.** `pair_device_2w()` runs the full documented
+push - 0x31 ask-challenge out, the device's 0x3C in, the 0x32 key transfer, then
+the device's 0x33 ack - and `pull_device_key_2w()` runs the 0x38/0x32 pull; both
+have two-instance host tests (V62/V63). The controller adopts the key only once
+the 0x33 ack arrives. The only thing left is hardware confirmation against a real
+actuator, which K1 already covers; a captured real pairing would still be
+valuable for cross-checking the exact frame timing.
 
 ---
 

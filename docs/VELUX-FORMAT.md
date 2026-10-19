@@ -67,6 +67,27 @@ What this does *not* settle is the direction of Functional Parameter 1 on a
 tilting blind. The specification says FP1 is "orientation of the slats" and
 stops there. That one still needs a capture.
 
+### A second implementation sends the same values
+
+[`rspaargaren/iohomecontrol`](https://github.com/rspaargaren/iohomecontrol) drives
+real Velux hardware by emulating a remote, and its button map is a third
+independent source next to `docs/commands.md` and the KLF 200 specification. It
+agrees where it overlaps:
+
+| Button | Value it sends | Matches |
+| ------ | -------------- | ------- |
+| Vent | Main Parameter `0xD803` | `MP_SECURED_VENTILATION`, the §14.2.1 alias |
+| ForceOpen | Main Parameter `0x6400` | `MP_FORCE` |
+
+`0xD803` was already anchored to the specification; the emulated remote sending
+exactly that closes the loop from the transmit side. `0x6400` is different: the
+specification names no alias there, so it is recorded as **observed, not
+spec-derived**. On the relative scale it is the halfway point (`0xC800 / 2`), so
+on the wire a "force" preset is indistinguishable from a 50 % position - the
+distinction is in the remote's intent, not the frame. That is why the library
+exposes it as `force()` with `MP_FORCE`, kept separate from
+`set_position(50)`, and marks the constant observed.
+
 ---
 
 ## What it contradicted

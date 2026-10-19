@@ -1,7 +1,8 @@
-# CodeQL for PlatformIO
-# If the analyze step fails, modify the language matrix and set the build mode to "manual". Then modify the if step to build the code.
-#
-# NOTE The commented block configures Python and PlatformIO. Those tests are set to manual and need review.
+# CodeQL for the C/C++ library.
+# The sources are compiled by the unconditional "Build for analysis" step below
+# (build-mode is already "manual", as compiled languages require). If the analyze
+# step fails, adjust that step's g++ invocation or the language matrix - there is
+# no if-gated step or commented Python/PlatformIO block to edit.
 #
 name: "GH CodeQL"
 

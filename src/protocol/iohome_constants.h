@@ -366,8 +366,22 @@ constexpr uint16_t MP_SIGNED_PERCENT_MAX = 0xD0D0;
  * own - `VELUX_CMD_SET_VENTILATION = 0x59` was invented and never existed.
  * Values in the 0xD8xx alias range are actuator-profile specific: 0xD803 means
  * secured ventilation only to a window opener.
+ *
+ * Confirmed against a working implementation: rspaargaren/iohomecontrol sends
+ * exactly 0xD803 for its "Vent" button.
  */
 constexpr uint16_t MP_SECURED_VENTILATION = 0xD803;
+
+/**
+ * @brief The "force" position a Velux remote's dedicated button sends
+ *
+ * Value observed on air from a real Velux remote (rspaargaren/iohomecontrol
+ * "ForceOpen" button): Main Parameter 0x6400. In the relative scale (0x0000
+ * open .. 0xC800 closed) that is the halfway point, but the button is a fixed
+ * preset rather than a percentage - hence its own name. Marked observed rather
+ * than spec-derived: the KLF 200 specification does not name this alias.
+ */
+constexpr uint16_t MP_FORCE = 0x6400;
 
 /**
  * @brief Convert a percentage (0-100) into a Main Parameter value.

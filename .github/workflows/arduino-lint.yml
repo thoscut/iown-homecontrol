@@ -11,12 +11,11 @@
 # library is already in the Library Manager index. It is not, so that mode could
 # never have passed regardless of the code.
 #
-# `library-manager: false` runs the specification rules and skips the ones that
-# only matter for getting listed in the index. One of those is still failing:
-# three tracked .exe files - Windows tooling referenced by the reverse-
-# engineering notes - block addition to the index. Removing them is a decision
-# for the maintainer, and until it is made, running in `submit` mode would
-# report a failure nobody intends to act on. See PRODUCTION_READINESS.md, K10.
+# It now runs in `library-manager: submit` mode, which also applies the rules for
+# addition to the Library Manager index. The one thing that used to block that -
+# three tracked Windows .exe files - was removed (see PRODUCTION_READINESS.md,
+# V47), so `arduino-lint --library-manager submit --compliance strict` passes with
+# no errors or warnings.
 
 name: Arduino-Lint
 

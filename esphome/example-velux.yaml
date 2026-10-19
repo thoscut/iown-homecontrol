@@ -1,0 +1,139 @@
+# ESPHome configuration example for Velux roof windows and roller shutters
+#
+# A worked example for the two Velux products people most often want to drive:
+#   * a solar roof window (GGL/GGU Solar) - open, close, position, and the
+#     window's own "secured ventilation" airing position
+#   * an outside roller shutter (SML) - open, close, position
+#
+# It is the sibling of example.yaml, which shows the generic blind case. Read
+# docs/SECURITY-MODEL.md before pairing anything you care about, and see
+# src/velux/README.md for the full command / Main Parameter table.
+#
+# IMPORTANT: This is experimental. Use at your own risk.
+#
+# Board pins below are for the Heltec WiFi LoRa 32 V2 (SX1276). For a V3/V4.2
+# (SX1262) or other boards, copy the matching pin block from example.yaml.
+
+esphome:
+  name: iown-velux
+  friendly_name: "Velux Gateway"
+
+esp32:
+  board: heltec_wifi_lora_32_V2
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+# io-homecontrol hub
+iown_homecontrol:
+  id: iohc_hub
+  cs_pin: 18
+  rst_pin: 14
+  dio0_pin: 26
+  dio1_pin: 33
+  sck_pin: 5
+  mosi_pin: 27
+  miso_pin: 19
+
+  radio_type: SX1276
+  frequency: 868.95     # Channel 2 (1W, and the 2W default)
+
+  # This gateway's own 3-byte node address. Pick something that does not
+  # collide with a device you already own.
+  source_address: 0x1A380B
+
+  # Authentication. Actuators only obey authenticated frames once paired, so
+  # leave these commented out only for sniffing and first experiments.
+  # encryption_enabled: true
+  # system_key: !secret iohc_system_key
+
+  # Command metadata sent with every execute frame.
+  #
+  # ACEI bit 0 must be set or actuators discard the frame. The priority level
+  # (bits 7-5) decides which command wins when two arrive:
+  #   0x61 = User Level 2 ("Default") - what our own captured remote and the
+  #          KLF 200 gateway send. The safe default.
+  #   0x43 = User Level 1 ("High")    - one step up; the level the remote in
+  #          rspaargaren/iohomecontrol emulates, recorded from a real frame in
+  #          docs/commands.md. Use it if a High-priority sensor keeps
+  #          overriding your commands.
+  # Both are valid; see src/velux/README.md for the priority table.
+  acei: 0x61
+  originator: USER
+
+  position_feedback: false
+
+# Cover entities
+cover:
+  # A Velux solar roof window (GGL/GGU Solar). Open / close / set-position all
+  # work through the standard cover controls; the ventilation position is a
+  # separate button below because it is a preset, not a percentage.
+  - platform: iown_homecontrol
+    name: "Roof Window"
+    # Replace with the window's real 3-byte node address (0x00003F is broadcast).
+    target_address: 0x00003F
+    full_open_duration: 40s
+    full_close_duration: 40s
+    restore_mode: NO_RESTORE
+
+  # A Velux outside roller shutter (SML). No tilt - a shutter is open/closed.
+  - platform: iown_homecontrol
+    name: "Roller Shutter"
+    target_address: 0x00003F
+    full_open_duration: 25s
+    full_close_duration: 25s
+    restore_mode: NO_RESTORE
+
+# Preset buttons the cover UI cannot express.
+#
+# ESPHome expands id(iohc_hub) to the hub object, so a lambda can call its
+# helpers directly. ventilate() sends Main Parameter 0xD803 (secured
+# ventilation, the window opener "airing" position); force() sends the observed
+# 0x6400 preset. Both take the actuator's node address.
+button:
+  - platform: template
+    name: "Roof Window Ventilation"
+    icon: "mdi:window-open-variant"
+    on_press:
+      - lambda: 'id(iohc_hub).ventilate(0x00003F);'
+
+  - platform: template
+    name: "Roof Window Force"
+    icon: "mdi:window-open"
+    entity_category: config
+    on_press:
+      - lambda: 'id(iohc_hub).force(0x00003F);'
+
+# Diagnostics
+sensor:
+  - platform: iown_homecontrol
+    iown_homecontrol_id: iohc_hub
+    update_interval: 60s
+    rssi:
+      name: "io-homecontrol RSSI"
+    frames_received:
+      name: "io-homecontrol Frames Received"
+    crc_errors:
+      name: "io-homecontrol CRC Errors"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "IOWN-Velux"
+    password: !secret ap_password
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password

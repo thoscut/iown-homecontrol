@@ -27,7 +27,7 @@ AuthTrailer	KEYWORD1
 FrameOrder	KEYWORD1
 Originator	KEYWORD1
 PriorityLevel	KEYWORD1
-DeviceType	KEYWORD1
+NodeType	KEYWORD1
 WindowPosition	KEYWORD1
 VeluxModel	KEYWORD1
 RainSensorStatus	KEYWORD1

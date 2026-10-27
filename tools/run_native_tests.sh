@@ -61,6 +61,7 @@ PROTOCOL_SOURCES=(
   "${REPO_ROOT}/src/protocol/iohome_crypto.cpp"
   "${REPO_ROOT}/src/protocol/iohome_aes_soft.cpp"
   "${REPO_ROOT}/src/protocol/iohome_frame.cpp"
+  "${REPO_ROOT}/src/protocol/iohome_phy_framing.cpp"
   "${REPO_ROOT}/src/protocol/iohome_2w.cpp"
   "${REPO_ROOT}/src/protocol/iohome_rolling_code_store.cpp"
   "${REPO_ROOT}/src/protocol/iohome_replay_guard.cpp"

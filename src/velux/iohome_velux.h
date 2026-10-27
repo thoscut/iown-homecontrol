@@ -266,6 +266,23 @@ public:
   );
 
   /**
+   * @brief Create a frame for the "force" preset a Velux remote's button sends
+   *
+   * Main Parameter 0x6400 (MP_FORCE), the value observed from a real remote's
+   * dedicated button rather than derived from the specification. On the wire it
+   * is identical to a 50 % position; it is kept separate because the button is a
+   * fixed preset, not a percentage. See MP_FORCE and docs/VELUX-FORMAT.md.
+   *
+   * @param frame Output IoFrame (not finalized - see class note)
+   * @param src_node Source node ID (3 bytes)
+   * @return true on success
+   */
+  bool create_force_frame(
+    frame::IoFrame* frame,
+    const uint8_t src_node[NODE_ID_SIZE]
+  );
+
+  /**
    * @brief Whether a received frame is a rain-triggered command
    *
    * There is no rain-sensor query and no rain-sensor answer. What a controller
@@ -397,6 +414,22 @@ public:
     frame::IoFrame* frame,
     const uint8_t src_node[NODE_ID_SIZE],
     uint8_t percent_open
+  );
+
+  /**
+   * @brief Create a stop frame
+   *
+   * A roller shutter or blind is a cover that travels, so it needs a stop just
+   * as a window does. Main Parameter 0xD200 (Current) - "hold at the current
+   * position". VeluxWindow has had this; VeluxBlind was missing it.
+   *
+   * @param frame Output IoFrame (not finalized - see class note)
+   * @param src_node Source node ID (3 bytes)
+   * @return true on success
+   */
+  bool create_stop_frame(
+    frame::IoFrame* frame,
+    const uint8_t src_node[NODE_ID_SIZE]
   );
 
   const uint8_t* get_node_id() const { return node_id_; }

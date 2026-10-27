@@ -23,8 +23,22 @@
 #   Heltec WiFi LoRa 32 V3 (SX1262):
 #     cs_pin: 8, rst_pin: 12, dio1_pin: 14, busy_pin: 13
 #     sck_pin: 9, mosi_pin: 10, miso_pin: 11
+#     tcxo_voltage: 1.8
 #     (this used to read `dio0_pin: 14, dio1_pin: 13` - a swap that compensated
 #      for the pins being handed to RadioLib in the SX127x order)
+#
+#   Heltec WiFi LoRa 32 V4.2 (SX1262, same radio pins as the V3):
+#     cs_pin: 8, rst_pin: 12, dio1_pin: 14, busy_pin: 13
+#     sck_pin: 9, mosi_pin: 10, miso_pin: 11
+#     tcxo_voltage: 1.8
+#     vext_pin: 36          # active low; also feeds the antenna boost
+#     rf_frontend: {power_pin: 7, enable_pin: 2, tx_pin: 46}   # GC1109
+#
+#     The V4.2 puts a GC1109 PA/LNA between the SX1262 and the antenna. Without
+#     `rf_frontend` that front end is never powered and the board transmits at a
+#     fraction of its rated output. Do not confuse it with the V4.3, which uses
+#     a KCT8103L on different pins and lets the radio's own DIO2 handle the
+#     TX/RX switching - the two are not interchangeable. Check the silkscreen.
 #
 #   TTGO LoRa32 V2.1 (SX1276):
 #     cs_pin: 18, rst_pin: 23, dio0_pin: 26, dio1_pin: 33

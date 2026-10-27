@@ -309,8 +309,8 @@ void test_rolling_code_is_lsb_first(void) {
 
     iohome::frame::set_rolling_code(&frame, 0x1234);
 
-    TEST_ASSERT_EQUAL_UINT8(0x34, frame.rolling_code[0]);  // LSB
-    TEST_ASSERT_EQUAL_UINT8(0x12, frame.rolling_code[1]);  // MSB
+    TEST_ASSERT_EQUAL_UINT8(0x12, frame.rolling_code[0]);  // MSB first on the wire
+    TEST_ASSERT_EQUAL_UINT8(0x34, frame.rolling_code[1]);  // LSB
     TEST_ASSERT_EQUAL_UINT16(0x1234, iohome::frame::get_rolling_code(&frame));
 }
 
@@ -807,8 +807,8 @@ void test_ksy_capture_frame(void) {
     // ACEI "IsValid" is set, as it must be for an actuator to act on the frame.
     TEST_ASSERT_TRUE(iohome::is_acei_valid(parsed.data[1]));
 
-    // Rolling code is stored LSB first, so 3b d5 on air reads back as 0xd53b.
-    TEST_ASSERT_EQUAL_UINT16(0xd53b, iohome::frame::get_rolling_code(&parsed));
+    // Rolling code goes MSB first, so 3b d5 on air reads back as 0x3bd5.
+    TEST_ASSERT_EQUAL_UINT16(0x3bd5, iohome::frame::get_rolling_code(&parsed));
 
     const uint8_t expected_mac[] = {0x05, 0x52, 0x68, 0x75, 0x49, 0x9c};
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_mac, parsed.hmac, sizeof(expected_mac));

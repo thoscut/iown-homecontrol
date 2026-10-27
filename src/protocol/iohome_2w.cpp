@@ -41,12 +41,14 @@ bool ChannelHopper::update_us(unsigned long current_time_us) {
     return false;
   }
 
-  // Unsigned subtraction stays correct across the counter wrap.
-  const unsigned long elapsed_us = current_time_us - last_hop_time_us_;
+  // Do the arithmetic in 32 bits so the unsigned subtraction wraps at 2^32 -
+  // the width of Arduino micros() - on every platform, including a 64-bit host.
+  const uint32_t now = static_cast<uint32_t>(current_time_us);
+  const uint32_t elapsed_us = now - last_hop_time_us_;
 
   if (elapsed_us >= hop_interval_us_) {
     next_channel();
-    last_hop_time_us_ = current_time_us;
+    last_hop_time_us_ = now;
     return true;
   }
 
@@ -77,11 +79,12 @@ float ChannelHopper::get_current_frequency() const {
 
 void ChannelHopper::reset(unsigned long current_time_us) {
   current_channel_ = ChannelState::CHANNEL_2;
-  last_hop_time_us_ = current_time_us;
+  last_hop_time_us_ = static_cast<uint32_t>(current_time_us);
 }
 
 unsigned long ChannelHopper::time_until_next_hop_us(unsigned long current_time_us) const {
-  const unsigned long elapsed_us = current_time_us - last_hop_time_us_;
+  // 32-bit math, as in update_us(): the counter wraps at 2^32 everywhere.
+  const uint32_t elapsed_us = static_cast<uint32_t>(current_time_us) - last_hop_time_us_;
 
   if (elapsed_us >= hop_interval_us_) {
     return 0;
@@ -121,6 +124,11 @@ AuthenticationManager::AuthenticationManager()
   memset(current_challenge_, 0, HMAC_SIZE);
   memset(peer_node_, 0, NODE_ID_SIZE);
   memset(own_node_, 0, NODE_ID_SIZE);
+}
+
+AuthenticationManager::~AuthenticationManager() {
+  crypto::secure_zero(system_key_, AES_KEY_SIZE);
+  crypto::secure_zero(current_challenge_, HMAC_SIZE);
 }
 
 bool AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
@@ -256,9 +264,42 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
   return true;
 }
 
+bool AuthenticationManager::recover_2w_key(const frame::IoFrame* key_frame,
+                                           const uint8_t* request_frame_data,
+                                           size_t request_data_len,
+                                           uint8_t key_out[AES_KEY_SIZE]) const {
+  if (key_frame == nullptr || key_out == nullptr) {
+    return false;
+  }
+  if (key_frame->command_id != CMD_KEY_TRANSFER || key_frame->data_len < AES_KEY_SIZE) {
+    return false;
+  }
+  // Never unmask against a challenge we never generated. current_challenge_ is
+  // all zeros until this node sends a 0x3C; unmasking with it would turn a
+  // fully attacker-known mask into an attacker-chosen key. An all-zero nonce is
+  // not a value the CSPRNG produces in practice, so rejecting it costs nothing.
+  bool challenge_set = false;
+  for (size_t i = 0; i < HMAC_SIZE; i++) {
+    challenge_set |= (current_challenge_[i] != 0);
+  }
+  if (!challenge_set) {
+    return false;
+  }
+  // Uses current_challenge_ - the nonce this node put in the 0x3C it sent - plus
+  // the request frame and the public transfer key. No system key involved.
+  return crypto::decrypt_2w_key(key_frame->data, request_frame_data, request_data_len,
+                                current_challenge_, key_out);
+}
+
 bool AuthenticationManager::has_active_challenge(unsigned long now_ms) {
   const ChallengeState state = get_state(now_ms);
   return state == ChallengeState::CHALLENGE_SENT || state == ChallengeState::AUTHENTICATED;
+}
+
+bool AuthenticationManager::is_authenticated_with(const uint8_t peer[NODE_ID_SIZE],
+                                                  unsigned long now_ms) {
+  return is_authenticated(now_ms) && peer_known_ &&
+         memcmp(peer_node_, peer, NODE_ID_SIZE) == 0;
 }
 
 ChallengeState AuthenticationManager::get_state(unsigned long now_ms) {
@@ -539,8 +580,16 @@ bool DiscoveryManager::create_key_transfer_1w(
 
   // Payload per docs/commands.md "30: Send 1W Key":
   //   encrypted key (16) | manufacturer (1) | reserved (1) | sequence (2)
+  //
+  // The key is masked with the *sender's* own address - the node that owns the
+  // key being transferred - not the destination. docs/linklayer.md: "an initial
+  // value that consists in its address repeated". The receiver unmasks with the
+  // frame's source, so masking with the destination hands it noise. This
+  // reproduces the documented vector (node ABCDEF -> 7E60491F...01) and matches
+  // both real captures and rspaargaren/iohomecontrol; the earlier dest_node was
+  // self-consistent in the round-trip test but would never interoperate.
   uint8_t params[AES_KEY_SIZE + 4];
-  if (!crypto::encrypt_1w_key(system_key, dest_node, params)) {
+  if (!crypto::encrypt_1w_key(system_key, src_node, params)) {
     return false;
   }
 

@@ -83,16 +83,31 @@ void test_channel_hopper_cycles(void) {
 
 void test_channel_hopper_survives_counter_wrap(void) {
     mode2w::ChannelHopper hopper;
-    hopper.begin(1.0f);
+    hopper.begin(1.0f);  // 1000 us hop interval
     hopper.set_enabled(true);
 
     // Start just before the 32-bit microsecond counter wraps (~71.6 minutes).
-    const unsigned long near_max = 0xFFFFFF00UL;
+    // The post-wrap timestamps are passed as genuinely-reduced uint32_t values,
+    // so `now` is numerically *smaller* than last_hop and the wrap-safe
+    // subtraction is actually exercised. The old form used near_max + offset,
+    // which on a 64-bit host never wraps at 2^32 - so its "wrap" was fiction and
+    // a regression in the subtraction would not have been caught. The hopper now
+    // does its timestamp math in uint32_t, so this crosses the real 2^32 boundary
+    // on host and target alike.
+    const uint32_t near_max = 0xFFFFFF00u;
     hopper.reset(near_max);
 
-    TEST_ASSERT_FALSE(hopper.update_us(near_max + 500));
-    TEST_ASSERT_TRUE(hopper.update_us(near_max + 1000));  // wraps to 0x000000FC
+    // now = (near_max + 0x134) mod 2^32 = 0x34; elapsed = 0x34 - 0xFFFFFF00 = 308 us (< 1000): no hop.
+    TEST_ASSERT_FALSE(hopper.update_us(static_cast<uint32_t>(near_max + 0x134)));
+    // now = 0x300; elapsed since the reset point = 0x400 = 1024 us (>= 1000): one hop.
+    TEST_ASSERT_TRUE(hopper.update_us(static_cast<uint32_t>(near_max + 0x400)));
     TEST_ASSERT_EQUAL(mode2w::ChannelState::CHANNEL_3, hopper.get_current_channel());
+
+    // time_until_next_hop_us() uses the same wrap-safe math: reset at 0xFFFFFFC0,
+    // query 400 us later (which wraps past 2^32), and 600 of the 1000 us remain.
+    hopper.reset(0xFFFFFFC0u);
+    TEST_ASSERT_EQUAL_UINT32(600, hopper.time_until_next_hop_us(
+        static_cast<uint32_t>(0xFFFFFFC0u + 400)));
 }
 
 void test_channel_hopper_time_until_next_hop(void) {
@@ -279,10 +294,16 @@ void test_key_transfer_frames_are_valid(void) {
     TEST_ASSERT_EQUAL_UINT8(20, frame.data_len);
     TEST_ASSERT_TRUE(iohome::frame::validate_frame(&frame));
 
-    // The transported key must round-trip through the documented masking.
+    // The key is masked with the *source* (the key owner), so the receiver
+    // unmasks with the frame's source address - not the destination.
     uint8_t recovered[16];
-    TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(frame.data, dest, recovered));
+    TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(frame.data, node, recovered));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(key, recovered, 16);
+    // Masking with the destination is the bug this pins: it would not round-trip
+    // for a real receiver, which only knows the source.
+    uint8_t wrong_addr[16];
+    TEST_ASSERT_TRUE(iohome::crypto::decrypt_1w_key(frame.data, dest, wrong_addr));
+    TEST_ASSERT_FALSE(memcmp(key, wrong_addr, 16) == 0);
 
     // The key mask depends on the frame that requested the transfer, so the
     // same frame has to be handed to both directions.
@@ -473,6 +494,42 @@ void test_auth_handshake_succeeds(void) {
 
     TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
     TEST_ASSERT_TRUE(initiator.is_authenticated(100));
+}
+
+void test_auth_is_authenticated_with_binds_to_the_peer(void) {
+    // A session is bound to the node it was negotiated with; is_authenticated_with
+    // must say yes only for that peer. The ESPHome component relies on this to
+    // avoid signing a command to actuator B with actuator A's session nonce.
+    const uint8_t key[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                             0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+    const uint8_t controller[3] = {0x01, 0x02, 0x03};
+    const uint8_t actuator_a[3] = {0x0A, 0x0B, 0x0C};
+    const uint8_t actuator_b[3] = {0x0D, 0x0E, 0x0F};
+
+    mode2w::AuthenticationManager initiator;
+    mode2w::AuthenticationManager responder;
+    initiator.begin(key);
+    responder.begin(key);
+
+    // Before any handshake: authenticated with nobody.
+    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_a, 0));
+
+    iohome::frame::IoFrame request;
+    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator_a, controller, 0));
+    iohome::frame::IoFrame response;
+    TEST_ASSERT_TRUE(
+        responder.create_challenge_response(&response, controller, actuator_a, request.data));
+    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
+
+    // Authenticated with A, but NOT with B - even though a plain is_authenticated()
+    // would be true for both.
+    TEST_ASSERT_TRUE(initiator.is_authenticated(100));
+    TEST_ASSERT_TRUE(initiator.is_authenticated_with(actuator_a, 100));
+    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_b, 100));
+
+    // After reset, authenticated with nobody again.
+    initiator.reset();
+    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_a, 100));
 }
 
 void test_auth_rejects_replayed_response(void) {
@@ -775,6 +832,7 @@ int main(int, char **) {
     RUN_TEST(test_auth_manager_generates_unpredictable_challenges);
     RUN_TEST(test_auth_manager_reset);
     RUN_TEST(test_auth_handshake_succeeds);
+    RUN_TEST(test_auth_is_authenticated_with_binds_to_the_peer);
     RUN_TEST(test_auth_rejects_replayed_response);
     RUN_TEST(test_challenge_stays_usable_after_handshake);
     RUN_TEST(test_failed_handshake_clears_challenge);

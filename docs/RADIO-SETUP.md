@@ -52,10 +52,27 @@ An io-homecontrol frame carries its own length in Control Byte 0 and its own
 CRC-16/KERMIT in the last two bytes. RadioLib's FSK defaults would prepend a
 length byte and append a second CRC, corrupting every frame in both directions.
 
-Because frames vary between 11 and 34 bytes, fixed-length mode has to be
-narrowed to the exact length before each transmission and widened again for
-reception. `IoHomeControl` does that through a hook so it does not need to know
-which chip you have.
+### UART framing
+
+On air, io-homecontrol does not send a frame's bytes directly. Each byte is
+wrapped the way a UART wraps a character - a start bit (`0`), the eight data
+bits **least-significant first**, a stop bit (`1`) - so every logical byte is
+ten bits on the wire and a 34-byte frame occupies up to 43 bytes. A plain FSK
+radio has no hardware for this, so `IoHomeControl` does it in software: it frames
+on transmit and de-frames on receive. You do not call the codec yourself, but it
+is why the fixed length below is set wider than 34, and why a receiver that skips
+this step sees a garbage length and a failing CRC (see
+[`iohome_phy_framing.h`](../src/protocol/iohome_phy_framing.h) and
+`docs/devices/velux/velux-frame-analysis.md`).
+
+### Fixed packet length
+
+Because framed frames vary in length, fixed-length mode has to be narrowed to
+the exact wire length before each transmission and widened again for reception.
+`IoHomeControl` does that through a hook so it does not need to know which chip
+you have. Initialise the radio's fixed length to a full framed frame -
+`iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE)` is 43; a little more leaves
+room for the trailing preamble - and the hook takes over from there.
 
 ### SX1276 / SX1278 (SX127x family)
 
@@ -64,7 +81,7 @@ SX1276 radio = new Module(CS, DIO0, RST, DIO1);
 
 radio.beginFSK();
 radio.setCRC(false);
-radio.fixedPacketLengthMode(iohome::FRAME_MAX_SIZE);
+radio.fixedPacketLengthMode(iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE) + 8);
 
 controller.set_packet_length_callback(
     [](uint8_t len, void *ctx) -> int16_t {
@@ -83,7 +100,7 @@ SX1262 radio = new Module(CS, DIO1, RST, BUSY);
 
 radio.beginFSK();
 radio.setCRC(0);
-radio.fixedPacketLengthMode(iohome::FRAME_MAX_SIZE);
+radio.fixedPacketLengthMode(iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE) + 8);
 
 controller.set_packet_length_callback(
     [](uint8_t len, void *ctx) -> int16_t {
@@ -95,7 +112,7 @@ controller.set_packet_length_callback(
 ### What happens without the hook
 
 Fixed-length mode transmits exactly the programmed number of bytes. Leaving it
-at `FRAME_MAX_SIZE` pads every frame out to 34 bytes with whatever follows the
+at the capture size pads every frame out to that many bytes with whatever follows the
 buffer, and reading past the frame is exactly the kind of thing a receiver
 should not have to tolerate. Receivers do use the length field in Control Byte
 0, so the padding is ignored in practice - but the airtime is wasted and the

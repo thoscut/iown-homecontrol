@@ -183,6 +183,20 @@ void test_secured_ventilation_frame(void) {
   TEST_ASSERT_FALSE(window.create_secured_ventilation_frame(&frame, nullptr));
 }
 
+void test_force_frame(void) {
+  // The observed "force" preset: Main Parameter 0x6400 on the ordinary Execute.
+  velux::VeluxWindow window(WINDOW_NODE, velux::VeluxModel::GGL_SOLAR);
+
+  iohome::frame::IoFrame frame;
+  TEST_ASSERT_TRUE(window.create_force_frame(&frame, SRC_NODE));
+
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, frame.command_id);
+  TEST_ASSERT_EQUAL_HEX16(iohome::MP_FORCE, main_param_of(frame));
+
+  TEST_ASSERT_FALSE(window.create_force_frame(nullptr, SRC_NODE));
+  TEST_ASSERT_FALSE(window.create_force_frame(&frame, nullptr));
+}
+
 // ---------------------------------------------------------------------------
 // VeluxBlind
 // ---------------------------------------------------------------------------
@@ -203,6 +217,20 @@ void test_blind_position_clamps(void) {
   iohome::frame::IoFrame frame;
   TEST_ASSERT_TRUE(blind.create_position_frame(&frame, SRC_NODE, 200));
   TEST_ASSERT_EQUAL_HEX16(iohome::MP_OPEN, main_param_of(frame));
+}
+
+void test_blind_stop_frame(void) {
+  // A roller shutter (SML) travels, so it needs a stop just like a window:
+  // Main Parameter 0xD200 (Current) on the ordinary Execute.
+  velux::VeluxBlind roller(WINDOW_NODE, velux::VeluxModel::SML);
+
+  iohome::frame::IoFrame frame;
+  TEST_ASSERT_TRUE(roller.create_stop_frame(&frame, SRC_NODE));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, frame.command_id);
+  TEST_ASSERT_EQUAL_HEX16(iohome::MP_STOP, main_param_of(frame));
+
+  TEST_ASSERT_FALSE(roller.create_stop_frame(nullptr, SRC_NODE));
+  TEST_ASSERT_FALSE(roller.create_stop_frame(&frame, nullptr));
 }
 
 void test_tilt_only_for_models_that_have_it(void) {
@@ -338,9 +366,11 @@ int main(int, char**) {
   RUN_TEST(test_window_helpers_reject_nullptr);
   RUN_TEST(test_rain_sensor_parsing);
   RUN_TEST(test_secured_ventilation_frame);
+  RUN_TEST(test_force_frame);
 
   RUN_TEST(test_blind_position_frame);
   RUN_TEST(test_blind_position_clamps);
+  RUN_TEST(test_blind_stop_frame);
   RUN_TEST(test_tilt_only_for_models_that_have_it);
   RUN_TEST(test_recommended_positions);
 

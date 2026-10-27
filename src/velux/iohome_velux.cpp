@@ -160,6 +160,18 @@ bool VeluxWindow::create_secured_ventilation_frame(
   return frame::set_execute_command(frame, MP_SECURED_VENTILATION);
 }
 
+bool VeluxWindow::create_force_frame(
+  frame::IoFrame* frame,
+  const uint8_t src_node[NODE_ID_SIZE]
+) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
+  begin_control_frame(frame, node_id_, src_node);
+  return frame::set_execute_command(frame, MP_FORCE);
+}
+
 RainSensorStatus VeluxWindow::parse_rain_sensor_status(const frame::IoFrame* frame) {
   if (frame == nullptr) {
     return RainSensorStatus::UNKNOWN;
@@ -283,6 +295,18 @@ bool VeluxBlind::create_tilt_frame(
   const uint8_t percent_closed = static_cast<uint8_t>(100u - percent_open);
   const uint8_t fp1 = static_cast<uint8_t>((static_cast<uint16_t>(percent_closed) * 200u) / 100u);
   return frame::set_execute_command(frame, MP_STOP, Originator::USER, ACEI_DEFAULT, fp1);
+}
+
+bool VeluxBlind::create_stop_frame(
+  frame::IoFrame* frame,
+  const uint8_t src_node[NODE_ID_SIZE]
+) {
+  if (frame == nullptr || src_node == nullptr) {
+    return false;
+  }
+
+  begin_control_frame(frame, node_id_, src_node);
+  return frame::set_execute_command(frame, MP_STOP);
 }
 
 // ============================================================================

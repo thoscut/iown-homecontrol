@@ -139,9 +139,11 @@ jobs:
         echo "environments: ${envs}"
         args=""
         for env in ${envs}; do
-          # `native` has no board and `debug` is the default board again.
+          # The board-less native envs (`native`, `native_nosan`, ...) have no
+          # board and are built via `pio test` / run_native_tests.sh, not here;
+          # `debug` is the default board again. `pio run` on any of them fails.
           case "${env}" in
-            native|debug) continue ;;
+            native*|debug) continue ;;
           esac
           args="${args} -e ${env}"
         done

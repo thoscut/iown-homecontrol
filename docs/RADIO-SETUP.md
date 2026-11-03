@@ -62,7 +62,7 @@ radio has no hardware for this, so `IoHomeControl` does it in software: it frame
 on transmit and de-frames on receive. You do not call the codec yourself, but it
 is why the fixed length below is set wider than 34, and why a receiver that skips
 this step sees a garbage length and a failing CRC (see
-[`iohome_phy_framing.h`](../src/protocol/iohome_phy_framing.h) and
+[`iohome_phy_framing.h`](https://github.com/thoscut/iown-homecontrol/blob/main/src/protocol/iohome_phy_framing.h) and
 `docs/devices/velux/velux-frame-analysis.md`).
 
 ### Fixed packet length
@@ -74,6 +74,11 @@ you have. Initialise the radio's fixed length to a full framed frame -
 `iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE)` is 43; a little more leaves
 room for the trailing preamble - and the hook takes over from there.
 
+`controller.use_radio_packet_length(radio)` installs that hook for any RadioLib
+class with `fixedPacketLengthMode(uint8_t)`. It expands to a
+`set_packet_length_callback` whose capture-less lambda casts the context pointer
+back to your radio type and calls `fixedPacketLengthMode(len)`.
+
 ### SX1276 / SX1278 (SX127x family)
 
 ```cpp
@@ -83,11 +88,7 @@ radio.beginFSK();
 radio.setCRC(false);
 radio.fixedPacketLengthMode(iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE) + 8);
 
-controller.set_packet_length_callback(
-    [](uint8_t len, void *ctx) -> int16_t {
-      return static_cast<SX1276 *>(ctx)->fixedPacketLengthMode(len);
-    },
-    &radio);
+controller.use_radio_packet_length(radio);
 ```
 
 ### SX1262 / SX1268 (SX126x family)
@@ -102,11 +103,7 @@ radio.beginFSK();
 radio.setCRC(0);
 radio.fixedPacketLengthMode(iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE) + 8);
 
-controller.set_packet_length_callback(
-    [](uint8_t len, void *ctx) -> int16_t {
-      return static_cast<SX1262 *>(ctx)->fixedPacketLengthMode(len);
-    },
-    &radio);
+controller.use_radio_packet_length(radio);
 ```
 
 ### What happens without the hook

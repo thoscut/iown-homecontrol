@@ -41,6 +41,7 @@ class IOWNCover : public cover::Cover, public Component {
 
   void set_hub(IOWNHomeControlComponent *hub) { this->hub_ = hub; }
   void set_target_address(uint32_t addr) { this->target_address_ = addr; }
+  uint32_t get_target_address() const { return this->target_address_; }
   void set_open_duration(uint32_t ms) { this->open_duration_ms_ = ms; }
   void set_close_duration(uint32_t ms) { this->close_duration_ms_ = ms; }
   void set_supports_tilt(bool supports) { this->supports_tilt_ = supports; }

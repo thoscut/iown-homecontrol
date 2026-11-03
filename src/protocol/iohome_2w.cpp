@@ -112,23 +112,53 @@ void ChannelHopper::next_channel() {
 // Challenge-Response Authentication Implementation
 // ============================================================================
 
+namespace {
+
+/// Command id + parameters, the input the 2W MAC is computed over.
+size_t request_bytes(const frame::IoFrame* frame, uint8_t out[AuthenticationManager::MAX_REQUEST_SIZE]) {
+  out[0] = frame->command_id;
+  size_t len = frame->data_len;
+  if (len > FRAME_MAX_DATA_SIZE) {
+    len = FRAME_MAX_DATA_SIZE;
+  }
+  if (len > 0) {
+    memcpy(&out[1], frame->data, len);
+  }
+  return 1 + len;
+}
+
+} // namespace
+
 AuthenticationManager::AuthenticationManager()
-  : peer_known_(false),
+  : key_set_(false),
+    peer_known_(false),
     state_(ChallengeState::IDLE),
     state_timestamp_ms_(0),
     challenge_timeout_ms_(DEFAULT_CHALLENGE_TIMEOUT_MS),
     session_timeout_ms_(DEFAULT_SESSION_TIMEOUT_MS),
-    key_set_(false)
+    held_valid_(false),
+    verified_ready_(false),
+    pending_len_(0),
+    pending_ts_ms_(0),
+    pending_answers_(0),
+    pending_valid_(false),
+    response_window_ms_(DEFAULT_RESPONSE_WINDOW_MS)
 {
   memset(system_key_, 0, AES_KEY_SIZE);
   memset(current_challenge_, 0, HMAC_SIZE);
   memset(peer_node_, 0, NODE_ID_SIZE);
   memset(own_node_, 0, NODE_ID_SIZE);
+  memset(&held_request_, 0, sizeof(held_request_));
+  memset(pending_request_, 0, sizeof(pending_request_));
+  memset(pending_dest_, 0, NODE_ID_SIZE);
+  memset(pending_src_, 0, NODE_ID_SIZE);
 }
 
 AuthenticationManager::~AuthenticationManager() {
   crypto::secure_zero(system_key_, AES_KEY_SIZE);
   crypto::secure_zero(current_challenge_, HMAC_SIZE);
+  crypto::secure_zero(&held_request_, sizeof(held_request_));
+  crypto::secure_zero(pending_request_, sizeof(pending_request_));
 }
 
 bool AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
@@ -137,7 +167,8 @@ bool AuthenticationManager::begin(const uint8_t system_key[AES_KEY_SIZE]) {
   }
   memcpy(system_key_, system_key, AES_KEY_SIZE);
   key_set_ = true;
-  state_ = ChallengeState::IDLE;
+  reset();
+  clear_pending_request();
   return true;
 }
 
@@ -154,6 +185,8 @@ bool AuthenticationManager::generate_challenge(uint8_t challenge_out[HMAC_SIZE],
     return false;
   }
 
+  // A new challenge supersedes whatever the previous one was bound to.
+  reset();
   memcpy(current_challenge_, challenge_out, HMAC_SIZE);
   state_ = ChallengeState::CHALLENGE_SENT;
 
@@ -187,36 +220,37 @@ bool AuthenticationManager::create_challenge_request(
   memcpy(own_node_, src_node, NODE_ID_SIZE);
   peer_known_ = true;
 
-  if (!frame::set_command(frame, CMD_CHALLENGE_REQUEST, challenge, HMAC_SIZE)) {
-    crypto::secure_zero(challenge, sizeof(challenge));
-    return false;
-  }
-
-  const bool ok = frame::finalize_frame(frame, system_key_, challenge);
+  const bool ok = frame::set_command(frame, CMD_CHALLENGE_REQUEST, challenge, HMAC_SIZE) &&
+                  frame::finalize_frame_plain(frame);
   crypto::secure_zero(challenge, sizeof(challenge));
+  if (!ok) {
+    reset();
+  }
   return ok;
 }
 
-bool AuthenticationManager::create_challenge_response(
-  frame::IoFrame* frame,
-  const uint8_t dest_node[NODE_ID_SIZE],
-  const uint8_t src_node[NODE_ID_SIZE],
-  const uint8_t received_challenge[HMAC_SIZE]
-) {
-  if (frame == nullptr || dest_node == nullptr || src_node == nullptr ||
-      received_challenge == nullptr || !key_set_) {
+bool AuthenticationManager::create_challenge_for(frame::IoFrame* challenge_out,
+                                                 const frame::IoFrame* request,
+                                                 const uint8_t own_node[NODE_ID_SIZE],
+                                                 unsigned long now_ms) {
+  if (challenge_out == nullptr || request == nullptr || own_node == nullptr || !key_set_) {
     return false;
   }
 
-  frame::init_frame(frame, false);  // 2W mode
-  frame::set_destination(frame, dest_node);
-  frame::set_source(frame, src_node);
-
-  if (!frame::set_command(frame, CMD_CHALLENGE_RESPONSE, received_challenge, HMAC_SIZE)) {
+  // Do not let a fresh frame cancel a challenge still waiting for its answer:
+  // anyone can send plain frames, so replacing would make every handshake
+  // trivially disruptable.
+  if (get_state(now_ms) == ChallengeState::CHALLENGE_SENT) {
     return false;
   }
 
-  return frame::finalize_frame(frame, system_key_, received_challenge);
+  if (!create_challenge_request(challenge_out, request->src_node, own_node, now_ms)) {
+    return false;
+  }
+
+  memcpy(&held_request_, request, sizeof(held_request_));
+  held_valid_ = true;
+  return true;
 }
 
 bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* frame,
@@ -243,25 +277,147 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
   // Only an answer from the node we challenged, addressed to us, is ours to
   // judge. Anything else belongs to another conversation and must leave this
   // handshake alone - see the note on the declaration.
-  if (peer_known_ &&
-      (memcmp(frame->src_node, peer_node_, NODE_ID_SIZE) != 0 ||
-       memcmp(frame->dest_node, own_node_, NODE_ID_SIZE) != 0)) {
+  if (!peer_known_ ||
+      memcmp(frame->src_node, peer_node_, NODE_ID_SIZE) != 0 ||
+      memcmp(frame->dest_node, own_node_, NODE_ID_SIZE) != 0) {
     return false;
   }
 
-  if (!frame::validate_frame(frame, system_key_, current_challenge_)) {
-    // Consume the challenge on a failed attempt too: leaving it live would
-    // let an attacker grind responses against a single known nonce.
+  // From here on the frame is our peer's answer, and any failure burns the
+  // nonce: leaving it live would let an attacker grind guesses against it.
+  //
+  // The answer is the 6-byte payload, not a trailer. A frame that claims a
+  // trailer, a wrong-sized payload, a bad CRC, or no held command to check it
+  // against all fail closed - the old code accepted a 0x3D with no MAC at all,
+  // because validate_frame() called a plain frame "nothing to verify".
+  bool ok = !frame->authenticated && frame->data_len == HMAC_SIZE && held_valid_ &&
+            frame::validate_frame(frame);  // CRC only
+
+  if (ok) {
+    uint8_t request[MAX_REQUEST_SIZE];
+    const size_t request_len = request_bytes(&held_request_, request);
+    ok = crypto::verify_hmac(request, request_len, frame->data, current_challenge_,
+                             system_key_, /*is_2w=*/true);
+    crypto::secure_zero(request, sizeof(request));
+  }
+
+  if (!ok) {
     reset();
     return false;
   }
 
-  // Leaving CHALLENGE_SENT is what makes the challenge single-use: a replayed
-  // response is rejected by the state check above. The nonce itself stays, so
-  // commands sent during this session can still be bound to it.
+  // Consume the nonce: a replayed 0x3D finds no CHALLENGE_SENT state. Keep the
+  // peer so is_authenticated_with() can report who proved the key.
+  crypto::secure_zero(current_challenge_, HMAC_SIZE);
   state_ = ChallengeState::AUTHENTICATED;
   state_timestamp_ms_ = now_ms;
+  verified_ready_ = true;
   return true;
+}
+
+bool AuthenticationManager::take_verified_request(frame::IoFrame* out) {
+  if (out == nullptr || !verified_ready_ || !held_valid_) {
+    return false;
+  }
+  memcpy(out, &held_request_, sizeof(held_request_));
+  verified_ready_ = false;
+  held_valid_ = false;
+  crypto::secure_zero(&held_request_, sizeof(held_request_));
+  return true;
+}
+
+bool AuthenticationManager::note_request_sent(const frame::IoFrame* request,
+                                              unsigned long now_ms) {
+  if (request == nullptr) {
+    return false;
+  }
+  pending_len_ = request_bytes(request, pending_request_);
+  memcpy(pending_dest_, request->dest_node, NODE_ID_SIZE);
+  memcpy(pending_src_, request->src_node, NODE_ID_SIZE);
+  pending_ts_ms_ = now_ms;
+  pending_answers_ = 0;
+  pending_valid_ = true;
+  return true;
+}
+
+void AuthenticationManager::clear_pending_request() {
+  pending_valid_ = false;
+  pending_len_ = 0;
+  pending_answers_ = 0;
+  crypto::secure_zero(pending_request_, sizeof(pending_request_));
+  memset(pending_dest_, 0, NODE_ID_SIZE);
+  memset(pending_src_, 0, NODE_ID_SIZE);
+}
+
+bool AuthenticationManager::has_pending_request(unsigned long now_ms) const {
+  return pending_valid_ && (now_ms - pending_ts_ms_) <= response_window_ms_ &&
+         pending_answers_ < MAX_ANSWERS_PER_REQUEST;
+}
+
+bool AuthenticationManager::answer_challenge(const frame::IoFrame* challenge_frame,
+                                             frame::IoFrame* response_out,
+                                             unsigned long now_ms) {
+  if (challenge_frame == nullptr || response_out == nullptr || !key_set_) {
+    return false;
+  }
+
+  if (challenge_frame->command_id != CMD_CHALLENGE_REQUEST ||
+      challenge_frame->authenticated || challenge_frame->data_len != HMAC_SIZE) {
+    return false;
+  }
+
+  if (!pending_valid_) {
+    return false;  // We sent nothing: never sign a nonce for a request we did not make
+  }
+  if ((now_ms - pending_ts_ms_) > response_window_ms_) {
+    clear_pending_request();
+    return false;
+  }
+  if (pending_answers_ >= MAX_ANSWERS_PER_REQUEST) {
+    return false;
+  }
+
+  // The challenge must come from the node our request went to, addressed to us.
+  if (memcmp(challenge_frame->src_node, pending_dest_, NODE_ID_SIZE) != 0 ||
+      memcmp(challenge_frame->dest_node, pending_src_, NODE_ID_SIZE) != 0) {
+    return false;
+  }
+
+  if (!create_challenge_response(response_out, pending_dest_, pending_src_,
+                                 challenge_frame->data, pending_request_, pending_len_)) {
+    return false;
+  }
+  pending_answers_++;
+  return true;
+}
+
+bool AuthenticationManager::create_challenge_response(
+  frame::IoFrame* frame,
+  const uint8_t dest_node[NODE_ID_SIZE],
+  const uint8_t src_node[NODE_ID_SIZE],
+  const uint8_t challenge[HMAC_SIZE],
+  const uint8_t* request_data,
+  size_t request_len
+) {
+  if (frame == nullptr || dest_node == nullptr || src_node == nullptr ||
+      challenge == nullptr || request_data == nullptr || request_len == 0 ||
+      request_len > MAX_REQUEST_SIZE || !key_set_) {
+    return false;
+  }
+
+  uint8_t answer[HMAC_SIZE];
+  if (!crypto::create_2w_hmac(request_data, request_len, challenge, system_key_, answer)) {
+    return false;
+  }
+
+  frame::init_frame(frame, false);  // 2W mode
+  frame::set_destination(frame, dest_node);
+  frame::set_source(frame, src_node);
+
+  const bool ok = frame::set_command(frame, CMD_CHALLENGE_RESPONSE, answer, HMAC_SIZE) &&
+                  frame::finalize_frame_plain(frame);
+  crypto::secure_zero(answer, sizeof(answer));
+  return ok;
 }
 
 bool AuthenticationManager::recover_2w_key(const frame::IoFrame* key_frame,
@@ -292,13 +448,12 @@ bool AuthenticationManager::recover_2w_key(const frame::IoFrame* key_frame,
 }
 
 bool AuthenticationManager::has_active_challenge(unsigned long now_ms) {
-  const ChallengeState state = get_state(now_ms);
-  return state == ChallengeState::CHALLENGE_SENT || state == ChallengeState::AUTHENTICATED;
+  return get_state(now_ms) == ChallengeState::CHALLENGE_SENT;
 }
 
 bool AuthenticationManager::is_authenticated_with(const uint8_t peer[NODE_ID_SIZE],
                                                   unsigned long now_ms) {
-  return is_authenticated(now_ms) && peer_known_ &&
+  return peer != nullptr && is_authenticated(now_ms) && peer_known_ &&
          memcmp(peer_node_, peer, NODE_ID_SIZE) == 0;
 }
 
@@ -306,8 +461,6 @@ ChallengeState AuthenticationManager::get_state(unsigned long now_ms) {
   // Wrap-safe: unsigned subtraction stays correct past the millis() rollover.
   const unsigned long elapsed = now_ms - state_timestamp_ms_;
 
-  // A pending challenge and an established session expire on different clocks;
-  // both simply drop back to IDLE.
   const bool challenge_expired =
     state_ == ChallengeState::CHALLENGE_SENT && elapsed > challenge_timeout_ms_;
   const bool session_expired =
@@ -327,6 +480,9 @@ void AuthenticationManager::reset() {
   state_ = ChallengeState::IDLE;
   crypto::secure_zero(current_challenge_, HMAC_SIZE);
   state_timestamp_ms_ = 0;
+  held_valid_ = false;
+  verified_ready_ = false;
+  crypto::secure_zero(&held_request_, sizeof(held_request_));
 }
 
 // ============================================================================

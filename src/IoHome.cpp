@@ -45,10 +45,14 @@ int16_t IoHomeNode::setPhyProperties() {
     return RADIOLIB_ERR_CHIP_NOT_FOUND;
   }
 
-  // Start at the highest power and step down until the module accepts a value.
-  // The original loop had no lower bound and spun forever on a module that
-  // rejects every level.
-  int8_t pwr = 20;
+  // Start at 14 dBm and step down until the module accepts a value. 14 dBm is
+  // the EU ceiling here: the 868.25 and 868.95 MHz channels sit in ERC 70-03 /
+  // EN 300 220 sub-bands limited to 25 mW (14 dBm) ERP, so starting at the
+  // module's 20 dBm maximum exceeded it out of the box. (869.85 MHz is in the
+  // 869.7-870 MHz sub-band, limited to 5 mW; an antenna with gain or an
+  // external PA also needs a lower setting.) The original loop also had no
+  // lower bound and spun forever on a module that rejects every level.
+  int8_t pwr = 14;
   int16_t state = RADIOLIB_ERR_INVALID_OUTPUT_POWER;
   do {
     state = phyLayer->setOutputPower(pwr);

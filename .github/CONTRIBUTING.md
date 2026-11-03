@@ -58,7 +58,7 @@
   │   ├───IDAPro     - IDA Pro and Ghidra Firmware Helper
   │   ├───LuaJIT     - io-homecontrol daemon LuaJIT decompiler
   │   ├───renode     - Renode Emulation for the io-homecontrol firmware
-  │   ├───rtl_433    - Latest rtl_433 binary and configuration
+  │   ├───rtl_433    - rtl_433 configuration (binaries: upstream releases)
   │   └───SVD        - Custom built SVD (STM32F103) use with the ioHome firmware
   └───src            - Library Source Code
       └───protocols  - RadioLib Protocol Implementation

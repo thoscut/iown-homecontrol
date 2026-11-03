@@ -74,8 +74,14 @@ constexpr uint8_t FRAME_MIN_SIZE = FRAME_HEADER_SIZE + CRC_SIZE;  // 11
 constexpr uint8_t FRAME_SIZE_FIELD_MAX = 0x1F;
 constexpr uint8_t FRAME_MAX_SIZE = FRAME_SIZE_FIELD_MAX + FRAME_SIZE_FIELD_BIAS;  // 34
 
-// Maximum payload (command parameters) documented for io-homecontrol.
-constexpr uint8_t FRAME_MAX_DATA_SIZE = 21;
+// Maximum payload (command parameters): whatever a maximum-size plain frame
+// leaves after the header and the CRC, 34 - 9 - 2 = 23 bytes. This used to be
+// 21, which made parse_frame() reject a legal 34-byte plain frame and capped
+// set_command() below what the size field can describe. Buffers sized from it
+// (IoFrame::data, the 1 + FRAME_MAX_DATA_SIZE MAC input, BeaconInfo::data)
+// grow with it.
+constexpr uint8_t FRAME_MAX_DATA_SIZE = FRAME_MAX_SIZE - FRAME_HEADER_SIZE - CRC_SIZE;  // 23
+static_assert(FRAME_MAX_DATA_SIZE == 23, "34-byte frame minus 9-byte header minus CRC");
 
 // Overhead of the optional authentication trailer appended after the payload.
 constexpr uint8_t AUTH_TRAILER_SIZE_1W = ROLLING_CODE_SIZE + HMAC_SIZE;  // 8

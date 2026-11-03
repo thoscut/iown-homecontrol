@@ -49,7 +49,10 @@ jobs:
           restore-keys: ${{ runner.os }}-esphome-
 
       - name: Install ESPHome
-        run: pip install --upgrade esphome
+        # Pinned so an upstream release cannot turn CI red with no change here;
+        # raise it on purpose (and re-run this workflow) when the component
+        # is tested against a newer ESPHome.
+        run: pip install esphome==2026.10.2
 
       - name: Write placeholder secrets
         working-directory: esphome

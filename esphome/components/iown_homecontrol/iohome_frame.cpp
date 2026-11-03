@@ -63,6 +63,11 @@ bool is_unauthenticated_command(uint8_t command_id) {
     case CMD_ADDRESS_ANSWER:
     case CMD_LAUNCH_KEY_TRANSFER:
     case CMD_REMOVE_1W_CONTROLLER:
+    // The 2W authentication exchange itself. Both frames are plain on the wire
+    // (docs/linklayer.md captures: 0E00 F00F00 FEEFEE 3C 123456789ABC 19DB),
+    // the 0x3D proving the key through its payload, not a trailer.
+    case CMD_CHALLENGE_REQUEST:
+    case CMD_CHALLENGE_RESPONSE:
       return true;
     default:
       return false;
@@ -456,6 +461,20 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame, AuthT
       break;
     case AuthTrailer::AUTO:
     default: {
+      if (!frame->is_1w_mode) {
+        // 2W frames carry no MAC trailer; their authentication is the separate
+        // 0x3C/0x3D exchange. See the note on AuthTrailer::AUTO.
+        frame->authenticated = false;
+        break;
+      }
+
+      // Bootstrap commands and the challenge exchange never carry a trailer,
+      // whatever their length: a 14-byte 0x3C is not "6 + seq + MAC".
+      if (is_unauthenticated_command(frame->command_id)) {
+        frame->authenticated = false;
+        break;
+      }
+
       const int expected = expected_payload_size(frame->command_id);
 
       // Only consult the minimum for commands whose length actually varies.
@@ -543,9 +562,11 @@ bool validate_frame(const IoFrame* frame, const uint8_t* system_key, const uint8
   }
 
   if (!frame->authenticated) {
-    // Nothing to verify: a plain frame carries no MAC. Report success so
-    // callers can decide by policy whether plain frames are acceptable.
-    return true;
+    // The caller asked for MAC verification and there is no MAC. Reporting
+    // success here let verify_challenge_response() accept a 0x3D with no MAC
+    // at all. Callers that accept plain frames by policy check the CRC alone
+    // (system_key == nullptr) and look at frame->authenticated themselves.
+    return false;
   }
 
   const uint8_t* seq_or_challenge = frame->is_1w_mode ? frame->rolling_code : challenge;

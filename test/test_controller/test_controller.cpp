@@ -10,6 +10,8 @@
 
 #include "IoHomeControl.h"
 
+#include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <string>
 #include <utility>
@@ -117,8 +119,9 @@ void test_configure_radio_programs_correct_parameters(void) {
   // Preamble length is expressed in bits.
   TEST_ASSERT_EQUAL_UINT(512, radio.preamble_length);
 
-  // The power loop must settle on a value the module accepts, not spin.
-  TEST_ASSERT_EQUAL_INT(17, radio.output_power);
+  // 14 dBm: the EU 868 MHz sub-band limit (25 mW ERP), not the 20 dBm the
+  // power loop used to start from.
+  TEST_ASSERT_EQUAL_INT(14, radio.output_power);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,56 +301,112 @@ void test_send_command_rejects_nullptr(void) {
   TEST_ASSERT_FALSE(controller.send_command(nullptr, iohome::CMD_EXECUTE));
 }
 
-void test_2w_requires_handshake(void) {
+// ---------------------------------------------------------------------------
+// 2W authentication, as docs/linklayer.md documents it: commands go out plain,
+// the receiver challenges with a plain 0x3C, the sender answers with a plain
+// 0x3D whose payload is the MAC over the original command.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+iohome::frame::IoFrame parse_last(const PhysicalLayer& radio) {
+  iohome::frame::IoFrame f;
+  memset(&f, 0, sizeof(f));
+  iohome::frame::parse_frame(radio.last_transmission.data(), radio.last_transmission.size(), &f);
+  return f;
+}
+
+void deliver_frame(PhysicalLayer& radio, const iohome::frame::IoFrame& f) {
+  uint8_t buffer[iohome::FRAME_MAX_SIZE];
+  const size_t len = iohome::frame::serialize_frame(&f, buffer, sizeof(buffer));
+  radio.deliver(buffer, len);
+}
+
+iohome::frame::IoFrame plain_2w_execute(const uint8_t dest[3], const uint8_t src[3]) {
+  iohome::frame::IoFrame f;
+  iohome::frame::init_frame(&f, false);
+  iohome::frame::set_destination(&f, dest);
+  iohome::frame::set_source(&f, src);
+  iohome::frame::set_execute_command(&f, iohome::MP_CLOSE);
+  iohome::frame::finalize_frame_plain(&f);
+  return f;
+}
+
+}  // namespace
+
+void test_2w_command_goes_out_plain_without_a_handshake(void) {
+  // No session to set up first: the command is sent at once, plain - no MAC
+  // trailer, which no 2W device sends or expects.
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
   TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
 
-  // Without an outstanding challenge there is nothing to bind the MAC to, so
-  // the send must fail rather than silently authenticate with a null nonce.
-  TEST_ASSERT_FALSE(controller.close(PEER_NODE));
-  TEST_ASSERT_EQUAL_UINT(0, radio.transmissions.size());
-
-  TEST_ASSERT_TRUE(controller.send_challenge_request(PEER_NODE));
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  TEST_ASSERT_EQUAL_UINT(1, radio.transmissions.size());
+  // header(9) + execute payload(6) + crc(2)
+  TEST_ASSERT_EQUAL_UINT(17, radio.last_transmission.size());
+  const iohome::frame::IoFrame sent = parse_last(radio);
+  TEST_ASSERT_FALSE(sent.authenticated);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, sent.command_id);
+  TEST_ASSERT_TRUE(iohome::frame::validate_frame(&sent));
 }
 
-void test_2w_commands_work_after_handshake(void) {
-  // Regression: completing the handshake used to invalidate the nonce, so the
-  // commands it authorises were refused.
+void test_2w_controller_answers_the_challenge_for_its_command(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
   TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
   controller.start_receive();
 
-  TEST_ASSERT_TRUE(controller.send_challenge_request(PEER_NODE));
-
-  // Take the challenge the controller just sent and answer it as the peer.
-  iohome::frame::IoFrame request;
-  TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
-                                              radio.last_transmission.size(), &request,
-                                              iohome::frame::AuthTrailer::PRESENT));
-
-  iohome::mode2w::AuthenticationManager peer;
-  peer.begin(SYSTEM_KEY);
-
-  iohome::frame::IoFrame response;
-  TEST_ASSERT_TRUE(peer.create_challenge_response(&response, OWN_NODE, PEER_NODE, request.data));
-
-  uint8_t buffer[iohome::FRAME_MAX_SIZE];
-  const size_t len = iohome::frame::serialize_frame(&response, buffer, sizeof(buffer));
-  radio.deliver(buffer, len);
-
-  iohome::frame::IoFrame received;
-  TEST_ASSERT_TRUE(controller.check_received(&received));
-  TEST_ASSERT_EQUAL(iohome::mode2w::ChallengeState::AUTHENTICATED, controller.get_auth_state());
-
   TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  const iohome::frame::IoFrame command = parse_last(radio);
+
+  // The actuator holds the command and challenges us.
+  iohome::mode2w::AuthenticationManager actuator;
+  actuator.begin(SYSTEM_KEY);
+  iohome::frame::IoFrame chal;
+  TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &command, PEER_NODE, 0));
+  radio.last_transmission.clear();
+  deliver_frame(radio, chal);
+  iohome::frame::IoFrame received;
+  controller.check_received(&received);  // plain 0x3C passes the gate
+
+  // We answered with a plain 0x3D that proves the key for that command.
+  TEST_ASSERT_FALSE(radio.last_transmission.empty());
+  const iohome::frame::IoFrame answer = parse_last(radio);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_RESPONSE, answer.command_id);
+  TEST_ASSERT_FALSE(answer.authenticated);
+  TEST_ASSERT_EQUAL_UINT(17, radio.last_transmission.size());
+  TEST_ASSERT_TRUE(actuator.verify_challenge_response(&answer, 10));
 }
 
-void test_accepts_peer_initiated_challenge(void) {
-  // A peer opening a 2W handshake carries its own nonce in the payload. If we
-  // insisted on verifying against a nonce of ours, we could never answer one.
+void test_2w_controller_does_not_sign_unsolicited_challenges(void) {
+  // The chosen-nonce oracle: a 0x3C with no pending command of ours - or from
+  // a node our command did not go to - is never answered.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+
+  iohome::mode2w::AuthenticationManager attacker;
+  attacker.begin(SYSTEM_KEY);  // even one who knows the key gets nothing signed
+  iohome::frame::IoFrame chal;
+  TEST_ASSERT_TRUE(attacker.create_challenge_request(&chal, OWN_NODE, PEER_NODE, 0));
+  deliver_frame(radio, chal);
+  iohome::frame::IoFrame received;
+  controller.check_received(&received);
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());
+
+  // A command to PEER is pending, but the 0x3C comes from someone else.
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  radio.last_transmission.clear();
+  const uint8_t STRANGER[3] = {0xEE, 0xEE, 0xEE};
+  TEST_ASSERT_TRUE(attacker.create_challenge_request(&chal, OWN_NODE, STRANGER, 0));
+  deliver_frame(radio, chal);
+  controller.check_received(&received);
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());
+}
+
+void test_2w_incoming_command_is_held_until_its_answer_verifies(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
   TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
@@ -355,26 +414,62 @@ void test_accepts_peer_initiated_challenge(void) {
 
   iohome::mode2w::AuthenticationManager peer;
   peer.begin(SYSTEM_KEY);
+  const iohome::frame::IoFrame command = plain_2w_execute(OWN_NODE, PEER_NODE);
+  peer.note_request_sent(&command, 0);
+  deliver_frame(radio, command);
 
-  iohome::frame::IoFrame request;
-  TEST_ASSERT_TRUE(peer.create_challenge_request(&request, OWN_NODE, PEER_NODE, 0));
-
-  uint8_t buffer[iohome::FRAME_MAX_SIZE];
-  const size_t len = iohome::frame::serialize_frame(&request, buffer, sizeof(buffer));
-  radio.deliver(buffer, len);
-
+  // Not delivered yet: we challenged the sender instead.
   iohome::frame::IoFrame received;
+  TEST_ASSERT_FALSE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(RxReject::CHALLENGED, controller.last_reject_reason());
+  TEST_ASSERT_EQUAL_UINT32(1, controller.rx_stats().challenged);
+  const iohome::frame::IoFrame chal = parse_last(radio);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, chal.command_id);
+  TEST_ASSERT_FALSE(chal.authenticated);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(PEER_NODE, chal.dest_node, 3);
+
+  // The peer answers; now the original command is delivered.
+  iohome::frame::IoFrame answer;
+  TEST_ASSERT_TRUE(peer.answer_challenge(&chal, &answer, 10));
+  deliver_frame(radio, answer);
   TEST_ASSERT_TRUE(controller.check_received(&received));
   TEST_ASSERT_EQUAL(RxReject::NONE, controller.last_reject_reason());
-  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, received.command_id);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, received.command_id);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(command.data, received.data, command.data_len);
+  TEST_ASSERT_EQUAL(iohome::mode2w::ChallengeState::AUTHENTICATED, controller.get_auth_state());
 
-  // The nonce is available to answer with.
-  TEST_ASSERT_EQUAL_UINT8(iohome::HMAC_SIZE, received.data_len);
-  TEST_ASSERT_TRUE(controller.send_challenge_response(PEER_NODE, received.data));
+  // A replay of that 0x3D delivers nothing.
+  deliver_frame(radio, answer);
+  TEST_ASSERT_FALSE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(RxReject::MAC, controller.last_reject_reason());
 }
 
-void test_rejects_forged_peer_challenge(void) {
-  // ...but it still has to be signed with the system key.
+void test_2w_answer_without_mac_is_rejected(void) {
+  // Regression (finding 2): a plain 0x3D with an arbitrary payload must not
+  // authenticate the held command.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+
+  deliver_frame(radio, plain_2w_execute(OWN_NODE, PEER_NODE));
+  iohome::frame::IoFrame received;
+  TEST_ASSERT_FALSE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(RxReject::CHALLENGED, controller.last_reject_reason());
+
+  iohome::frame::IoFrame forged;
+  iohome::frame::init_frame(&forged, false);
+  iohome::frame::set_destination(&forged, OWN_NODE);
+  iohome::frame::set_source(&forged, PEER_NODE);
+  const uint8_t junk[6] = {0};
+  iohome::frame::set_command(&forged, iohome::CMD_CHALLENGE_RESPONSE, junk, 6);
+  iohome::frame::finalize_frame_plain(&forged);
+  deliver_frame(radio, forged);
+  TEST_ASSERT_FALSE(controller.check_received(&received));
+  TEST_ASSERT_EQUAL(RxReject::MAC, controller.last_reject_reason());
+}
+
+void test_2w_answer_signed_with_wrong_key_is_rejected(void) {
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
   TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
@@ -383,70 +478,51 @@ void test_rejects_forged_peer_challenge(void) {
   const uint8_t attacker_key[16] = {0xBA, 0xDD};
   iohome::mode2w::AuthenticationManager attacker;
   attacker.begin(attacker_key);
-
-  iohome::frame::IoFrame request;
-  TEST_ASSERT_TRUE(attacker.create_challenge_request(&request, OWN_NODE, PEER_NODE, 0));
-
-  uint8_t buffer[iohome::FRAME_MAX_SIZE];
-  const size_t len = iohome::frame::serialize_frame(&request, buffer, sizeof(buffer));
-  radio.deliver(buffer, len);
-
+  const iohome::frame::IoFrame command = plain_2w_execute(OWN_NODE, PEER_NODE);
+  attacker.note_request_sent(&command, 0);
+  deliver_frame(radio, command);
   iohome::frame::IoFrame received;
+  TEST_ASSERT_FALSE(controller.check_received(&received));
+  const iohome::frame::IoFrame chal = parse_last(radio);
+  iohome::frame::IoFrame answer;
+  TEST_ASSERT_TRUE(attacker.answer_challenge(&chal, &answer, 0));
+  deliver_frame(radio, answer);
   TEST_ASSERT_FALSE(controller.check_received(&received));
   TEST_ASSERT_EQUAL(RxReject::MAC, controller.last_reject_reason());
 }
 
-void test_stray_challenge_response_does_not_break_the_session(void) {
+void test_stray_challenge_response_does_not_break_the_handshake(void) {
   // A 0x3D from a node we never challenged must not disturb a handshake in
-  // progress. Two things stop it here, and this pins the order of both: the
-  // receive gate rejects the frame on its MAC before the authentication
-  // manager is offered it at all, and the manager would ignore it anyway
-  // because it is not from the peer we challenged.
-  //
-  // The ESPHome component had only the second of those. It routed 0x3C/0x3D
-  // straight to the manager without waiting for the MAC verdict, so any second
-  // io-homecontrol system in radio range cancelled its handshakes by accident,
-  // and anyone with a radio could on purpose.
+  // progress: the genuine answer still completes it afterwards.
   PhysicalLayer radio;
   IoHomeControl controller(&radio);
   TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
   controller.start_receive();
 
-  TEST_ASSERT_TRUE(controller.send_challenge_request(PEER_NODE));
+  iohome::mode2w::AuthenticationManager peer;
+  peer.begin(SYSTEM_KEY);
+  const iohome::frame::IoFrame command = plain_2w_execute(OWN_NODE, PEER_NODE);
+  peer.note_request_sent(&command, 0);
+  deliver_frame(radio, command);
+  iohome::frame::IoFrame received;
+  controller.check_received(&received);
+  const iohome::frame::IoFrame chal = parse_last(radio);
 
-  // Recover the nonce we just sent, so the peer can answer it properly later.
-  iohome::frame::IoFrame sent;
-  TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
-                                              radio.last_transmission.size(), &sent));
-  uint8_t nonce[iohome::HMAC_SIZE];
-  memcpy(nonce, sent.data, iohome::HMAC_SIZE);
-
-  // A stranger's 0x3D, properly signed - for its own conversation.
   const uint8_t STRANGER[3] = {0xEE, 0xEE, 0xEE};
   iohome::mode2w::AuthenticationManager other;
   other.begin(SYSTEM_KEY);
-  const uint8_t other_nonce[iohome::HMAC_SIZE] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+  const uint8_t req[1] = {0x36};
   iohome::frame::IoFrame stray;
-  TEST_ASSERT_TRUE(other.create_challenge_response(&stray, STRANGER, STRANGER, other_nonce));
-
-  uint8_t buffer[iohome::FRAME_MAX_SIZE];
-  size_t len = iohome::frame::serialize_frame(&stray, buffer, sizeof(buffer));
-  radio.deliver(buffer, len);
-  iohome::frame::IoFrame received;
+  TEST_ASSERT_TRUE(other.create_challenge_response(&stray, STRANGER, STRANGER, chal.data, req, 1));
+  deliver_frame(radio, stray);
   TEST_ASSERT_FALSE(controller.check_received(&received));
   TEST_ASSERT_EQUAL(RxReject::MAC, controller.last_reject_reason());
 
-  // The genuine answer still completes the handshake.
-  iohome::mode2w::AuthenticationManager peer;
-  peer.begin(SYSTEM_KEY);
-  iohome::frame::IoFrame response;
-  TEST_ASSERT_TRUE(peer.create_challenge_response(&response, OWN_NODE, PEER_NODE, nonce));
-  len = iohome::frame::serialize_frame(&response, buffer, sizeof(buffer));
-  radio.deliver(buffer, len);
+  iohome::frame::IoFrame answer;
+  TEST_ASSERT_TRUE(peer.answer_challenge(&chal, &answer, 10));
+  deliver_frame(radio, answer);
   TEST_ASSERT_TRUE(controller.check_received(&received));
-
-  // Which is what a 2W command needs: without a live session it is refused.
-  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_EXECUTE, received.command_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,22 +557,54 @@ uint8_t relay(PhysicalLayer& from_radio, IoHomeControl& to, PhysicalLayer& to_ra
   return cmd;
 }
 
-/// Read back which system key `node` currently holds: deliver a 0x3C signed with
-/// `key` (a 0x3C validates under the receiver's own system key) and return
-/// whether the node accepts it. `own` is the node's address, `peer` the sender.
+/// Read back which system key `node` currently holds: send it a plain 2W
+/// command from `peer`, answer its 0x3C with a 0x3D computed under `key`, and
+/// return whether the node then delivers the command - i.e. whether `key` is
+/// the key it verifies with. `own` is the node's address.
 bool speaks_key(IoHomeControl& node, PhysicalLayer& radio,
                 const uint8_t own[3], const uint8_t peer[3], const uint8_t key[16]) {
+  // Leave the radio's record of what the node last sent as it was: callers
+  // relay that frame onwards afterwards.
+  struct Restore {
+    PhysicalLayer& r;
+    std::vector<uint8_t> saved;
+    ~Restore() { r.last_transmission = saved; }
+  } restore{radio, radio.last_transmission};
+
   iohome::mode2w::AuthenticationManager signer;
   signer.begin(key);
-  iohome::frame::IoFrame chal;
-  if (!signer.create_challenge_request(&chal, own, peer, 1000UL)) {
-    return false;
-  }
+
+  iohome::frame::IoFrame cmd;
+  iohome::frame::init_frame(&cmd, false);
+  iohome::frame::set_destination(&cmd, own);
+  iohome::frame::set_source(&cmd, peer);
+  iohome::frame::set_execute_command(&cmd, iohome::MP_STOP);
+  iohome::frame::finalize_frame_plain(&cmd);
+  signer.note_request_sent(&cmd, 0);
+
   uint8_t buf[iohome::FRAME_MAX_SIZE];
-  const size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
+  size_t n = iohome::frame::serialize_frame(&cmd, buf, sizeof(buf));
+  radio.last_transmission.clear();
   radio.deliver(buf, n);
   iohome::frame::IoFrame got;
-  return node.check_received(&got);
+  node.check_received(&got);
+  if (radio.last_transmission.empty()) {
+    return false;  // not challenged
+  }
+
+  iohome::frame::IoFrame chal;
+  if (!iohome::frame::parse_frame(radio.last_transmission.data(),
+                                  radio.last_transmission.size(), &chal)) {
+    return false;
+  }
+  radio.last_transmission.clear();
+  iohome::frame::IoFrame answer;
+  if (!signer.answer_challenge(&chal, &answer, 0)) {
+    return false;
+  }
+  n = iohome::frame::serialize_frame(&answer, buf, sizeof(buf));
+  radio.deliver(buf, n);
+  return node.check_received(&got) && got.command_id == iohome::CMD_EXECUTE;
 }
 }  // namespace
 
@@ -551,31 +659,16 @@ void test_2w_push_pairing_transfers_the_key(void) {
 
   // ...but the callback only shows the device *recovered* the key; a
   // set_system_key() that dropped it on the floor would pass that check too.
-  // Prove the device actually STORED it: an independent signer holding STACK_KEY
-  // builds a challenge request, and the device validates its 0x3C MAC under its
-  // own stored key - so it accepts this only if that key really is STACK_KEY.
-  iohome::mode2w::AuthenticationManager signer;
-  signer.begin(STACK_KEY);
-  iohome::frame::IoFrame chal;
-  TEST_ASSERT_TRUE(signer.create_challenge_request(&chal, DEV, CTRL, 1000UL));
-  uint8_t buf[iohome::FRAME_MAX_SIZE];
-  size_t n = iohome::frame::serialize_frame(&chal, buf, sizeof(buf));
-  dev_radio.deliver(buf, n);
-  iohome::frame::IoFrame got;
-  TEST_ASSERT_TRUE(device.check_received(&got));  // accepted under the adopted key
-
-  // Negative control: the same request signed under a different key is rejected,
-  // so the accept above is the adopted key at work, not an open door.
+  // Prove the device actually STORED it: it authenticates a command whose 0x3D
+  // was computed under STACK_KEY, and refuses one computed under another key.
+  TEST_ASSERT_TRUE(speaks_key(device, dev_radio, DEV, CTRL, STACK_KEY));
   const uint8_t OTHER_KEY[16] = {0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
                                  0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF};
-  iohome::mode2w::AuthenticationManager wrong;
-  wrong.begin(OTHER_KEY);
-  iohome::frame::IoFrame chal2;
-  TEST_ASSERT_TRUE(wrong.create_challenge_request(&chal2, DEV, CTRL, 2000UL));
-  n = iohome::frame::serialize_frame(&chal2, buf, sizeof(buf));
-  dev_radio.deliver(buf, n);
-  TEST_ASSERT_FALSE(device.check_received(&got));
+  TEST_ASSERT_FALSE(speaks_key(device, dev_radio, DEV, CTRL, OTHER_KEY));
   TEST_ASSERT_EQUAL(RxReject::MAC, device.last_reject_reason());
+
+  // Having adopted a key, the device stops accepting pairing.
+  TEST_ASSERT_FALSE(device.is_accepting_pairing());
 }
 
 void test_2w_pairing_ignores_a_stranger_challenge(void) {
@@ -1753,6 +1846,250 @@ void test_survives_corrupted_valid_frames(void) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Review fixes
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Rewrite a frame's source address and recompute the CRC - which is all an
+/// attacker needs, because the MAC does not cover the addresses.
+std::vector<uint8_t> readdress(std::vector<uint8_t> frame, const uint8_t src[3]) {
+  memcpy(&frame[iohome::OFFSET_SRC_NODE], src, 3);
+  const uint16_t crc = iohome::crypto::compute_crc16(frame.data(), frame.size() - 2);
+  frame[frame.size() - 2] = static_cast<uint8_t>(crc & 0xFF);
+  frame[frame.size() - 1] = static_cast<uint8_t>(crc >> 8);
+  return frame;
+}
+
+class FailingStore : public iohome::RollingCodeStore {
+ public:
+  bool load(const uint8_t[iohome::NODE_ID_SIZE], uint16_t& code) override {
+    code = 0;
+    return false;
+  }
+  bool save(const uint8_t[iohome::NODE_ID_SIZE], uint16_t code) override {
+    attempts++;
+    if (fail) {
+      return false;
+    }
+    stored = code;
+    return true;
+  }
+  bool fail = true;
+  int attempts = 0;
+  uint16_t stored = 0;
+};
+
+}  // namespace
+
+void test_readdressed_replay_is_rejected(void) {
+  // Finding 1: replaying a recorded frame under ever-new source addresses used
+  // to be accepted every time - each looked like a new node's first frame.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+  controller.start_receive();
+
+  const std::vector<uint8_t> tx = make_frame(iohome::CMD_EXECUTE, iohome::MP_CLOSE, 5, SYSTEM_KEY);
+  iohome::frame::IoFrame frame;
+  radio.deliver(tx.data(), tx.size());
+  TEST_ASSERT_TRUE(controller.check_received(&frame));
+
+  for (uint8_t i = 0; i < 20; i++) {
+    const uint8_t fake[3] = {0x66, 0x00, i};
+    const std::vector<uint8_t> forged = readdress(tx, fake);
+    radio.deliver(forged.data(), forged.size());
+    TEST_ASSERT_FALSE(controller.check_received(&frame));
+    TEST_ASSERT_EQUAL(RxReject::REPLAY, controller.last_reject_reason());
+  }
+}
+
+void test_strict_replay_protection_accepts_only_known_peers(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  controller.begin(OWN_NODE, SYSTEM_KEY);
+  controller.start_receive();
+  controller.set_strict_replay_protection(true);
+
+  const std::vector<uint8_t> tx = make_frame(iohome::CMD_EXECUTE, iohome::MP_CLOSE, 5, SYSTEM_KEY);
+  iohome::frame::IoFrame frame;
+  radio.deliver(tx.data(), tx.size());
+  TEST_ASSERT_FALSE(controller.check_received(&frame));
+  TEST_ASSERT_EQUAL(RxReject::REPLAY, controller.last_reject_reason());
+
+  TEST_ASSERT_TRUE(controller.replay_guard().add_known_peer(PEER_NODE));
+  radio.deliver(tx.data(), tx.size());
+  TEST_ASSERT_TRUE(controller.check_received(&frame));
+}
+
+void test_rolling_code_save_failure_aborts_the_send(void) {
+  // Finding 5: a failed save() was ignored, so codes went out that a reboot
+  // would hand out again.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  FailingStore store;
+  controller.set_rolling_code_store(&store, 16);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  TEST_ASSERT_FALSE(controller.close(PEER_NODE));
+  TEST_ASSERT_EQUAL_UINT(0, radio.transmissions.size());
+  TEST_ASSERT_EQUAL_UINT16(0, controller.get_rolling_code());  // not consumed
+
+  // Retried (not silently skipped) on the next command, and fine once it works.
+  store.fail = false;
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  TEST_ASSERT_EQUAL_UINT(1, radio.transmissions.size());
+  TEST_ASSERT_EQUAL_UINT16(1, controller.get_rolling_code());
+  TEST_ASSERT_EQUAL_UINT16(1 + 16, store.stored);
+  TEST_ASSERT_EQUAL(2, store.attempts);
+}
+
+void test_pairing_window_expires(void) {
+  PhysicalLayer radio;
+  IoHomeControl device(&radio);
+  TEST_ASSERT_TRUE(device.begin(OWN_NODE, SYSTEM_KEY, /*is_1w=*/false));
+  device.start_receive();
+
+  device.set_pairing_clock_ms(10000);
+  device.set_accept_pairing(true, 1000);
+  TEST_ASSERT_TRUE(device.is_accepting_pairing());
+  device.set_pairing_clock_ms(10999);
+  TEST_ASSERT_TRUE(device.is_accepting_pairing());
+  device.set_pairing_clock_ms(11000);
+
+  iohome::frame::IoFrame ask;
+  iohome::frame::init_frame(&ask, false);
+  iohome::frame::set_destination(&ask, OWN_NODE);
+  iohome::frame::set_source(&ask, PEER_NODE);
+  iohome::frame::set_command(&ask, iohome::CMD_ASK_CHALLENGE, nullptr, 0);
+  iohome::frame::finalize_frame_plain(&ask);
+  deliver_frame(radio, ask);
+  iohome::frame::IoFrame received;
+  device.check_received(&received);
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());  // window closed: no 0x3C
+  TEST_ASSERT_FALSE(device.is_accepting_pairing());
+
+  // Default window is 120 s.
+  device.set_accept_pairing(true);
+  device.set_pairing_clock_ms(11000 + 119999);
+  TEST_ASSERT_TRUE(device.is_accepting_pairing());
+  device.set_pairing_clock_ms(11000 + 120000);
+  TEST_ASSERT_FALSE(device.is_accepting_pairing());
+}
+
+void test_pull_answers_only_once_per_window(void) {
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  PhysicalLayer radio;
+  IoHomeControl device(&radio);
+  TEST_ASSERT_TRUE(device.begin(OWN_NODE, SYSTEM_KEY, /*is_1w=*/false));
+  device.start_receive();
+  device.set_accept_pairing(true);
+
+  iohome::frame::IoFrame launch;
+  iohome::frame::init_frame(&launch, false);
+  iohome::frame::set_destination(&launch, OWN_NODE);
+  iohome::frame::set_source(&launch, CTRL);
+  const uint8_t chal[6] = {1, 2, 3, 4, 5, 6};
+  iohome::frame::set_command(&launch, iohome::CMD_LAUNCH_KEY_TRANSFER, chal, 6);
+  iohome::frame::finalize_frame_plain(&launch);
+
+  iohome::frame::IoFrame received;
+  deliver_frame(radio, launch);
+  device.check_received(&received);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, radio.last_transmission[8]);
+
+  radio.last_transmission.clear();
+  deliver_frame(radio, launch);
+  device.check_received(&received);
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());
+}
+
+void test_tx_power_is_capped_at_the_eu_limit(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  controller.set_tx_power(20);
+  TEST_ASSERT_EQUAL_INT(14, controller.get_tx_power());
+  TEST_ASSERT_EQUAL_INT(RADIOLIB_ERR_NONE, controller.configure_radio());
+  TEST_ASSERT_EQUAL_INT(14, radio.output_power);
+
+  controller.set_tx_power(10);
+  controller.configure_radio();
+  TEST_ASSERT_EQUAL_INT(10, radio.output_power);
+
+  // Explicit opt-out; the mock module then steps down to its own 17 dBm max.
+  controller.set_tx_power(20, /*allow_above_eu_limit=*/true);
+  controller.configure_radio();
+  TEST_ASSERT_EQUAL_INT(17, radio.output_power);
+}
+
+void test_snr_is_nan_in_fsk_mode(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 9.5f, controller.get_snr());
+  radio.snr = static_cast<float>(RADIOLIB_ERR_WRONG_MODEM);
+  TEST_ASSERT_TRUE(isnan(controller.get_snr()));
+
+  IoHomeControl detached(nullptr);
+  TEST_ASSERT_TRUE(isnan(detached.get_snr()));
+}
+
+void test_key_transfer_is_redacted_from_the_tx_log(void) {
+  // Finding A: the DEBUG hex dump of a 0x30 is the system key in all but name.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  LogCapture capture;
+  controller.set_log_callback(log_cb, &capture);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  const uint8_t new_key[16] = {0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB,
+                               0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB};
+  TEST_ASSERT_TRUE(controller.pair_device_1w(PEER_NODE, new_key));
+  const std::vector<uint8_t>& kt = radio.last_transmission;
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_SEND_1W_KEY, kt[8]);
+
+  char masked_hex[8];
+  snprintf(masked_hex, sizeof(masked_hex), "%02X %02X", kt[9], kt[10]);
+  TEST_ASSERT_TRUE(capture.has(iohome::LogLevel::DEBUG, "<key redacted>"));
+  for (const auto& entry : capture.messages) {
+    if (entry.second.find("Transmitting 31 bytes") != std::string::npos) {
+      TEST_ASSERT_TRUE(entry.second.find(masked_hex) == std::string::npos);
+    }
+  }
+  // Ordinary frames are still dumped in full.
+  capture.messages.clear();
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  TEST_ASSERT_FALSE(capture.has(iohome::LogLevel::DEBUG, "<key redacted>"));
+  TEST_ASSERT_TRUE(capture.has(iohome::LogLevel::DEBUG, "Transmitting 25 bytes"));
+}
+
+void test_hopping_retunes_from_standby_quietly(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  LogCapture capture;
+  controller.set_log_callback(log_cb, &capture);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+  TEST_ASSERT_TRUE(controller.enable_frequency_hopping(true));
+  capture.messages.clear();
+  const int standby_before = radio.standby_calls;
+  const int receive_before = radio.receive_started;
+
+  // clock() measures CPU time, so spin until the 2.7 ms dwell has elapsed.
+  bool hopped = false;
+  for (long i = 0; i < 2000000000L && !hopped; i++) {
+    hopped = controller.update_frequency_hopping();
+  }
+  TEST_ASSERT_TRUE(hopped);
+  TEST_ASSERT_EQUAL_INT(standby_before + 1, radio.standby_calls);
+  TEST_ASSERT_EQUAL_INT(receive_before + 1, radio.receive_started);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 869.85f, radio.frequency);
+  TEST_ASSERT_EQUAL_UINT(0, capture.count(iohome::LogLevel::INFO));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
 
@@ -1767,11 +2104,22 @@ int main(int, char**) {
   RUN_TEST(test_rejects_invalid_acei);
   RUN_TEST(test_set_priority_selects_the_acei_level);
   RUN_TEST(test_send_command_rejects_nullptr);
-  RUN_TEST(test_2w_requires_handshake);
-  RUN_TEST(test_2w_commands_work_after_handshake);
-  RUN_TEST(test_accepts_peer_initiated_challenge);
-  RUN_TEST(test_rejects_forged_peer_challenge);
-  RUN_TEST(test_stray_challenge_response_does_not_break_the_session);
+  RUN_TEST(test_2w_command_goes_out_plain_without_a_handshake);
+  RUN_TEST(test_2w_controller_answers_the_challenge_for_its_command);
+  RUN_TEST(test_2w_controller_does_not_sign_unsolicited_challenges);
+  RUN_TEST(test_2w_incoming_command_is_held_until_its_answer_verifies);
+  RUN_TEST(test_2w_answer_without_mac_is_rejected);
+  RUN_TEST(test_2w_answer_signed_with_wrong_key_is_rejected);
+  RUN_TEST(test_stray_challenge_response_does_not_break_the_handshake);
+  RUN_TEST(test_readdressed_replay_is_rejected);
+  RUN_TEST(test_strict_replay_protection_accepts_only_known_peers);
+  RUN_TEST(test_rolling_code_save_failure_aborts_the_send);
+  RUN_TEST(test_pairing_window_expires);
+  RUN_TEST(test_pull_answers_only_once_per_window);
+  RUN_TEST(test_tx_power_is_capped_at_the_eu_limit);
+  RUN_TEST(test_snr_is_nan_in_fsk_mode);
+  RUN_TEST(test_key_transfer_is_redacted_from_the_tx_log);
+  RUN_TEST(test_hopping_retunes_from_standby_quietly);
 
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_goes_high_byte_first);

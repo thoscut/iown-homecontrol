@@ -36,6 +36,9 @@ on:
       - ".codespellrc"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   spellcheck:
     runs-on: ubuntu-latest
@@ -45,7 +48,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Spell check
-        uses: codespell-project/actions-codespell@master
+        # Pinned to a release commit: a third-party action on a moving branch
+        # can change what runs here without a change in this repository.
+        uses: codespell-project/actions-codespell@e3258cca84ce02b0bb36a3d41f2c18f719a0cc1a # v2.4.3
         with:
           path: >-
             src

@@ -51,8 +51,10 @@ jobs:
       - name: Install ESPHome
         # Pinned so an upstream release cannot turn CI red with no change here;
         # raise it on purpose (and re-run this workflow) when the component
-        # is tested against a newer ESPHome.
-        run: pip install esphome==2026.10.2
+        # is tested against a newer ESPHome. 2026.6.5 is the newest release
+        # that still supports the Python 3.11 set up above (2026.7+ need 3.12),
+        # i.e. what `pip install --upgrade esphome` resolved to until now.
+        run: pip install esphome==2026.6.5
 
       - name: Write placeholder secrets
         working-directory: esphome

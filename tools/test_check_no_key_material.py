@@ -11,9 +11,12 @@ scanned, and a genuine binary must be skipped.
 Run: python3 tools/test_check_no_key_material.py   (exit 1 on failure)
 """
 
+import base64
 import importlib.util
 import os
+import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location(
@@ -35,14 +38,9 @@ def make_0x30(src, cmd=0x30, key=None):
 
 
 def fires_on(text):
+    # Same entry point main() uses per file, so every extractor is exercised.
     hits = []
-    for line in text.splitlines():
-        for seq in g.hex_candidates(line):
-            g.scan_bytes(seq, "<t>", "hex", hits)
-    for seq in g.hex_candidates(text):
-        g.scan_bytes(seq, "<t>", "ml", hits)
-    for seq in g.base64_candidates(text):
-        g.scan_bytes(seq, "<t>", "b64", hits)
+    g.scan_text(text, "<t>", hits)
     return len(hits) > 0
 
 
@@ -93,6 +91,59 @@ def main():
     check("real 2W 0x32 flagged",
           fires_on(make_0x30(bytes([0x12, 0x34, 0x56]), cmd=0x32).hex()))
 
+    # (a2) encodings an earlier version missed (reviewer evasion probes).
+    #   - base64 of the shortest key frames (27/29 bytes -> 36/40 chars incl. pad)
+    for klen in (14, 16):   # 27- and 29-byte frames
+        f = make_0x30(bytes([0x12, 0x34, 0x56]), key=list(range(klen)))
+        b64 = base64.b64encode(f).decode()
+        check(f"real {len(f)}-byte frame as base64 ({len(b64)} chars) flagged",
+              fires_on(b64))
+        check(f"real {len(f)}-byte frame as base64 glued to text flagged",
+              fires_on("key" + b64))
+    #   - a hex run starting half a byte early ("Frame: " ends in hex 'e')
+    spaced = " ".join(f"{b:02x}" for b in real)
+    check("hex run off by a nibble flagged", fires_on("Frame: " + spaced))
+    #   - xxd and hexdump -C output (offset + ASCII columns)
+    xxd = "\n".join(
+        f"{i:08x}: " + " ".join(real[j:j + 2].hex() for j in range(i, min(i + 16, len(real)), 2))
+        + "  ..4V0..........." for i in range(0, len(real), 16))
+    check("xxd dump flagged", fires_on(xxd))
+    hexdump = "\n".join(
+        f"{i:08x}  " + " ".join(f"{b:02x}" for b in real[i:i + 8]) + "  "
+        + " ".join(f"{b:02x}" for b in real[i + 8:i + 16]) + "  |..4V0...|"
+        for i in range(0, len(real), 16))
+    check("hexdump -C dump flagged", fires_on(hexdump))
+    #   - C arrays with a comment on every row
+    for open_c, close_c in (("// row", ""), ("# row", ""), ("/* row", " */")):
+        rows = "\n".join(", ".join(f"0x{b:02x}" for b in real[i:i + 8])
+                         + f",  {open_c} {i // 8}{close_c}"
+                         for i in range(0, len(real), 8))
+        check(f"C array with '{open_c.split()[0]}' row comments flagged",
+              fires_on("{\n" + rows + "\n}"))
+    #   - main() reads paths with spaces / non-ASCII (git ls-files -z) and fails
+    #     on an unreadable tracked file instead of skipping it.
+    with tempfile.TemporaryDirectory() as tmp:
+        def git(*a):
+            subprocess.run(["git", "-C", tmp, *a], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        git("init", "-q")
+        path = os.path.join(tmp, "caps dir", "capture \u00e9.txt")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as fh:
+            fh.write(real_hex + "\n")
+        git("add", "-A")
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            check("path with space/non-ASCII is scanned (flagged)", g.main() == 1)
+            with open(path, "w") as fh:
+                fh.write("clean\n")
+            check("clean temp repo passes", g.main() == 0)
+            os.remove(path)   # tracked but unreadable now
+            check("unreadable tracked file fails the check", g.main() == 1)
+        finally:
+            os.chdir(cwd)
+
     # (b) placeholder-source frames (docs worked example / synthetic vector) pass.
     check("placeholder ABCDEF 0x30 not flagged",
           not fires_on(make_0x30(bytes([0xAB, 0xCD, 0xEF])).hex()))
@@ -111,6 +162,7 @@ def main():
     check("mostly-ASCII text is not binary", not g.looks_binary(b"the quick brown fox " * 50))
 
     # The live repo must be clean (belt and suspenders on the real tree).
+    os.chdir(os.path.dirname(HERE))
     check("live repo scan is clean", g.main() == 0)
 
     print("\nALL SCANNER TESTS PASSED")

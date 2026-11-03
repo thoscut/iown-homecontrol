@@ -99,7 +99,10 @@
   #define IOHC_PIN_CS      18
   #define IOHC_PIN_RST     14
   #define IOHC_PIN_DIO0    26
-  #define IOHC_PIN_DIO1    26
+  // DIO1 is not routed to the ESP32 on this board (only DIO0 is, on GPIO 26).
+  // It used to be given as 26 too, so RadioLib was handed the same GPIO as
+  // both the packet interrupt and its secondary pin.
+  #define IOHC_PIN_DIO1    RADIOLIB_NC
   #define IOHC_PIN_SCK      5
   #define IOHC_PIN_MISO    19
   #define IOHC_PIN_MOSI    27
@@ -111,7 +114,10 @@
   #define IOHC_PIN_CS      18
   #define IOHC_PIN_RST     12
   #define IOHC_PIN_DIO0    26
-  #define IOHC_PIN_DIO1    26
+  // DIO1 is not routed to the ESP32 on this board (only DIO0 is, on GPIO 26).
+  // It used to be given as 26 too, so RadioLib was handed the same GPIO as
+  // both the packet interrupt and its secondary pin.
+  #define IOHC_PIN_DIO1    RADIOLIB_NC
   #define IOHC_PIN_SCK      5
   #define IOHC_PIN_MISO    19
   #define IOHC_PIN_MOSI    27
@@ -158,6 +164,9 @@
   #define IOHC_BOARD_NAME  "Heltec WiFi LoRa 32 (V3)"
   #define IOHC_RADIO_SX126X
   #define IOHC_RADIO_CLASS SX1262
+  // The SX1262's TCXO is powered from DIO3 and specified for 1.8 V
+  // (Heltec schematic; Meshtastic heltec_v3 uses the same value).
+  #define IOHC_TCXO_VOLTAGE 1.8f
   #define IOHC_PIN_CS       8
   #define IOHC_PIN_RST     12
   #define IOHC_PIN_BUSY    13
@@ -173,6 +182,7 @@
   #define IOHC_BOARD_NAME  "Heltec Wireless Stick (V3)"
   #define IOHC_RADIO_SX126X
   #define IOHC_RADIO_CLASS SX1262
+  #define IOHC_TCXO_VOLTAGE 1.8f   // same Heltec V3 radio design
   #define IOHC_PIN_CS       8
   #define IOHC_PIN_RST     12
   #define IOHC_PIN_BUSY    13
@@ -187,6 +197,26 @@
 
 #if !defined(IOHC_BOARD_NAME)
   #define IOHC_BOARD_NAME "custom"
+#endif
+
+// SX126x TCXO supply voltage on DIO3, passed to beginFSK(). RadioLib's own
+// default is 1.6 V; a board whose oscillator needs more (the Heltec V3/V4 TCXO
+// is a 1.8 V part) must say so, because when the TCXO fails to start RadioLib
+// falls back to a crystal the board does not have, and the radio then comes up
+// "fine" but off frequency. Set 0 for a board with a plain crystal. Custom
+// boards pass it as -DIOHC_TCXO_VOLTAGE=1.8. Unused on SX127x.
+#if !defined(IOHC_TCXO_VOLTAGE)
+  #define IOHC_TCXO_VOLTAGE 1.6f
+#endif
+
+// Heltec WiFi LoRa 32 V4(.2): the SX1262 feeds a GC1109 PA/LNA front end whose
+// supply (VEXT, GPIO 36, active low), LDO (GPIO 7), chip enable (GPIO 2) and
+// TX/RX select (GPIO 46) this firmware does not drive yet (the ESPHome
+// component does: vext_pin / rf_frontend). Until it does, reception and
+// transmission through the front end are not expected to work. Built by the
+// heltec_wifi_lora_32_V4 environment, which defines IOHC_BOARD_HELTEC_V4.
+#if defined(IOHC_BOARD_HELTEC_V4)
+  #warning "Heltec V4: the GC1109 RF front end (GPIO 36/7/2/46) is not driven by this firmware - see docs/HARDWARE-BRINGUP.md or use the ESPHome component"
 #endif
 
 // ---------------------------------------------------------------------------

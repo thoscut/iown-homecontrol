@@ -230,8 +230,7 @@ void test_mac_history_covers_a_burst(void) {
     }
 
     // Once MAC_HISTORY newer MACs have pushed it out, it is forgotten. This is
-    // the documented limit of the mechanism; the session timeout is the real
-    // bound for 2W freshness.
+    // the documented limit of the mechanism.
     for (uint8_t i = 0; i < ReplayGuard::MAC_HISTORY; i++) {
         const uint8_t other[6] = {0xF0, i, 0, 0, 0, 0};
         TEST_ASSERT_TRUE(guard.accept_mac(NODE_A, other));
@@ -239,48 +238,136 @@ void test_mac_history_covers_a_burst(void) {
     TEST_ASSERT_TRUE(guard.accept_mac(NODE_A, first));
 }
 
-void test_mac_history_is_per_node(void) {
+void test_mac_history_is_global(void) {
+    // The MAC does not cover the frame's addresses. A recorded frame re-addressed
+    // to another source carries the same MAC, so the history must not be keyed
+    // by source - otherwise the rewrite is a "first frame" every time.
     ReplayGuard guard;
     const uint8_t mac[6] = {1, 2, 3, 4, 5, 6};
 
     TEST_ASSERT_TRUE(guard.accept_mac(NODE_A, mac));
-    // A different node producing the same MAC would need the same key and the
-    // same challenge; it is not this node's replay.
-    TEST_ASSERT_TRUE(guard.accept_mac(NODE_B, mac));
+    TEST_ASSERT_FALSE(guard.accept_mac(NODE_B, mac));
     TEST_ASSERT_FALSE(guard.accept_mac(NODE_A, mac));
 }
 
-void test_forget_clears_mac_history(void) {
+void test_forget_keeps_global_mac_history(void) {
     ReplayGuard guard;
     const uint8_t mac[6] = {1, 2, 3, 4, 5, 6};
 
     TEST_ASSERT_TRUE(guard.accept_mac(NODE_A, mac));
+    guard.forget(NODE_A);
+    // Forgetting a node must not launder the MACs it sent.
     TEST_ASSERT_FALSE(guard.accept_mac(NODE_A, mac));
 
-    guard.forget(NODE_A);
+    guard.reset();
     TEST_ASSERT_TRUE(guard.accept_mac(NODE_A, mac));
 }
 
 void test_eviction_clears_inherited_state(void) {
-    // A newcomer taking over an evicted slot must not inherit its sequence
-    // number or its MAC history, or it would reject its own first frames.
+    // A newcomer taking over an evicted slot must not inherit its sequence.
     ReplayGuard guard;
-    const uint8_t mac[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
 
     for (size_t i = 0; i < ReplayGuard::MAX_NODES; i++) {
         const uint8_t node[3] = {0x00, 0x00, static_cast<uint8_t>(i)};
         TEST_ASSERT_TRUE(guard.accept(node, 5000));
-        TEST_ASSERT_TRUE(guard.accept_mac(node, mac));
     }
 
     // Evict the least recently used slot.
     const uint8_t newcomer[3] = {0xFF, 0xFF, 0xFF};
+    const uint8_t mac[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
     TEST_ASSERT_TRUE(guard.accept_mac(newcomer, mac));
 
+    // accept_mac() does not invent a sequence number for the node.
     uint16_t stored = 0xFFFF;
-    TEST_ASSERT_TRUE(guard.last_sequence(newcomer, stored));
-    TEST_ASSERT_EQUAL_UINT16(0, stored);
+    TEST_ASSERT_FALSE(guard.last_sequence(newcomer, stored));
     TEST_ASSERT_TRUE(guard.accept(newcomer, 1));
+}
+
+void test_accept_mac_does_not_fake_a_sequence(void) {
+    // Regression: accept_mac() allocated an entry with last_sequence = 0, and
+    // accept() then judged the node's first 1W frame against that zero - so
+    // sequence 5000 (outside the 1000 window from 0) was rejected as stale.
+    ReplayGuard guard;
+    const uint8_t mac[6] = {9, 9, 9, 9, 9, 9};
+
+    TEST_ASSERT_TRUE(guard.accept_mac(NODE_A, mac));
+    TEST_ASSERT_TRUE(guard.accept(NODE_A, 5000));
+    TEST_ASSERT_FALSE(guard.accept(NODE_A, 5000));
+    TEST_ASSERT_TRUE(guard.accept(NODE_A, 5001));
+}
+
+void test_readdressed_replay_is_rejected(void) {
+    // The reviewer's bypass: the same (seq, MAC) re-sent under an endless
+    // supply of fresh source addresses. Keyed on the source alone, each one was
+    // an unknown node's "first frame" and accepted at any sequence.
+    ReplayGuard guard;
+    const uint8_t mac[6] = {0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6};
+
+    TEST_ASSERT_TRUE(guard.accept(NODE_A, 100, mac));
+    for (uint8_t i = 0; i < 50; i++) {
+        const uint8_t fake[3] = {0x42, 0x00, i};
+        TEST_ASSERT_FALSE(guard.accept(fake, 100, mac));
+    }
+    TEST_ASSERT_FALSE(guard.accept(NODE_A, 100, mac));
+    // Rejection records nothing: the fakes took no slots.
+    TEST_ASSERT_EQUAL_UINT(1, guard.tracked_count());
+}
+
+void test_accept_with_mac_checks_both(void) {
+    ReplayGuard guard;
+    const uint8_t mac1[6] = {1, 1, 1, 1, 1, 1};
+    const uint8_t mac2[6] = {2, 2, 2, 2, 2, 2};
+
+    TEST_ASSERT_TRUE(guard.accept(NODE_A, 10, mac1));
+    // Fresh MAC, stale sequence: rejected, and mac2 is NOT recorded...
+    TEST_ASSERT_FALSE(guard.accept(NODE_A, 10, mac2));
+    // ...so it is still usable with a fresh sequence.
+    TEST_ASSERT_TRUE(guard.accept(NODE_A, 11, mac2));
+}
+
+void test_strict_mode_rejects_unknown_sources(void) {
+    ReplayGuard guard;
+    guard.set_strict(true);
+    TEST_ASSERT_TRUE(guard.is_strict());
+
+    const uint8_t mac[6] = {1, 2, 3, 4, 5, 6};
+    TEST_ASSERT_FALSE(guard.accept(NODE_A, 1));
+    TEST_ASSERT_FALSE(guard.accept(NODE_A, 1, mac));
+    TEST_ASSERT_FALSE(guard.accept_mac(NODE_A, mac));
+    TEST_ASSERT_FALSE(guard.would_accept(NODE_A, 1));
+    TEST_ASSERT_EQUAL_UINT(0, guard.tracked_count());
+
+    // A primed node is known, and its primed sequence is real.
+    TEST_ASSERT_TRUE(guard.prime(NODE_A, 200));
+    TEST_ASSERT_FALSE(guard.accept(NODE_A, 200, mac));
+    TEST_ASSERT_TRUE(guard.accept(NODE_A, 201, mac));
+
+    // A peer added without a sequence is known; its first frame sets it.
+    TEST_ASSERT_TRUE(guard.add_known_peer(NODE_B));
+    uint16_t stored = 0;
+    TEST_ASSERT_FALSE(guard.last_sequence(NODE_B, stored));
+    const uint8_t mac_b[6] = {7, 7, 7, 7, 7, 7};
+    TEST_ASSERT_TRUE(guard.accept(NODE_B, 5000, mac_b));
+    TEST_ASSERT_TRUE(guard.last_sequence(NODE_B, stored));
+    TEST_ASSERT_EQUAL_UINT16(5000, stored);
+    TEST_ASSERT_FALSE(guard.accept(NODE_B, 4000));
+}
+
+void test_known_peers_survive_an_eviction_flood(void) {
+    // Non-strict mode: frames from made-up sources must not evict a registered
+    // peer and its sequence (which would re-open the first-frame path for it).
+    ReplayGuard guard;
+    TEST_ASSERT_TRUE(guard.prime(NODE_A, 300));
+
+    for (uint16_t i = 0; i < 200; i++) {
+        const uint8_t node[3] = {0x55, static_cast<uint8_t>(i >> 8), static_cast<uint8_t>(i)};
+        guard.accept(node, 1);
+    }
+
+    uint16_t stored = 0;
+    TEST_ASSERT_TRUE(guard.last_sequence(NODE_A, stored));
+    TEST_ASSERT_EQUAL_UINT16(300, stored);
+    TEST_ASSERT_FALSE(guard.accept(NODE_A, 300));
 }
 
 void test_rejects_nullptr(void) {
@@ -320,9 +407,14 @@ int main(int, char **) {
     RUN_TEST(test_repeated_mac_is_rejected);
     RUN_TEST(test_different_macs_are_accepted);
     RUN_TEST(test_mac_history_covers_a_burst);
-    RUN_TEST(test_mac_history_is_per_node);
-    RUN_TEST(test_forget_clears_mac_history);
+    RUN_TEST(test_mac_history_is_global);
+    RUN_TEST(test_forget_keeps_global_mac_history);
     RUN_TEST(test_eviction_clears_inherited_state);
+    RUN_TEST(test_accept_mac_does_not_fake_a_sequence);
+    RUN_TEST(test_readdressed_replay_is_rejected);
+    RUN_TEST(test_accept_with_mac_checks_both);
+    RUN_TEST(test_strict_mode_rejects_unknown_sources);
+    RUN_TEST(test_known_peers_survive_an_eviction_flood);
     RUN_TEST(test_rejects_nullptr);
 
     return UNITY_END();

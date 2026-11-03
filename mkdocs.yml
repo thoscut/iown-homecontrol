@@ -1,11 +1,11 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/squidfunk/mkdocs-material/master/docs/schema.json
 site_name: iown-homecontrol™ Documentation
-site_url: https://velocet.github.io/iown-homecontrol/
+site_url: https://thoscut.github.io/iown-homecontrol/
 site_description: io-homecontrol Documentation and Implementation
 site_author: velocet
-repo_name: iown™
-repo_url: https://github.com/velocet/iown-homecontrol/
-edit_uri: blog/main/docs/ # edit/main/docs/
+repo_name: thoscut/iown-homecontrol
+repo_url: https://github.com/thoscut/iown-homecontrol
+edit_uri: edit/main/docs/
 copyright: '&copy; <a href="https://github.com/velocet/iown-homecontrol/">iown-homecontrol™</a>'
 # site_dir: .cache/site # output folder: put in '.cache' to unclutter structure
 exclude_docs: | # Files to exclude from the built site.
@@ -87,7 +87,7 @@ plugins:
       enabled: !ENV [GITHUB_ACTIONS, false]
 
 extra:
-  homepage: https://velocet.github.io/iown-homecontrol
+  homepage: https://thoscut.github.io/iown-homecontrol/
   # consent:
   #   title: ''
   #   description: ''
@@ -104,9 +104,9 @@ extra:
     - icon: fontawesome/brands/telegram
       link: https://t.me/iownHomecontrol
     - icon: material/home
-      link: 'https://velocet.github.io/iown-homecontrol'
+      link: 'https://thoscut.github.io/iown-homecontrol/'
     - icon: material/github
-      link: 'https://github.com/velocet/iown-homecontrol'
+      link: 'https://github.com/thoscut/iown-homecontrol'
   status: # ☠❌❗❕❓❔
     beta: Document in beta status
     WIP: Document is unfinished

@@ -7,8 +7,8 @@ It uses RadioLib for radio abstraction and supports SX1276/SX1262 radio modules
 commonly found on LoRa32 boards (Heltec, LilyGo, etc.).
 
 Note: This component is experimental. It supports frame reception with MAC and
-replay checking, 1W authenticated cover commands, and 2W commands over a
-challenge-response session (`two_way: true`).
+replay checking, 1W authenticated cover commands, and 2W commands
+authenticated by answering the actuator's 0x3C challenge (`two_way: true`).
 """
 
 import esphome.codegen as cg
@@ -237,9 +237,9 @@ def _validate_config(config):
 
     if config[CONF_TWO_WAY] and CONF_SYSTEM_KEY not in config:
         raise cv.Invalid(
-            "two_way requires system_key: the challenge-response handshake "
-            "signs every frame with it, and without one no session can be "
-            "established at all",
+            "two_way requires system_key: the actuator challenges every 2W "
+            "command (0x3C) and only executes it once the 0x3D answer, a MAC "
+            "computed with the key, checks out",
             path=[CONF_TWO_WAY],
         )
 

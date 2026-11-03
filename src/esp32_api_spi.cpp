@@ -6,9 +6,9 @@
   * See include/esp32_api_spi.h for what these are (and are not) for.
   */
 
-#include "esp32_api_spi.h"
-
 #if defined(ESP32) || defined(ESP_PLATFORM)
+
+#include "esp32_api_spi.h"
 
 // A register read clocks out three bytes: the address, then two dummy bytes
 // while the device shifts its answer back. The transmit buffer held only two,

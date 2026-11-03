@@ -186,7 +186,8 @@ class IOWNHomeControlComponent : public Component {
   /// controller starts above the sequence the actuator last saw from that node.
   void set_initial_rolling_code(uint16_t value) { this->initial_rolling_code_ = value; }
   void set_position_feedback(bool enabled) { this->position_feedback_ = enabled; }
-  /// Select 2W (challenge-response authenticated) instead of 1W.
+  /// Select 2W (commands sent plain, authenticated by answering the actuator's
+  /// 0x3C challenge with a 0x3D) instead of 1W.
   void set_two_way(bool enabled) { this->two_way_ = enabled; }
 
   /// Read the system key out of a 1W key transfer (command 0x30) and log it.
@@ -279,7 +280,8 @@ class IOWNHomeControlComponent : public Component {
   uint32_t mac_errors() const { return this->mac_errors_; }
   /// Authenticated frames whose rolling code had already been seen.
   uint32_t replay_errors() const { return this->replay_errors_; }
-  /// Whether a 2W session is currently authenticated. Always false in 1W mode.
+  /// Whether a peer recently proved the system key with a 0x3D to one of our
+  /// challenges. Always false in 1W mode.
   bool is_2w_authenticated();
 
   /** Rolling code that will be used for the next authenticated transmission. */
@@ -292,14 +294,15 @@ class IOWNHomeControlComponent : public Component {
   int dio1_pin_{-1};
   int busy_pin_{-1};
 
-  /// Rejects a replayed rolling code from a node we have already heard from.
+  /// Rejects a replayed rolling code (and, through its global MAC ring, a
+  /// replay re-addressed to another source). With position_feedback it runs in
+  /// strict mode: only the configured covers' addresses are accepted at all.
   /// Position reports are authenticated but not fresh without this: a recorded
   /// "fully closed" frame replays perfectly.
   iohome::ReplayGuard replay_guard_;
 
-  /// 2W challenge-response state. One session at a time, which is the same
-  /// simplification IoHomeControl makes: the challenge is a property of the
-  /// exchange, and a controller talks to one actuator at a time anyway.
+  /// 2W challenge/answer state: our one pending command (answered when its
+  /// actuator sends 0x3C) and at most one peer command we are challenging.
   iohome::mode2w::AuthenticationManager auth_;
   bool two_way_{false};
 
@@ -317,15 +320,15 @@ class IOWNHomeControlComponent : public Component {
   /// Serialize and transmit a frame the protocol layer built.
   bool send_protocol_frame_(const iohome::frame::IoFrame *frame);
 
-  /// Make sure a 2W session is authenticated, starting a handshake if not.
-  /// Returns false while the handshake is still in flight.
-  bool ensure_2w_session_(uint32_t target_address);
-
-  /// Send a command 0x00 over an authenticated 2W session.
+  /// Send a plain 2W command 0x00 and remember it, so the actuator's 0x3C for
+  /// it can be answered. Returns whether it was transmitted.
   bool send_2w_command_(uint32_t target_address, uint16_t main_param, uint8_t fp1, uint8_t fp2);
 
   /// Handle 0x3C / 0x3D during reception.
-  void handle_challenge_frame_(const iohome::frame::IoFrame *frame);
+  void handle_challenge_frame_(const iohome::frame::IoFrame *frame, int16_t rssi);
+
+  /// Act on an execute frame (log it, feed position reports to the covers).
+  void handle_execute_(const ReceivedFrame &frame);
 
   /// Bring the board's power rail and any external front end up, before the
   /// radio is reset or addressed over SPI.
@@ -416,6 +419,8 @@ class IOWNHomeControlComponent : public Component {
 
   /** Parse and dispatch a received io-homecontrol frame. */
   void parse_frame_(const uint8_t *data, size_t len, int16_t rssi);
+  /// False for key-transfer frames unless key_capture is on: their hex dump leaks the key.
+  bool may_log_frame_contents_(const uint8_t *data, size_t len) const;
 
   /** Feed a decoded execute frame to any cover that owns the source address. */
   void dispatch_to_covers_(const ReceivedFrame &frame);

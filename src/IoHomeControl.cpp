@@ -8,6 +8,7 @@
 #include <string.h>
 #include <new>
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -79,10 +80,14 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     key_received_callback_(nullptr),
     key_received_context_(nullptr),
     accept_pairing_(false),
+    accept_pairing_since_ms_(0),
+    accept_pairing_window_ms_(DEFAULT_PAIRING_WINDOW_MS),
     pairing_state_(Pairing2W::IDLE),
     pairing_started_ms_(0),
     pairing_clock_overridden_(false),
-    pairing_clock_ms_(0)
+    pairing_clock_ms_(0),
+    tx_power_dbm_(EU_MAX_TX_POWER_DBM),
+    allow_above_eu_limit_(false)
 {
   memset(own_node_id_, 0, NODE_ID_SIZE);
   memset(system_key_, 0, AES_KEY_SIZE);
@@ -208,6 +213,16 @@ bool IoHomeControl::begin(
   return true;
 }
 
+void IoHomeControl::set_tx_power(int8_t dbm, bool allow_above_eu_limit) {
+  allow_above_eu_limit_ = allow_above_eu_limit;
+  if (!allow_above_eu_limit && dbm > EU_MAX_TX_POWER_DBM) {
+    LOG_WARN("TX power %d dBm exceeds the EU 868 MHz limit; using %d dBm",
+             static_cast<int>(dbm), static_cast<int>(EU_MAX_TX_POWER_DBM));
+    dbm = EU_MAX_TX_POWER_DBM;
+  }
+  tx_power_dbm_ = dbm;
+}
+
 int16_t IoHomeControl::configure_radio(float frequency) {
   if (radio_ == nullptr) {
     LOG_ERROR("Radio not initialized");
@@ -222,8 +237,10 @@ int16_t IoHomeControl::configure_radio(float frequency) {
     return state;
   }
 
-  // Start at the highest power and step down until the module accepts a value.
-  int8_t power = 20;
+  // Start at the configured power - 14 dBm, the EU 868 MHz sub-band limit,
+  // unless set_tx_power() allowed more - and step down until the module
+  // accepts a value. This used to start at 20 dBm, four times the legal ERP.
+  int8_t power = tx_power_dbm_;
   do {
     state = radio_->setOutputPower(power);
   } while (state == RADIOLIB_ERR_INVALID_OUTPUT_POWER && --power >= -3);
@@ -327,6 +344,27 @@ RxReject IoHomeControl::screen_frame(const frame::IoFrame* frame) {
     return RxReject::CRC;
   }
 
+  if (!frame->is_1w_mode) {
+    // 2W frames carry no MAC (docs/linklayer.md, "2W Authentication"); the
+    // parser never reads one into them. A frame that claims one was forced
+    // through AuthTrailer::PRESENT and is not something a real device sends.
+    if (frame->authenticated) {
+      return RxReject::MAC;
+    }
+    // 0x3C/0x3D and the bootstrap commands are plain by definition; the
+    // challenge exchange is routed to the authentication manager.
+    if (accept_plain_frames_ || frame::is_unauthenticated_command(frame->command_id)) {
+      return RxReject::NONE;
+    }
+    // Any other command addressed to us is authenticated the 2W way: hold it,
+    // challenge the sender, deliver it once its 0x3D verifies.
+    if (auth_manager_ != nullptr &&
+        memcmp(frame->dest_node, own_node_id_, NODE_ID_SIZE) == 0) {
+      return RxReject::CHALLENGED;
+    }
+    return RxReject::UNAUTHENTICATED;
+  }
+
   if (!frame->authenticated) {
     // Bootstrap commands legitimately carry no MAC: the peers have no shared
     // key yet. Everything else must be authenticated.
@@ -336,44 +374,16 @@ RxReject IoHomeControl::screen_frame(const frame::IoFrame* frame) {
     return RxReject::UNAUTHENTICATED;
   }
 
-  const uint8_t* challenge = nullptr;
-  if (!frame->is_1w_mode) {
-    if (frame->command_id == CMD_CHALLENGE_REQUEST && frame->data_len >= HMAC_SIZE) {
-      // A peer opening a handshake carries its challenge in the payload, and
-      // the MAC is computed over exactly that. Verifying against our own
-      // nonce would reject every peer-initiated handshake.
-      //
-      // This proves the sender holds the key, not that the frame is fresh -
-      // the freshness of the session comes from the nonce we generate in the
-      // response we send back.
-      challenge = frame->data;
-    } else if (auth_manager_ != nullptr && auth_manager_->has_active_challenge(NOW_MS())) {
-      challenge = auth_manager_->get_current_challenge();
-    } else {
-      // No nonce to verify against. Do not fall back to the zeroed buffer,
-      // which would check the MAC against an attacker-guessable value.
-      return RxReject::MAC;
-    }
-  }
-
-  if (!frame::validate_frame(frame, system_key_, challenge)) {
+  if (!frame::validate_frame(frame, system_key_)) {
     return RxReject::MAC;
   }
 
   // A valid MAC proves authorship, not freshness: without this check a
-  // recorded frame could simply be replayed off the air.
-  if (frame->is_1w_mode) {
-    if (!replay_guard_.accept(frame->src_node, frame::get_rolling_code(frame))) {
-      return RxReject::REPLAY;
-    }
-  } else {
-    // 2W frames have no sequence number - freshness comes from the session
-    // challenge, which signs several frames. Reject a MAC this node produced
-    // recently, which is either a protocol repeat we should act on once or a
-    // replay.
-    if (!replay_guard_.accept_mac(frame->src_node, frame->hmac)) {
-      return RxReject::REPLAY;
-    }
+  // recorded frame could simply be replayed off the air. The MAC goes in too:
+  // it does not cover the addresses, so a replay re-addressed to an unseen
+  // source is caught by the guard's global MAC ring, not by its sequence.
+  if (!replay_guard_.accept(frame->src_node, frame::get_rolling_code(frame), frame->hmac)) {
+    return RxReject::REPLAY;
   }
 
   return RxReject::NONE;
@@ -406,7 +416,7 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
 
   // Capture the link metrics before restarting reception.
   const int16_t rssi_val = radio_->getRSSI();
-  const float snr_val = radio_->getSNR();
+  const float snr_val = read_snr();
 
   radio_->startReceive();
 
@@ -442,6 +452,39 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
     rx_stats_.malformed++;
     last_reject_ = RxReject::MALFORMED;
     return false;
+  }
+
+  // A 0x3D answers a challenge we sent for a command a peer sent us. It is the
+  // authentication itself - there is no MAC gate in front of it - and when it
+  // verifies, what gets delivered is the command it authenticates, not the
+  // 0x3D.
+  if (!frame->is_1w_mode && auth_manager_ != nullptr &&
+      frame->command_id == CMD_CHALLENGE_RESPONSE) {
+    if (!frame::validate_frame(frame)) {
+      rx_stats_.crc_failures++;
+      last_reject_ = RxReject::CRC;
+      return false;
+    }
+    frame::IoFrame verified;
+    if (!auth_manager_->verify_challenge_response(frame, NOW_MS()) ||
+        !auth_manager_->take_verified_request(&verified)) {
+      rx_stats_.mac_failures++;
+      last_reject_ = RxReject::MAC;
+      LOG_DEBUG("2W challenge answer rejected");
+      return false;
+    }
+    LOG_INFO("2W command authenticated");
+    memcpy(frame, &verified, sizeof(verified));
+    crypto::secure_zero(&verified, sizeof(verified));
+    rx_stats_.accepted++;
+    last_reject_ = RxReject::NONE;
+    if (rssi != nullptr) { *rssi = rssi_val; }
+    if (snr != nullptr) { *snr = snr_val; }
+    process_received_frame(frame, rssi_val, snr_val);
+    if (rx_callback_ != nullptr) {
+      rx_callback_(frame, rssi_val, snr_val);
+    }
+    return true;
   }
 
   // A pairing handshake that stalled (the peer never answered) must not keep
@@ -490,6 +533,20 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
       rx_stats_.unauthenticated++;
       LOG_DEBUG("Frame dropped: authentication required");
       return false;
+    case RxReject::CHALLENGED: {
+      // Hold the command and challenge the sender. It is delivered by the 0x3D
+      // branch above once the answer verifies, or never.
+      frame::IoFrame chal;
+      if (auth_manager_->create_challenge_for(&chal, frame, own_node_id_, NOW_MS())) {
+        rx_stats_.challenged++;
+        LOG_DEBUG("2W command held; challenging the sender");
+        transmit_frame(&chal);
+      } else {
+        rx_stats_.unauthenticated++;
+        LOG_DEBUG("2W command dropped: a challenge is already pending");
+      }
+      return false;
+    }
     default:
       return false;
   }
@@ -512,35 +569,47 @@ bool IoHomeControl::check_received(frame::IoFrame* frame, int16_t* rssi, float* 
   return true;
 }
 
-uint16_t IoHomeControl::consume_rolling_code() {
+bool IoHomeControl::consume_rolling_code(uint16_t& code_out) {
   const uint16_t code = rolling_code_;
-  rolling_code_ = static_cast<uint16_t>(rolling_code_ + 1);
+  const uint16_t next = static_cast<uint16_t>(rolling_code_ + 1);
 
-  if (rolling_code_store_ == nullptr) {
-    return code;
+  if (rolling_code_store_ != nullptr) {
+    // Only touch flash when the reserved block runs out. Writing on every
+    // command would wear out the NVS partition within weeks of normal use.
+    // `remaining` is modular, so it stays correct across the 16-bit wrap; a
+    // value larger than the block size means the counter overshot the
+    // reservation and a fresh one is due.
+    const uint16_t remaining = static_cast<uint16_t>(rolling_code_reserved_until_ - next);
+
+    if (remaining == 0 || remaining > rolling_code_reserve_block_) {
+      const uint16_t previous = rolling_code_reserved_until_;
+      rolling_code_reserved_until_ = static_cast<uint16_t>(next + rolling_code_reserve_block_);
+      if (!rolling_code_store_->save(own_node_id_, rolling_code_reserved_until_)) {
+        // The reservation is not on flash. Sending anyway would hand out a code
+        // that the next boot hands out again - which the receiver rejects as a
+        // replay. Roll back and refuse.
+        rolling_code_reserved_until_ = previous;
+        LOG_ERROR("could not persist the rolling code; not transmitting");
+        return false;
+      }
+    }
   }
 
-  // Only touch flash when the reserved block runs out. Writing on every
-  // command would wear out the NVS partition within weeks of normal use.
-  // `remaining` is modular, so it stays correct across the 16-bit wrap; a
-  // value larger than the block size means the counter overshot the
-  // reservation and a fresh one is due.
-  const uint16_t remaining = static_cast<uint16_t>(rolling_code_reserved_until_ - rolling_code_);
-
-  if (remaining == 0 || remaining > rolling_code_reserve_block_) {
-    rolling_code_reserved_until_ =
-      static_cast<uint16_t>(rolling_code_ + rolling_code_reserve_block_);
-    rolling_code_store_->save(own_node_id_, rolling_code_reserved_until_);
-  }
-
-  return code;
+  rolling_code_ = next;
+  code_out = code;
+  return true;
 }
 
 void IoHomeControl::set_rolling_code(uint16_t code) {
   rolling_code_ = code;
   if (rolling_code_store_ != nullptr) {
     rolling_code_reserved_until_ = static_cast<uint16_t>(code + rolling_code_reserve_block_);
-    rolling_code_store_->save(own_node_id_, rolling_code_reserved_until_);
+    if (!rolling_code_store_->save(own_node_id_, rolling_code_reserved_until_)) {
+      // Force the next consume_rolling_code() to try (and check) the write
+      // again rather than trusting a reservation that is not on flash.
+      rolling_code_reserved_until_ = code;
+      LOG_WARN("could not persist the rolling code");
+    }
   }
 }
 
@@ -652,7 +721,11 @@ bool IoHomeControl::send_command(
     // Execute). An actuator ignores an otherwise valid command sent as order
     // 00: MAC and CRC still check out, so nothing reports an error.
     frame::set_order(&tx_frame, FrameOrder::GROUP_END);
-    frame::set_rolling_code(&tx_frame, consume_rolling_code());
+    uint16_t code = 0;
+    if (!consume_rolling_code(code)) {
+      return false;
+    }
+    frame::set_rolling_code(&tx_frame, code);
 
     if (!frame::finalize_frame(&tx_frame, system_key_)) {
       LOG_ERROR("finalize_frame failed");
@@ -664,18 +737,20 @@ bool IoHomeControl::send_command(
       return false;
     }
 
-    // The 2W MAC is bound to the challenge from the current handshake. It
-    // stays usable once the peer has answered, so commands can follow the
-    // handshake without renegotiating a nonce for each one.
-    if (!auth_manager_->has_active_challenge(NOW_MS())) {
-      LOG_ERROR("no active challenge - run the 2W handshake first");
+    // 2W commands go out plain (docs/linklayer.md: "2W frames do not have any
+    // MAC or sequence number"). The receiver answers with a 0x3C, which
+    // check_received() answers with a 0x3D over this very command - so it is
+    // remembered as the pending request. Nothing has to be negotiated first.
+    if (!frame::finalize_frame_plain(&tx_frame)) {
+      LOG_ERROR("finalize_frame_plain failed");
       return false;
     }
-
-    if (!frame::finalize_frame(&tx_frame, system_key_, auth_manager_->get_current_challenge())) {
-      LOG_ERROR("finalize_frame failed");
+    auth_manager_->note_request_sent(&tx_frame, NOW_MS());
+    if (!transmit_frame(&tx_frame)) {
+      auth_manager_->clear_pending_request();
       return false;
     }
+    return true;
   }
 
   return transmit_frame(&tx_frame);
@@ -758,7 +833,19 @@ int16_t IoHomeControl::get_rssi() {
 }
 
 float IoHomeControl::get_snr() {
-  return (radio_ != nullptr) ? radio_->getSNR() : 0.0f;
+  return read_snr();
+}
+
+float IoHomeControl::read_snr() {
+  if (radio_ == nullptr) {
+    return NAN;
+  }
+  const float snr = radio_->getSNR();
+  // FSK has no SNR; RadioLib reports the error code as the value.
+  if (snr == static_cast<float>(RADIOLIB_ERR_WRONG_MODEM)) {
+    return NAN;
+  }
+  return snr;
 }
 
 bool IoHomeControl::transmit_frame(const frame::IoFrame* frame) {
@@ -778,14 +865,21 @@ bool IoHomeControl::transmit_frame(const frame::IoFrame* frame) {
   // old byte-at-a-time form relied on the serial port not adding line breaks.
   // FRAME_MAX_SIZE is 34, so three characters each fits comfortably.
   if (log_enabled(LogLevel::DEBUG)) {
+    // A key transfer (0x30 / 0x32) is masked only with the public transfer
+    // key and an address or challenge that is also on air, so its hex dump IS
+    // the system key. Log the header only.
+    const bool carries_key = frame->command_id == CMD_SEND_1W_KEY ||
+                             frame->command_id == CMD_KEY_TRANSFER;
+    const size_t shown = carries_key ? static_cast<size_t>(OFFSET_DATA) : len;
     char hex[FRAME_MAX_SIZE * 3 + 1];
     size_t written = 0;
-    for (size_t i = 0; i < len && written + 3 < sizeof(hex); i++) {
+    for (size_t i = 0; i < shown && written + 3 < sizeof(hex); i++) {
       written += static_cast<size_t>(snprintf(hex + written, sizeof(hex) - written,
                                               "%02X ", buffer[i]));
     }
     hex[written] = '\0';
-    LOG_DEBUG("Transmitting %u bytes: %s", static_cast<unsigned>(len), hex);
+    LOG_DEBUG("Transmitting %u bytes: %s%s", static_cast<unsigned>(len), hex,
+              carries_key ? "<key redacted>" : "");
   }
 
   // Wrap the frame in the on-air UART framing every io-homecontrol node
@@ -857,12 +951,23 @@ void IoHomeControl::process_received_frame(const frame::IoFrame* frame, int16_t 
     discovery_manager_->process_discovery_response(frame, rssi, now);
   }
 
-  if (!is_1w_mode_ && auth_manager_ != nullptr && frame->command_id == CMD_CHALLENGE_RESPONSE) {
-    if (auth_manager_->verify_challenge_response(frame, now)) {
-      LOG_INFO("Authentication successful");
-    } else {
-      LOG_INFO("Authentication failed");
-    }
+  if (!is_1w_mode_ && frame->command_id == CMD_CHALLENGE_REQUEST) {
+    handle_challenge_request(frame);
+  }
+}
+
+void IoHomeControl::handle_challenge_request(const frame::IoFrame* frame) {
+  if (auth_manager_ == nullptr) {
+    return;
+  }
+  // answer_challenge() only signs for a request we sent to this peer moments
+  // ago - never for a nonce someone hands us out of the blue.
+  frame::IoFrame response;
+  if (auth_manager_->answer_challenge(frame, &response, NOW_MS())) {
+    LOG_INFO("Answering 2W challenge");
+    transmit_frame(&response);
+  } else {
+    LOG_DEBUG("2W challenge not for a pending request of ours; not answering");
   }
 }
 
@@ -899,14 +1004,23 @@ bool IoHomeControl::update_frequency_hopping() {
   }
 
   const float new_freq = channel_hopper_->get_current_frequency();
+
+  // Retune from standby: an SX127x/SX126x in RX keeps listening on the old
+  // frequency until reception is restarted.
+  if (receiving_) {
+    radio_->standby();
+  }
   const int16_t state = radio_->setFrequency(new_freq);
+  if (receiving_) {
+    radio_->startReceive();
+  }
 
   if (state != RADIOLIB_ERR_NONE) {
     LOG_ERROR("Failed to switch channel (%d)", state);
     return false;
   }
 
-  LOG_INFO("Switched to channel: %.2f MHz", new_freq);
+  // No log here: this runs every 2.7 ms.
   return true;
 }
 
@@ -915,49 +1029,6 @@ mode2w::ChannelState IoHomeControl::get_current_channel() const {
     return mode2w::ChannelState::CHANNEL_2;
   }
   return channel_hopper_->get_current_channel();
-}
-
-bool IoHomeControl::send_challenge_request(const uint8_t dest_node[NODE_ID_SIZE]) {
-  if (is_1w_mode_) {
-    LOG_ERROR("Challenge-response only available in 2W mode");
-    return false;
-  }
-
-  if (auth_manager_ == nullptr || dest_node == nullptr) {
-    LOG_ERROR("Authentication manager not initialized");
-    return false;
-  }
-
-  frame::IoFrame tx_frame;
-  if (!auth_manager_->create_challenge_request(&tx_frame, dest_node, own_node_id_, NOW_MS())) {
-    LOG_ERROR("Failed to create challenge request");
-    return false;
-  }
-
-  LOG_INFO("Sending challenge request");
-  return transmit_frame(&tx_frame);
-}
-
-bool IoHomeControl::send_challenge_response(const uint8_t dest_node[NODE_ID_SIZE],
-                                            const uint8_t challenge[HMAC_SIZE]) {
-  if (is_1w_mode_) {
-    LOG_ERROR("Challenge-response only available in 2W mode");
-    return false;
-  }
-
-  if (auth_manager_ == nullptr || dest_node == nullptr || challenge == nullptr) {
-    LOG_ERROR("Invalid parameters");
-    return false;
-  }
-
-  frame::IoFrame tx_frame;
-  if (!auth_manager_->create_challenge_response(&tx_frame, dest_node, own_node_id_, challenge)) {
-    LOG_ERROR("Failed to create challenge response");
-    return false;
-  }
-
-  LOG_INFO("Sending challenge response");
-  return transmit_frame(&tx_frame);
 }
 
 mode2w::ChallengeState IoHomeControl::get_auth_state() {
@@ -1039,8 +1110,19 @@ bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE],
   return transmit_frame(&tx_frame);
 }
 
-void IoHomeControl::set_accept_pairing(bool enabled) {
+void IoHomeControl::set_accept_pairing(bool enabled, uint32_t window_ms) {
   accept_pairing_ = enabled;
+  accept_pairing_window_ms_ = (window_ms == 0) ? DEFAULT_PAIRING_WINDOW_MS : window_ms;
+  accept_pairing_since_ms_ = pairing_now_ms();
+  if (enabled) {
+    LOG_INFO("Accepting 2W pairing for %lu s",
+             static_cast<unsigned long>(accept_pairing_window_ms_ / 1000));
+  }
+}
+
+bool IoHomeControl::is_accepting_pairing() {
+  expire_stale_pairing();
+  return accept_pairing_;
 }
 
 void IoHomeControl::set_key_received_callback(KeyReceivedCallback callback, void* context) {
@@ -1181,6 +1263,12 @@ uint32_t IoHomeControl::pairing_now_ms() const {
 }
 
 void IoHomeControl::expire_stale_pairing() {
+  if (accept_pairing_ &&
+      (pairing_now_ms() - accept_pairing_since_ms_) >= accept_pairing_window_ms_) {
+    LOG_INFO("Pairing window closed");
+    accept_pairing_ = false;
+  }
+
   if (pairing_state_ == Pairing2W::IDLE) {
     return;
   }
@@ -1240,7 +1328,9 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     // with no signal that pairing went wrong. Stay on the old key until the
     // device acknowledges (the 0x33 branch below), so a retry recovers cleanly.
     LOG_INFO("Pairing: sending key transfer");
-    if (!transmit_frame(&kt)) {
+    const bool sent = transmit_frame(&kt);
+    crypto::secure_zero(&kt, sizeof(kt));  // holds the masked key
+    if (!sent) {
       LOG_ERROR("Pairing: key transfer failed to send");
       pairing_state_ = Pairing2W::IDLE;
       crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
@@ -1318,9 +1408,12 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     if (built) {
       LOG_INFO("Pull: sending our key");
       transmit_frame(&kt);
+      // One key per window: a second 0x38 must not get it again.
+      accept_pairing_ = false;
     } else {
       LOG_ERROR("Pull: failed to build key transfer");
     }
+    crypto::secure_zero(&kt, sizeof(kt));  // holds the masked key
     return;
   }
 
@@ -1366,6 +1459,8 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     }
 
     set_system_key(recovered);
+    // One key per window: having adopted a key, stop accepting pushes.
+    accept_pairing_ = false;
 
     // Acknowledge with 0x33 so the controller knows the key landed.
     frame::IoFrame ack;

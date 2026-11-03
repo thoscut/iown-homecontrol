@@ -6,6 +6,7 @@
 #include "protocol/iohome_2w.h"
 #include "protocol/iohome_constants.h"
 #include "protocol/iohome_crypto.h"
+#include <stdio.h>
 #include <string.h>
 
 namespace mode2w = iohome::mode2w;
@@ -471,334 +472,421 @@ void test_auth_manager_reset(void) {
     TEST_ASSERT_EQUAL(mode2w::ChallengeState::IDLE, auth.peek_state());
 }
 
-void test_auth_handshake_succeeds(void) {
-    const uint8_t key[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                             0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+namespace {
 
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
+const uint8_t KEY[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                         0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+const uint8_t CONTROLLER[3] = {0x01, 0x02, 0x03};
+const uint8_t ACTUATOR[3] = {0x0A, 0x0B, 0x0C};
 
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
-    TEST_ASSERT_EQUAL_UINT8(iohome::CMD_CHALLENGE_REQUEST, request.command_id);
-    TEST_ASSERT_TRUE(request.authenticated);
-
-    // The responder echoes the challenge it received.
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
-                                                         request.data));
-
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
-    TEST_ASSERT_TRUE(initiator.is_authenticated(100));
+/// A plain 2W command from `src` to `dest`, the way a controller sends one.
+iohome::frame::IoFrame make_command(const uint8_t dest[3], const uint8_t src[3],
+                                    uint16_t main_param = iohome::MP_CLOSE) {
+    iohome::frame::IoFrame f;
+    iohome::frame::init_frame(&f, false);
+    iohome::frame::set_destination(&f, dest);
+    iohome::frame::set_source(&f, src);
+    iohome::frame::set_execute_command(&f, main_param);
+    iohome::frame::finalize_frame_plain(&f);
+    return f;
 }
 
-void test_auth_is_authenticated_with_binds_to_the_peer(void) {
-    // A session is bound to the node it was negotiated with; is_authenticated_with
-    // must say yes only for that peer. The ESPHome component relies on this to
-    // avoid signing a command to actuator B with actuator A's session nonce.
-    const uint8_t key[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                             0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator_a[3] = {0x0A, 0x0B, 0x0C};
-    const uint8_t actuator_b[3] = {0x0D, 0x0E, 0x0F};
+/// Serialize and parse back, as the radio would deliver it.
+iohome::frame::IoFrame over_the_air(const iohome::frame::IoFrame& f) {
+    uint8_t buf[iohome::FRAME_MAX_SIZE];
+    const size_t n = iohome::frame::serialize_frame(&f, buf, sizeof(buf));
+    iohome::frame::IoFrame out;
+    if (!iohome::frame::parse_frame(buf, n, &out)) {
+        memset(&out, 0, sizeof(out));  // fails every assertion that follows
+    }
+    return out;
+}
 
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
+size_t unhex(const char* s, uint8_t* out) {
+    size_t n = 0;
+    while (s[0] != '\0' && s[1] != '\0') {
+        unsigned v = 0;
+        sscanf(s, "%2x", &v);
+        out[n++] = static_cast<uint8_t>(v);
+        s += 2;
+    }
+    return n;
+}
 
-    // Before any handshake: authenticated with nobody.
-    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_a, 0));
+}  // namespace
 
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator_a, controller, 0));
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(
-        responder.create_challenge_response(&response, controller, actuator_a, request.data));
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
+void test_2w_auth_matches_documented_capture(void) {
+    // docs/linklayer.md, "2W Authentication" (and the push example):
+    //   48 04 FEEFEE F00F00 36 9A02                 controller asks for the address
+    //   0E 00 F00F00 FEEFEE 3C 123456789ABC 19DB    device challenges it
+    //   0E 04 FEEFEE F00F00 3D C7FDC0668818 B1E3    controller answers
+    // with the stack key 0102...1516 pushed in the same example. All three are
+    // plain frames: no MAC trailer anywhere.
+    const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                   0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+    uint8_t buf[iohome::FRAME_MAX_SIZE];
 
-    // Authenticated with A, but NOT with B - even though a plain is_authenticated()
-    // would be true for both.
-    TEST_ASSERT_TRUE(initiator.is_authenticated(100));
-    TEST_ASSERT_TRUE(initiator.is_authenticated_with(actuator_a, 100));
-    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_b, 100));
+    iohome::frame::IoFrame cmd36, chal, answer;
+    size_t n = unhex("4804FEEFEEF00F00369A02", buf);
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buf, n, &cmd36));
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&cmd36));
+    n = unhex("0E00F00F00FEEFEE3C123456789ABC19DB", buf);
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buf, n, &chal));
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&chal));
+    TEST_ASSERT_FALSE(chal.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(6, chal.data_len);
+    n = unhex("0E04FEEFEEF00F003DC7FDC0668818B1E3", buf);
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buf, n, &answer));
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&answer));
+    TEST_ASSERT_FALSE(answer.authenticated);
 
-    // After reset, authenticated with nobody again.
-    initiator.reset();
-    TEST_ASSERT_FALSE(initiator.is_authenticated_with(actuator_a, 100));
+    // Controller side: having sent the 0x36, answer the device's 0x3C.
+    mode2w::AuthenticationManager controller;
+    controller.begin(STACK_KEY);
+    TEST_ASSERT_TRUE(controller.note_request_sent(&cmd36, 1000));
+    iohome::frame::IoFrame ours;
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &ours, 1100));
+    TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_RESPONSE, ours.command_id);
+    TEST_ASSERT_FALSE(ours.authenticated);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(answer.data, ours.data, 6);   // C7FDC0668818
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(answer.dest_node, ours.dest_node, 3);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(answer.src_node, ours.src_node, 3);
+    TEST_ASSERT_EQUAL_UINT(17, ours.frame_length);
+
+    // Device side: the documented answer verifies against the 0x36 it received.
+    // (The nonce is ours to choose in real life; pin it to the documented one.)
+    struct PinnedNonce : mode2w::AuthenticationManager {
+        void pin(const uint8_t n6[6]) { memcpy(current_challenge_, n6, 6); }
+    } device;
+    device.begin(STACK_KEY);
+    const uint8_t device_addr[3] = {0xFE, 0xEF, 0xEE};
+    iohome::frame::IoFrame our_chal;
+    TEST_ASSERT_TRUE(device.create_challenge_for(&our_chal, &cmd36, device_addr, 1000));
+    const uint8_t documented_nonce[6] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+    device.pin(documented_nonce);
+    TEST_ASSERT_TRUE(device.verify_challenge_response(&answer, 1100));
+    iohome::frame::IoFrame verified;
+    TEST_ASSERT_TRUE(device.take_verified_request(&verified));
+    TEST_ASSERT_EQUAL_HEX8(0x36, verified.command_id);
+    TEST_ASSERT_FALSE(device.take_verified_request(&verified));  // handed out once
+}
+
+void test_2w_push_key_answer_matches_documented_capture(void) {
+    // The same rule on the push example's 0x32: 3D payload 8DC9D40DC7A4.
+    const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                   0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+    uint8_t req[17];
+    unhex("32F849584FFCFC442B1E97E4C38DF7B143", req);
+    const uint8_t nonce[6] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+    const uint8_t expected[6] = {0x8D, 0xC9, 0xD4, 0x0D, 0xC7, 0xA4};
+
+    mode2w::AuthenticationManager m;
+    m.begin(STACK_KEY);
+    iohome::frame::IoFrame f;
+    const uint8_t dev[3] = {0xFE, 0xEF, 0xEE}, ctrl[3] = {0xF0, 0x0F, 0x00};
+    TEST_ASSERT_TRUE(m.create_challenge_response(&f, dev, ctrl, nonce, req, sizeof(req)));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, f.data, 6);
+}
+
+void test_auth_handshake_succeeds(void) {
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+
+    // Controller sends a plain command and remembers it.
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    TEST_ASSERT_FALSE(cmd.authenticated);
+    TEST_ASSERT_TRUE(controller.note_request_sent(&cmd, 0));
+    TEST_ASSERT_TRUE(controller.has_pending_request(0));
+
+    // Actuator challenges it with a plain 0x3C.
+    const iohome::frame::IoFrame cmd_rx = over_the_air(cmd);
+    TEST_ASSERT_FALSE(cmd_rx.authenticated);
+    iohome::frame::IoFrame chal;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd_rx, ACTUATOR, 0));
+    TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_REQUEST, chal.command_id);
+    TEST_ASSERT_FALSE(chal.authenticated);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(CONTROLLER, chal.dest_node, 3);
+
+    iohome::frame::IoFrame answer;
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, 50));
+    TEST_ASSERT_FALSE(answer.authenticated);
+    const iohome::frame::IoFrame answer_rx = over_the_air(answer);
+
+    TEST_ASSERT_TRUE(actuator.verify_challenge_response(&answer_rx, 100));
+    TEST_ASSERT_TRUE(actuator.is_authenticated_with(CONTROLLER, 100));
+    iohome::frame::IoFrame verified;
+    TEST_ASSERT_TRUE(actuator.take_verified_request(&verified));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(cmd.data, verified.data, cmd.data_len);
+}
+
+void test_auth_rejects_response_without_mac(void) {
+    // Regression (finding 2): a 0x3D from the challenged peer with no MAC - or
+    // any wrong payload - was accepted, because validate_frame() returned true
+    // for a plain frame even when asked to verify a MAC.
+    mode2w::AuthenticationManager actuator;
+    actuator.begin(KEY);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    iohome::frame::IoFrame chal;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 0));
+
+    iohome::frame::IoFrame forged;
+    iohome::frame::init_frame(&forged, false);
+    iohome::frame::set_destination(&forged, ACTUATOR);
+    iohome::frame::set_source(&forged, CONTROLLER);
+    const uint8_t junk[6] = {0};
+    iohome::frame::set_command(&forged, iohome::CMD_CHALLENGE_RESPONSE, junk, 6);
+    iohome::frame::finalize_frame_plain(&forged);
+
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&forged, 100));
+    TEST_ASSERT_FALSE(actuator.is_authenticated(100));
+    // ...and the attempt burned the nonce.
+    TEST_ASSERT_EQUAL(mode2w::ChallengeState::IDLE, actuator.peek_state());
+    iohome::frame::IoFrame out;
+    TEST_ASSERT_FALSE(actuator.take_verified_request(&out));
+
+    // An empty 0x3D is no better.
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 200));
+    iohome::frame::set_command(&forged, iohome::CMD_CHALLENGE_RESPONSE, nullptr, 0);
+    iohome::frame::finalize_frame_plain(&forged);
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&forged, 300));
+    TEST_ASSERT_EQUAL(mode2w::ChallengeState::IDLE, actuator.peek_state());
+}
+
+void test_validate_frame_with_key_rejects_plain_frames(void) {
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&cmd));          // CRC only
+    TEST_ASSERT_FALSE(iohome::frame::validate_frame(&cmd, KEY));    // asked for a MAC
+}
+
+void test_answer_only_for_our_pending_request(void) {
+    // Closing the chosen-nonce oracle: we never sign a nonce for a request we
+    // did not send, nor for one we sent to somebody else.
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    iohome::frame::IoFrame chal, answer;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 0));
+
+    // Nothing pending: no answer.
+    TEST_ASSERT_FALSE(controller.answer_challenge(&chal, &answer, 0));
+
+    // Pending, but the challenge comes from another node.
+    TEST_ASSERT_TRUE(controller.note_request_sent(&cmd, 0));
+    const uint8_t STRANGER[3] = {0xEE, 0xEE, 0xEE};
+    iohome::frame::IoFrame stray = chal;
+    iohome::frame::set_source(&stray, STRANGER);
+    TEST_ASSERT_FALSE(controller.answer_challenge(&stray, &answer, 10));
+    // Or is addressed to another node.
+    stray = chal;
+    iohome::frame::set_destination(&stray, STRANGER);
+    TEST_ASSERT_FALSE(controller.answer_challenge(&stray, &answer, 10));
+    // Or arrives after the response window.
+    controller.set_response_window_ms(500);
+    TEST_ASSERT_FALSE(controller.answer_challenge(&chal, &answer, 501));
+    TEST_ASSERT_FALSE(controller.has_pending_request(501));
+
+    // A fresh request: answered a bounded number of times.
+    TEST_ASSERT_TRUE(controller.note_request_sent(&cmd, 1000));
+    for (uint8_t i = 0; i < mode2w::AuthenticationManager::MAX_ANSWERS_PER_REQUEST; i++) {
+        TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, 1000 + i));
+    }
+    TEST_ASSERT_FALSE(controller.answer_challenge(&chal, &answer, 1010));
 }
 
 void test_auth_rejects_replayed_response(void) {
-    const uint8_t key[16] = {0x42};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    controller.note_request_sent(&cmd, 0);
+    iohome::frame::IoFrame chal, answer;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 0));
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, 10));
+    TEST_ASSERT_TRUE(actuator.verify_challenge_response(&answer, 100));
 
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
-
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
-
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
-                                                         request.data));
-
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
-
-    // The challenge is single-use: replaying the very same response must fail.
-    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 150));
+    // Single-use: the same 0x3D again fails...
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&answer, 150));
+    // ...and fails against a new challenge for the same command too, because
+    // the new nonce is different.
+    iohome::frame::IoFrame chal2;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal2, &cmd, ACTUATOR, 200));
+    TEST_ASSERT_FALSE(memcmp(chal.data, chal2.data, 6) == 0);
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&answer, 250));
 }
 
-void test_challenge_stays_usable_after_handshake(void) {
-    // Regression: the challenge used to be wiped on a successful handshake, so
-    // the very commands the handshake authorises could no longer be MAC'd.
-    const uint8_t key[16] = {0x42};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+void test_answer_is_bound_to_the_request(void) {
+    // A 0x3D proves the key for ONE command. An answer computed over a
+    // different command (e.g. an attacker swapping OPEN for CLOSE) fails.
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+    iohome::frame::IoFrame open_cmd = make_command(ACTUATOR, CONTROLLER, iohome::MP_OPEN);
+    iohome::frame::IoFrame close_cmd = make_command(ACTUATOR, CONTROLLER, iohome::MP_CLOSE);
 
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
-
-    TEST_ASSERT_FALSE(initiator.has_active_challenge(0));
-
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
-    TEST_ASSERT_TRUE(initiator.has_active_challenge(0));
-
-    uint8_t nonce[6];
-    memcpy(nonce, initiator.get_current_challenge(), 6);
-
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
-                                                         request.data));
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
-
-    TEST_ASSERT_TRUE(initiator.has_active_challenge(100));
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(nonce, initiator.get_current_challenge(), 6);
-
-    // ...and it goes away with the session.
-    TEST_ASSERT_FALSE(initiator.has_active_challenge(1000000));
+    controller.note_request_sent(&open_cmd, 0);
+    iohome::frame::IoFrame chal, answer;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &close_cmd, ACTUATOR, 0));
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, 10));
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&answer, 20));
 }
 
-void test_failed_handshake_clears_challenge(void) {
-    const uint8_t key[16] = {0x42};
-    const uint8_t other_key[16] = {0x24};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
-
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager impostor;
-    initiator.begin(key);
-    impostor.begin(other_key);
-
-    iohome::frame::IoFrame request;
-    initiator.create_challenge_request(&request, actuator, controller, 0);
-
-    iohome::frame::IoFrame response;
-    impostor.create_challenge_response(&response, controller, actuator, request.data);
-
-    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 100));
-
-    // A bad answer burns the nonce, so an attacker cannot keep guessing
-    // against one known challenge.
-    TEST_ASSERT_FALSE(initiator.has_active_challenge(100));
-
-    const uint8_t zero[6] = {0, 0, 0, 0, 0, 0};
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(zero, initiator.get_current_challenge(), 6);
+void test_live_challenge_is_not_replaced(void) {
+    mode2w::AuthenticationManager actuator;
+    actuator.begin(KEY);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    iohome::frame::IoFrame chal;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 0));
+    TEST_ASSERT_FALSE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 100));
+    // Once it times out a new one may start.
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR,
+                     mode2w::AuthenticationManager::DEFAULT_CHALLENGE_TIMEOUT_MS + 1));
 }
 
 void test_stray_response_does_not_cancel_the_handshake(void) {
-    // A 0x3D frame from a node we never challenged must not touch our state.
-    //
-    // It used to: verify_challenge_response() checked the MAC and nothing else,
-    // and burned the nonce on failure. So any 0x3D in radio range cancelled a
-    // pending handshake - a neighbouring pair of io-homecontrol devices doing
-    // their own exchange, or six arbitrary bytes from anyone with a radio. The
-    // genuine answer then arrived to an IDLE state and was rejected, and every
-    // 2W command was dropped for as long as it continued.
-    const uint8_t key[16] = {0x42};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
-    const uint8_t stranger[3] = {0xEE, 0xEE, 0xEE};
+    // A 0x3D from a node we never challenged, or addressed to someone else,
+    // must not touch our state - a neighbouring pair doing their own exchange
+    // would otherwise cancel ours.
+    const uint8_t STRANGER[3] = {0xEE, 0xEE, 0xEE};
+    mode2w::AuthenticationManager controller, actuator, other;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+    other.begin(KEY);
 
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
-
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
-
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    controller.note_request_sent(&cmd, 0);
+    iohome::frame::IoFrame chal;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 0));
     uint8_t nonce[6];
-    memcpy(nonce, initiator.get_current_challenge(), 6);
+    memcpy(nonce, actuator.get_current_challenge(), 6);
 
-    // Someone else's 0x3D, correctly signed for a different pair of nodes.
+    const uint8_t req[1] = {0x36};
     iohome::frame::IoFrame stray;
-    const uint8_t other_nonce[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
-    TEST_ASSERT_TRUE(responder.create_challenge_response(&stray, stranger, stranger, other_nonce));
-    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&stray, 100));
+    TEST_ASSERT_TRUE(other.create_challenge_response(&stray, STRANGER, STRANGER, nonce, req, 1));
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&stray, 100));
+    TEST_ASSERT_TRUE(actuator.has_active_challenge(100));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(nonce, actuator.get_current_challenge(), 6);
 
-    // Our challenge is untouched.
-    TEST_ASSERT_TRUE(initiator.has_active_challenge(100));
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(nonce, initiator.get_current_challenge(), 6);
-
-    // A response addressed to somebody else is ignored too, even from the node
-    // we did challenge.
     iohome::frame::IoFrame misaddressed;
-    TEST_ASSERT_TRUE(
-        responder.create_challenge_response(&misaddressed, stranger, actuator, nonce));
-    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&misaddressed, 100));
-    TEST_ASSERT_TRUE(initiator.has_active_challenge(100));
+    TEST_ASSERT_TRUE(other.create_challenge_response(&misaddressed, STRANGER, CONTROLLER, nonce, req, 1));
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&misaddressed, 100));
+    TEST_ASSERT_TRUE(actuator.has_active_challenge(100));
 
-    // And the real answer still completes the handshake.
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(
-        responder.create_challenge_response(&response, controller, actuator, request.data));
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 100));
-    TEST_ASSERT_TRUE(initiator.is_authenticated(100));
+    iohome::frame::IoFrame answer;
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, 100));
+    TEST_ASSERT_TRUE(actuator.verify_challenge_response(&answer, 100));
 }
 
 void test_auth_rejects_wrong_key(void) {
-    const uint8_t key[16] = {0x42};
     const uint8_t other_key[16] = {0x24};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
-
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager impostor;
-    initiator.begin(key);
+    mode2w::AuthenticationManager impostor, actuator;
     impostor.begin(other_key);
+    actuator.begin(KEY);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    impostor.note_request_sent(&cmd, 0);
+    iohome::frame::IoFrame chal, answer;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 0));
+    TEST_ASSERT_TRUE(impostor.answer_challenge(&chal, &answer, 10));
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&answer, 100));
+    TEST_ASSERT_FALSE(actuator.is_authenticated(100));
+    const uint8_t zero[6] = {0};
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(zero, actuator.get_current_challenge(), 6);
+}
 
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 0));
-
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(impostor.create_challenge_response(&response, controller, actuator,
-                                                        request.data));
-
-    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 100));
-    TEST_ASSERT_FALSE(initiator.is_authenticated(100));
+void test_unbound_challenge_cannot_be_answered_into_success(void) {
+    // A pairing 0x3C (create_challenge_request) authenticates no command, so no
+    // 0x3D can verify against it.
+    mode2w::AuthenticationManager device, controller;
+    device.begin(KEY);
+    controller.begin(KEY);
+    iohome::frame::IoFrame chal;
+    TEST_ASSERT_TRUE(device.create_challenge_request(&chal, CONTROLLER, ACTUATOR, 0));
+    TEST_ASSERT_FALSE(chal.authenticated);
+    const uint8_t req[1] = {0x31};
+    iohome::frame::IoFrame answer;
+    TEST_ASSERT_TRUE(controller.create_challenge_response(&answer, ACTUATOR, CONTROLLER,
+                                                          chal.data, req, 1));
+    TEST_ASSERT_FALSE(device.verify_challenge_response(&answer, 10));
 }
 
 void test_handshake_works_at_realistic_uptime(void) {
-    // Regression: generate_challenge() did not stamp the challenge with the
-    // current time, so it was timestamped at zero. Every handshake attempted
-    // more than challenge_timeout_ms_ after boot expired instantly - which
-    // tests using timestamps near zero cannot see.
-    const uint8_t key[16] = {0x42};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
-
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
-
-    // A device that has been up for a day.
+    // Regression: the challenge used to be timestamped at zero, so every
+    // handshake more than challenge_timeout_ms_ after boot expired instantly.
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
     const unsigned long uptime_ms = 86400000UL;
 
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller,
-                                                        uptime_ms));
-    TEST_ASSERT_TRUE(initiator.has_active_challenge(uptime_ms));
-
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
-                                                          request.data));
-
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, uptime_ms + 200));
-    TEST_ASSERT_TRUE(initiator.is_authenticated(uptime_ms + 200));
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    controller.note_request_sent(&cmd, uptime_ms);
+    iohome::frame::IoFrame chal, answer;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, uptime_ms));
+    TEST_ASSERT_TRUE(actuator.has_active_challenge(uptime_ms));
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, uptime_ms + 100));
+    TEST_ASSERT_TRUE(actuator.verify_challenge_response(&answer, uptime_ms + 200));
 }
 
 void test_auth_challenge_times_out(void) {
-    const uint8_t key[16] = {0x42};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+    actuator.set_challenge_timeout_ms(5000);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    controller.note_request_sent(&cmd, 1000);
+    iohome::frame::IoFrame chal, answer;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 1000));
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, 1000));
 
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
-    initiator.set_challenge_timeout_ms(5000);
-
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 1000));
-
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
-                                                         request.data));
-
-    // The timeout runs from the moment the challenge was generated (1000), not
-    // from boot - before the timestamp was recorded this test passed for the
-    // wrong reason.
-    TEST_ASSERT_FALSE(initiator.verify_challenge_response(&response, 1000 + 5001));
-    TEST_ASSERT_EQUAL(mode2w::ChallengeState::IDLE, initiator.peek_state());
+    TEST_ASSERT_FALSE(actuator.verify_challenge_response(&answer, 1000 + 5001));
+    TEST_ASSERT_EQUAL(mode2w::ChallengeState::IDLE, actuator.peek_state());
 }
 
 void test_auth_challenge_survives_up_to_the_timeout(void) {
-    const uint8_t key[16] = {0x42};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
-
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
-    initiator.set_challenge_timeout_ms(5000);
-
-    iohome::frame::IoFrame request;
-    TEST_ASSERT_TRUE(initiator.create_challenge_request(&request, actuator, controller, 1000));
-
-    iohome::frame::IoFrame response;
-    TEST_ASSERT_TRUE(responder.create_challenge_response(&response, controller, actuator,
-                                                         request.data));
-
-    // Exactly at the timeout is still inside the window.
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 1000 + 5000));
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+    actuator.set_challenge_timeout_ms(5000);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    controller.note_request_sent(&cmd, 1000);
+    iohome::frame::IoFrame chal, answer;
+    TEST_ASSERT_TRUE(actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 1000));
+    TEST_ASSERT_TRUE(controller.answer_challenge(&chal, &answer, 1000));
+    TEST_ASSERT_TRUE(actuator.verify_challenge_response(&answer, 1000 + 5000));
 }
 
 void test_auth_session_expires(void) {
-    const uint8_t key[16] = {0x42};
-    const uint8_t controller[3] = {0x01, 0x02, 0x03};
-    const uint8_t actuator[3] = {0x0A, 0x0B, 0x0C};
-
-    mode2w::AuthenticationManager initiator;
-    mode2w::AuthenticationManager responder;
-    initiator.begin(key);
-    responder.begin(key);
-    initiator.set_session_timeout_ms(30000);
-
-    iohome::frame::IoFrame request;
-    initiator.create_challenge_request(&request, actuator, controller, 0);
-    iohome::frame::IoFrame response;
-    responder.create_challenge_response(&response, controller, actuator, request.data);
-
-    TEST_ASSERT_TRUE(initiator.verify_challenge_response(&response, 1000));
-    TEST_ASSERT_TRUE(initiator.is_authenticated(20000));
-
-    // Regression: an authenticated session used to stay valid forever.
-    TEST_ASSERT_FALSE(initiator.is_authenticated(40000));
+    mode2w::AuthenticationManager controller, actuator;
+    controller.begin(KEY);
+    actuator.begin(KEY);
+    actuator.set_session_timeout_ms(30000);
+    iohome::frame::IoFrame cmd = make_command(ACTUATOR, CONTROLLER);
+    controller.note_request_sent(&cmd, 0);
+    iohome::frame::IoFrame chal, answer;
+    actuator.create_challenge_for(&chal, &cmd, ACTUATOR, 0);
+    controller.answer_challenge(&chal, &answer, 10);
+    TEST_ASSERT_TRUE(actuator.verify_challenge_response(&answer, 1000));
+    TEST_ASSERT_TRUE(actuator.is_authenticated(20000));
+    TEST_ASSERT_FALSE(actuator.is_authenticated(40000));
 }
 
 void test_auth_rejects_nullptr(void) {
     mode2w::AuthenticationManager auth;
-    const uint8_t key[16] = {0};
     const uint8_t node[3] = {1, 2, 3};
-    auth.begin(key);
+    auth.begin(KEY);
+    const uint8_t nonce[6] = {0};
+    const uint8_t req[1] = {0};
 
     iohome::frame::IoFrame frame;
     TEST_ASSERT_FALSE(auth.create_challenge_request(nullptr, node, node, 0));
     TEST_ASSERT_FALSE(auth.create_challenge_request(&frame, nullptr, node, 0));
-    TEST_ASSERT_FALSE(auth.create_challenge_response(&frame, node, node, nullptr));
+    TEST_ASSERT_FALSE(auth.create_challenge_response(&frame, node, node, nullptr, req, 1));
+    TEST_ASSERT_FALSE(auth.create_challenge_response(&frame, node, node, nonce, nullptr, 0));
+    TEST_ASSERT_FALSE(auth.create_challenge_for(&frame, nullptr, node, 0));
     TEST_ASSERT_FALSE(auth.verify_challenge_response(nullptr, 0));
+    TEST_ASSERT_FALSE(auth.note_request_sent(nullptr, 0));
+    TEST_ASSERT_FALSE(auth.answer_challenge(nullptr, &frame, 0));
+    TEST_ASSERT_FALSE(auth.take_verified_request(nullptr));
 }
 
 int main(int, char **) {
@@ -831,13 +919,18 @@ int main(int, char **) {
     RUN_TEST(test_auth_manager_initial_state);
     RUN_TEST(test_auth_manager_generates_unpredictable_challenges);
     RUN_TEST(test_auth_manager_reset);
+    RUN_TEST(test_2w_auth_matches_documented_capture);
+    RUN_TEST(test_2w_push_key_answer_matches_documented_capture);
     RUN_TEST(test_auth_handshake_succeeds);
-    RUN_TEST(test_auth_is_authenticated_with_binds_to_the_peer);
+    RUN_TEST(test_auth_rejects_response_without_mac);
+    RUN_TEST(test_validate_frame_with_key_rejects_plain_frames);
+    RUN_TEST(test_answer_only_for_our_pending_request);
     RUN_TEST(test_auth_rejects_replayed_response);
-    RUN_TEST(test_challenge_stays_usable_after_handshake);
-    RUN_TEST(test_failed_handshake_clears_challenge);
+    RUN_TEST(test_answer_is_bound_to_the_request);
+    RUN_TEST(test_live_challenge_is_not_replaced);
     RUN_TEST(test_stray_response_does_not_cancel_the_handshake);
     RUN_TEST(test_auth_rejects_wrong_key);
+    RUN_TEST(test_unbound_challenge_cannot_be_answered_into_success);
     RUN_TEST(test_handshake_works_at_realistic_uptime);
     RUN_TEST(test_auth_challenge_times_out);
     RUN_TEST(test_auth_challenge_survives_up_to_the_timeout);

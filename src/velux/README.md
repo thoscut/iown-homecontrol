@@ -55,17 +55,20 @@ VeluxWindow window(node_id, VeluxModel::GGL_ELECTRIC);
 // Enable rain protection
 window.set_rain_protection(true);
 
-// Set to ventilation position 2
-frame::IoFrame frame;
-window.create_ventilation_frame(&frame, src_node, 2);
-controller.transmit_frame(&frame);
+// Set to ventilation position 2: the window model picks the percentage, the
+// controller sends it (authenticated, with the rolling code).
+controller.set_position(node_id, window.get_ventilation_position(2));
 
 // Close because of rain: names the rain sensor (Command Originator 0x02) so it
-// outranks a user command. Use create_emergency_close_frame() (Originator 0xFF)
-// only for a genuine emergency, not for rain - the two carry different
-// originators and priorities.
-window.create_rain_close_frame(&frame, src_node);
-controller.transmit_frame(&frame);
+// outranks a user command. Use Originator 0xFF only for a genuine emergency,
+// not for rain - the two carry different originators and priorities.
+controller.set_originator(iohome::Originator::SENSOR_RAIN);
+controller.close(node_id);
+controller.set_originator(iohome::Originator::USER);
+
+// The create_*_frame() helpers (create_ventilation_frame(),
+// create_rain_close_frame(), ...) only build an IoFrame for inspection and
+// testing; sending goes through the public IoHomeControl API above.
 
 // Check rain sensor
 RainSensorStatus rain = VeluxWindow::parse_rain_sensor_status(&received_frame);
@@ -92,7 +95,7 @@ iown_homecontrol:
   cs_pin: 18
   rst_pin: 14
   dio0_pin: 26
-  dio1_pin: 33
+  dio1_pin: 35          # Heltec V2 (V1: 33)
   source_address: 0x1A380B
   acei: 0x61            # command priority - see "Command priority" below
   originator: USER
@@ -343,25 +346,9 @@ window.create_rain_close_frame(&frame, src_node);
 
 ### ESPHome Rain Protection
 
-```yaml
-binary_sensor:
-  - platform: template
-    name: "Rain Detected"
-    lambda: |-
-      // Query rain sensor from window
-      return check_rain_sensor();
-    filters:
-      - delayed_on: 10s    # Avoid false positives
-      - delayed_off: 300s  # Stay active 5min after rain
-
-automation:
-  - trigger:
-      - platform: state
-        entity_id: binary_sensor.rain_detected
-        to: "on"
-    action:
-      - cover.close: all_velux_windows
-```
+Rain shows up on air only as an Execute frame with Command Originator 0x02
+(the rain sensor). The ESPHome component does not expose it as a
+`binary_sensor` yet, so there is no rain entity to automate on.
 
 ## Finding Node IDs
 

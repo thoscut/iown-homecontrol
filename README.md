@@ -6,7 +6,7 @@
 
 # iown-homecontrol
 
-*io-homecontrol*&reg; [Documentation](https://velocet.github.io/iown-homecontrol) & Implementation in support of<br/><a href="https://www.somfy-group.com/en-en/news/2018-01-04-somfy-launches-its-so-open-with-somfy-program-allowing-easier-access-to-smart-home-soluti">Somfy's "So Open" commitment</a><br/><br/>:trollface:
+*io-homecontrol*&reg; [Documentation](docs/README.md) & Implementation in support of<br/><a href="https://www.somfy-group.com/en-en/news/2018-01-04-somfy-launches-its-so-open-with-somfy-program-allowing-easier-access-to-smart-home-soluti">Somfy's "So Open" commitment</a><br/><br/>:trollface:
 
 </div>
 
@@ -37,8 +37,8 @@
   - [X] Standard commands
   - [X] Advanced commands (Discovery, Auth, Pairing)
   - [ ] EMS2 Frame/CarrierSense: Infos needed!
-- [X] [Documentation](https://velocet.github.io/iown-homecontrol)
-  - [X] MkDocs version
+- [X] [Documentation](docs/README.md)
+  - [ ] MkDocs config (site not yet published)
   - [X] Device serial and QR/Barcode format
 
 ### Library
@@ -60,7 +60,7 @@
 
 ### Integration
 - [X] [ESPHome](#esphome) component for Home Assistant (covers, tilt, diagnostics)
-- [X] RadioLib integration (SX1276, SX1262, RFM69, RFM95)
+- [X] RadioLib integration (SX127x incl. RFM95, SX126x)
 - [X] [rtl_433](https://github.com/merbanan/rtl_433/blob/master/src/devices/somfy_iohc.c) - RF decoder
 - [X] Python crypto test suite
 - [X] ESPHome: authenticated 1W frames
@@ -151,7 +151,7 @@ iown_homecontrol:
   cs_pin: 18
   rst_pin: 14
   dio0_pin: 26
-  dio1_pin: 33
+  dio1_pin: 35   # Heltec V2 (V1: 33)
   radio_type: SX1276
   frequency: 868.95
 
@@ -171,6 +171,21 @@ cover:
 See [`esphome/example.yaml`](esphome/example.yaml) for a complete configuration
 example with board-specific pin mappings, tilt and diagnostic sensors.
 
+To pair, put the actuator in learn mode and call `id(iohc_hub).send_1w_pairing()`
+from a button lambda (`send_1w_remove()` unpairs):
+
+```yaml
+button:
+  - platform: template
+    name: "Pair io-homecontrol actuator"
+    on_press:
+      - lambda: 'id(iohc_hub).send_1w_pairing();'
+```
+
+`key_capture: true` logs a key that a 1W controller broadcasts in key-copy mode -
+in clear text, so switch it off afterwards. With `key_capture` off, key-transfer
+frames are also kept out of the DEBUG/VERBOSE hex logs.
+
 ### Compatible Hardware
 
 The recommended method is to use a LoRa32 board from HelTec or LilyGo. But there are many other boards, modules and combinations which work.
@@ -183,7 +198,7 @@ If not explicitly mentioned every board version is supported.
 
 | [HelTec](https://heltec.org/product-category/lora/lrnode/esp32-lora/)     | [LilyGo](https://www.lilygo.cc/collections/lora-or-gps) | AdaFruit                                                                                                                                                                       | Other                                                                                                                                   |
 | :-----------------------------------------------------------------------: | :-----------------------------------------------------: | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :-------------------------------------------------------------------------------------------------------------------------------------: |
-| [WiFi LoRa32](https://heltec.org/project/wifi-lora-32-v3/)                | LoRa32                                                  | [ESP32 Feather](https://www.adafruit.com/product/5900)<br/>+<br/>FeatherWing [RFM69HCW](https://www.adafruit.com/product/3229)/[RFM95W](https://www.adafruit.com/product/3231) | [FireBeetle ESP32](https://www.dfrobot.com/product-1590.html)<br/>+<br/>[LoRa 868MHz- Cover](https://www.dfrobot.com/product-1831.html) |
+| [WiFi LoRa32](https://heltec.org/project/wifi-lora-32-v3/)                | LoRa32                                                  | [ESP32 Feather](https://www.adafruit.com/product/5900)<br/>+<br/>FeatherWing [RFM95W](https://www.adafruit.com/product/3231)<br/>(not the RFM69HCW: SX1231 is unsupported) | [FireBeetle ESP32](https://www.dfrobot.com/product-1590.html)<br/>+<br/>[LoRa 868MHz- Cover](https://www.dfrobot.com/product-1831.html) |
 | [Wireless Bridge](https://heltec.org/project/wireless-bridge/)            | T-Beam                                                  |                                                                                                                                                                                |                                                                                                                                         |
 | [Wireless Tracker](https://heltec.org/project/wireless-tracker/)          | T3-S3                                                   |                                                                                                                                                                                |                                                                                                                                         |
 | [Wireless Stick](https://heltec.org/project/wireless-stick-v3/)           | T-Watch S3                                              |                                                                                                                                                                                |                                                                                                                                         |
@@ -209,7 +224,7 @@ io-homecontrol (iohc) is a half-duplex protocol in the 868 MHz band with 2 modes
 
 ### Protocol Details <!-- TODO: Link docs -->
 
-- [Documentation](https://velocet.github.io/iown-homecontrol)
+- [Documentation](docs/README.md)
   - Layer 1: [Radio](docs/radio.md)
   - Layer 2: [Link Layer](docs/linklayer.md)
   - Layer 3: [Commands](docs/commands.md)

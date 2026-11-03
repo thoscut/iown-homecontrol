@@ -9,9 +9,19 @@
  * layer and listens for frames, printing every one it accepts. Set
  * IOHC_NODE_ID and IOHC_SYSTEM_KEY to match your installation before use.
  *
- * MIT License
- * Copyright (c) Velocet
+ * Released under CC0 1.0 Universal - see the LICENSE file in the repository
+ * root.
+ *
+ * This file is the firmware's entry point, not part of the library. It sits in
+ * src/ because that is where PlatformIO looks for a project's sources, which
+ * also puts it in the library's source tree: a library consumer (PlatformIO
+ * via library.json, or the Arduino IDE, which compiles everything under src/)
+ * would otherwise get a second setup()/loop() and a board-table #error. So the
+ * whole file compiles to nothing unless IOHC_FIRMWARE_MAIN is defined, which
+ * only this repository's platformio.ini does ([env] build_flags).
  */
+
+#if defined(IOHC_FIRMWARE_MAIN)
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -140,12 +150,18 @@ static void on_raw_frame(const uint8_t* data, size_t len, int16_t rssi, float sn
 /// Report the pin map, so a radio that does not answer points at its own cause.
 static void print_pin_map() {
   Serial.println(F("[PINS] board: " IOHC_BOARD_NAME));
+  // Cast to int: a pin may be RADIOLIB_NC (an unsigned all-ones), printed as -1.
   Serial.printf("[PINS] CS=%d RST=%d SCK=%d MISO=%d MOSI=%d\n",
-                IOHC_PIN_CS, IOHC_PIN_RST, IOHC_PIN_SCK, IOHC_PIN_MISO, IOHC_PIN_MOSI);
+                static_cast<int>(IOHC_PIN_CS), static_cast<int>(IOHC_PIN_RST),
+                static_cast<int>(IOHC_PIN_SCK), static_cast<int>(IOHC_PIN_MISO),
+                static_cast<int>(IOHC_PIN_MOSI));
 #if defined(IOHC_RADIO_SX127X)
-  Serial.printf("[PINS] DIO0=%d DIO1=%d (SX127x)\n", IOHC_PIN_DIO0, IOHC_PIN_DIO1);
+  Serial.printf("[PINS] DIO0=%d DIO1=%d (SX127x)\n",
+                static_cast<int>(IOHC_PIN_DIO0), static_cast<int>(IOHC_PIN_DIO1));
 #else
-  Serial.printf("[PINS] BUSY=%d DIO1=%d (SX126x)\n", IOHC_PIN_BUSY, IOHC_PIN_DIO1);
+  Serial.printf("[PINS] BUSY=%d DIO1=%d (SX126x, TCXO %.1f V)\n",
+                static_cast<int>(IOHC_PIN_BUSY), static_cast<int>(IOHC_PIN_DIO1),
+                static_cast<double>(IOHC_TCXO_VOLTAGE));
 #endif
 }
 
@@ -175,10 +191,41 @@ void setup() {
   Serial.println(F("iown-homecontrol starting"));
   print_pin_map();
 
+#if defined(IOHC_BOARD_HELTEC_V4)
+  // See board_pins.h: the V4's GC1109 front end is not powered or switched by
+  // this firmware, so say so where a bring-up log will show it.
+  Serial.println(F("[WARN] Heltec V4: the GC1109 RF front end (VEXT GPIO 36,"));
+  Serial.println(F("[WARN] LDO GPIO 7, enable GPIO 2, TX select GPIO 46) is NOT"));
+  Serial.println(F("[WARN] driven by this firmware; RX/TX through it will likely"));
+  Serial.println(F("[WARN] fail. Use the ESPHome component (vext_pin, rf_frontend)."));
+#endif
+
   // Bind SPI to the radio pins before RadioLib touches the bus.
   iohc_board_spi_begin();
 
-  int16_t state = radio.beginFSK();
+  // The parameters are spelled out rather than left to RadioLib's defaults
+  // (434 MHz, 4.8 kbps, 10 dBm, ...), mainly to reach the SX126x TCXO voltage:
+  // RadioLib latches it in begin() and its 1.6 V default is too low for the
+  // Heltec V3/V4 oscillator (see IOHC_TCXO_VOLTAGE in board_pins.h).
+  // configure_radio() programs the same values again below; the RX bandwidth
+  // is RadioLib's default for each family, which configure_radio() leaves
+  // alone. 14 dBm is the EU limit for these channels.
+#if defined(IOHC_RADIO_SX127X)
+  int16_t state = radio.beginFSK(IOHC_START_CHANNEL,         // MHz
+                                 iohome::BIT_RATE,           // 38.4 kbps
+                                 iohome::FREQ_DEVIATION,     // 19.2 kHz
+                                 125.0f,                     // RX bandwidth, kHz (RadioLib default)
+                                 14,                         // dBm
+                                 iohome::PREAMBLE_LENGTH);   // bits
+#else
+  int16_t state = radio.beginFSK(IOHC_START_CHANNEL,         // MHz
+                                 iohome::BIT_RATE,           // 38.4 kbps
+                                 iohome::FREQ_DEVIATION,     // 19.2 kHz
+                                 156.2f,                     // RX bandwidth, kHz (RadioLib default)
+                                 14,                         // dBm
+                                 iohome::PREAMBLE_LENGTH,    // bits
+                                 IOHC_TCXO_VOLTAGE);         // V on DIO3, 0 = crystal
+#endif
   if (state != RADIOLIB_ERR_NONE) {
     halt("radio.beginFSK", state);
   }
@@ -194,12 +241,19 @@ void setup() {
   // On air, each frame byte is sent UART-framed - a start bit, eight data bits,
   // a stop bit - so a 34-byte frame occupies up to 43 bytes. The library frames
   // on transmit and de-frames on receive; the radio just needs a fixed length
-  // wide enough to capture a whole framed frame. IoHomeControl narrows this to
-  // each frame's wire length before sending and widens it back afterwards.
-  state = radio.fixedPacketLengthMode(iohome::phy::uart_wire_size(iohome::FRAME_MAX_SIZE) + 8);
+  // wide enough to capture a whole framed frame. Use the same receive length
+  // the controller restores after every transmit, so the two never disagree.
+  state = radio.fixedPacketLengthMode(iohome::IoHomeControl::RX_CAPTURE_SIZE);
   if (state != RADIOLIB_ERR_NONE) {
     halt("radio.fixedPacketLengthMode", state);
   }
+
+  // A fixed length suits receive, but a transmit must be exactly one frame's
+  // wire length or the radio pads it with trailing bytes. fixedPacketLengthMode()
+  // lives on the concrete radio class, out of reach of the PhysicalLayer
+  // pointer, so the controller can only narrow the length before each send and
+  // widen it back afterwards once this hook is installed.
+  controller.use_radio_packet_length(radio);
 
   // Everything down to DEBUG, which includes the hex dump of each frame sent.
   // Drop to LogLevel::INFO if the transmit dumps get in the way.
@@ -311,3 +365,5 @@ void loop() {
                   static_cast<unsigned long>(stats.malformed));
   }
 }
+
+#endif  // IOHC_FIRMWARE_MAIN

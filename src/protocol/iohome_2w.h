@@ -143,19 +143,49 @@ enum class ChallengeState : uint8_t {
 /**
  * @brief Challenge-Response Authentication Manager
  *
- * Handles 2W authentication using a challenge-response mechanism.
+ * Implements 2W authentication as docs/linklayer.md ("2W Authentication")
+ * documents it and the captures there show. 2W frames carry no MAC. Instead:
+ *
+ *   A -> B   command, plain                    48 04 FEEFEE F00F00 36 9A02
+ *   B -> A   0x3C, plain, 6-byte challenge     0E 00 F00F00 FEEFEE 3C 123456789ABC 19DB
+ *   A -> B   0x3D, plain, 6-byte answer        0E 04 FEEFEE F00F00 3D C7FDC0668818 B1E3
+ *   B        executes the command
+ *
+ * The answer is create_2w_hmac(command id + parameters of A's original
+ * command, B's challenge, system key). With the key 0102...1516 and the frames
+ * above that is C7FDC0668818 - the documented capture.
+ *
+ * This class plays both parts, with separate state for each:
+ *
+ *  - **Initiator** (we sent the command): note_request_sent() remembers the
+ *    command; answer_challenge() turns the peer's 0x3C into our 0x3D. It only
+ *    answers for a request WE sent, to the node we sent it to, within
+ *    response_window_ms. Signing whatever nonce anyone sends would be a
+ *    chosen-input MAC oracle; signing only our own pending request is not
+ *    useful to an attacker, because the actuator picks its own fresh nonce.
+ *
+ *  - **Challenger** (a peer sent us a command): create_challenge_for() holds
+ *    the peer's command and emits a 0x3C with a CSPRNG nonce;
+ *    verify_challenge_response() checks the peer's 0x3D in constant time
+ *    against the MAC over the held command, and take_verified_request() then
+ *    hands that command out, once.
  *
  * Challenges are drawn from the platform CSPRNG. If the platform has no secure
- * random source, generate_challenge() fails rather than emitting a predictable
- * nonce - a predictable challenge would let an attacker precompute a valid
- * response and defeat the whole handshake.
+ * random source, generating one fails rather than emitting a predictable nonce.
  */
 class AuthenticationManager {
 public:
-  /// A session stays authenticated for this long before a new handshake is required.
+  /// After a successful verification, is_authenticated() stays true this long.
   static constexpr uint32_t DEFAULT_SESSION_TIMEOUT_MS = 30000;
   /// A pending challenge expires after this long without an answer.
   static constexpr uint32_t DEFAULT_CHALLENGE_TIMEOUT_MS = 5000;
+  /// How long after sending a command we answer the peer's 0x3C for it.
+  static constexpr uint32_t DEFAULT_RESPONSE_WINDOW_MS = 1000;
+  /// How many 0x3C for one pending request we answer (the peer re-challenges
+  /// when our 0x3D is lost).
+  static constexpr uint8_t MAX_ANSWERS_PER_REQUEST = 3;
+  /// Largest command (id + parameters) the MAC can cover.
+  static constexpr size_t MAX_REQUEST_SIZE = 1 + FRAME_MAX_DATA_SIZE;
 
   AuthenticationManager();
 
@@ -174,9 +204,7 @@ public:
   /**
    * @brief Generate a new random challenge
    *
-   * Starts the challenge timeout, so the caller must pass the current time -
-   * without it the challenge is timestamped at zero and every handshake
-   * attempted more than challenge_timeout_ms_ after boot expires instantly.
+   * Starts the challenge timeout, so the caller must pass the current time.
    *
    * @param challenge_out Output buffer (6 bytes)
    * @param now_ms Current time in milliseconds
@@ -184,10 +212,17 @@ public:
    */
   bool generate_challenge(uint8_t challenge_out[HMAC_SIZE], unsigned long now_ms);
 
+  // --------------------------------------------------------------------------
+  // Challenger role
+  // --------------------------------------------------------------------------
+
   /**
-   * @brief Create a challenge request frame (command 0x3C)
+   * @brief Create a plain challenge frame (0x3C) not bound to any command
    *
-   * @param now_ms Current time in milliseconds; starts the challenge timeout
+   * Used by 2W pairing, where the 0x3C answers an "ask challenge" (0x31) and
+   * its nonce masks the key transfer that follows (recover_2w_key()). A 0x3D
+   * cannot be verified against it: there is no command to authenticate.
+   *
    * @return true on success
    */
   bool create_challenge_request(
@@ -198,40 +233,100 @@ public:
   );
 
   /**
-   * @brief Create a challenge response frame (command 0x3D)
+   * @brief Challenge a command a peer sent us (emit 0x3C, hold the command)
    *
-   * @param received_challenge Challenge from the request (6 bytes)
-   * @return true on success
+   * The 0x3C goes to the command's source, from its destination (us). The
+   * command is held until verify_challenge_response() accepts the matching
+   * 0x3D, or the challenge times out. A live challenge is not replaced, so a
+   * stream of plain frames cannot cancel a handshake in progress.
+   *
+   * @param challenge_out Receives the 0x3C frame to transmit
+   * @param request The plain command received from the peer
+   * @param own_node Our node ID (the 0x3C's source)
+   * @return false if a challenge is already pending, on bad input, or with no
+   *         secure random source
+   */
+  bool create_challenge_for(frame::IoFrame* challenge_out,
+                            const frame::IoFrame* request,
+                            const uint8_t own_node[NODE_ID_SIZE],
+                            unsigned long now_ms);
+
+  /**
+   * @brief Verify a challenge answer (0x3D) against the held command
+   *
+   * The 0x3D must be plain, come from the node we challenged, be addressed to
+   * us, and carry exactly create_2w_hmac(held command, our nonce, key),
+   * compared in constant time. A frame from any other node, or to any other
+   * node, is ignored without touching the state - a neighbouring pair doing
+   * their own exchange must not cancel ours. A 0x3D from our peer that fails
+   * (wrong length or wrong MAC) consumes the challenge, so an attacker cannot
+   * grind guesses against one nonce. On success the nonce is consumed too,
+   * which makes a replayed 0x3D useless.
+   *
+   * @return true if the answer proves the key for the held command
+   */
+  bool verify_challenge_response(const frame::IoFrame* frame, unsigned long now_ms);
+
+  /**
+   * @brief Hand out the command a successful verification authenticated
+   *
+   * Returns it once; later calls return false until the next verification.
+   */
+  bool take_verified_request(frame::IoFrame* out);
+
+  // --------------------------------------------------------------------------
+  // Initiator role
+  // --------------------------------------------------------------------------
+
+  /**
+   * @brief Remember a 2W command we are about to send, so its 0x3C can be answered
+   *
+   * Replaces any previous pending request.
+   */
+  bool note_request_sent(const frame::IoFrame* request, unsigned long now_ms);
+
+  /// Forget the pending request (e.g. its transmission failed).
+  void clear_pending_request();
+
+  /// Whether a request of ours is still waiting for its challenge.
+  bool has_pending_request(unsigned long now_ms) const;
+
+  /**
+   * @brief Answer a peer's 0x3C for our pending request (emit 0x3D)
+   *
+   * Only answers a plain 0x3C with a 6-byte challenge, from the node our
+   * pending request went to, addressed to the node it came from, within
+   * response_window_ms of sending, and at most MAX_ANSWERS_PER_REQUEST times.
+   *
+   * @param challenge_frame The 0x3C received
+   * @param response_out Receives the 0x3D to transmit
+   * @return true if response_out holds an answer to send
+   */
+  bool answer_challenge(const frame::IoFrame* challenge_frame,
+                        frame::IoFrame* response_out,
+                        unsigned long now_ms);
+
+  /**
+   * @brief Build a 0x3D answering @p challenge for @p request_data
+   *
+   * The low-level builder behind answer_challenge(): the payload is
+   * create_2w_hmac(request_data, challenge, key), the frame is plain. Callers
+   * must only use it for a request they actually sent - see the class note.
+   *
+   * @param request_data Command id + parameters of the request being authenticated
    */
   bool create_challenge_response(
     frame::IoFrame* frame,
     const uint8_t dest_node[NODE_ID_SIZE],
     const uint8_t src_node[NODE_ID_SIZE],
-    const uint8_t received_challenge[HMAC_SIZE]
+    const uint8_t challenge[HMAC_SIZE],
+    const uint8_t* request_data,
+    size_t request_len
   );
 
-  /**
-   * @brief Verify a challenge response
-   *
-   * On success the challenge is consumed: a replayed response is rejected
-   * because the manager leaves the CHALLENGE_SENT state. A response from the
-   * node we challenged that fails its MAC consumes the challenge too, so an
-   * attacker cannot grind guesses against one known nonce.
-   *
-   * A frame from any *other* node, or addressed to any other node, is ignored
-   * without touching the state. That distinction matters: burning the nonce on
-   * every failed 0x3D meant a neighbouring pair of devices doing their own
-   * exchange - or six arbitrary bytes from anyone with a radio - cancelled a
-   * handshake in progress, and the genuine answer then arrived to an IDLE
-   * state. The peer is remembered by create_challenge_request(); a challenge
-   * made with generate_challenge() alone has no peer to compare against and is
-   * verified on the MAC only.
-   *
-   * @param frame Received response frame
-   * @param now_ms Current time in milliseconds
-   * @return true if valid
-   */
-  bool verify_challenge_response(const frame::IoFrame* frame, unsigned long now_ms);
+  // --------------------------------------------------------------------------
+  // Pairing
+  // --------------------------------------------------------------------------
 
   /**
    * @brief Recover a system key pushed to us in a 2W key transfer (0x32)
@@ -241,10 +336,6 @@ public:
    * create_challenge_request(), which stores the nonce), the peer replies with
    * a 0x32 carrying its key masked against an IV built from that nonce and the
    * frame that requested the transfer. This undoes the mask.
-   *
-   * The mask uses only the public transfer key, the challenge and the request
-   * frame - never this node's system key - so it works before any key is
-   * shared, which is the whole point of a key transfer.
    *
    * @param key_frame The received 0x32 frame
    * @param request_frame_data The frame that seeded the IV: for the documented
@@ -260,58 +351,53 @@ public:
   /**
    * @brief Get the current challenge (6 bytes)
    *
-   * Only meaningful while has_active_challenge() is true; the buffer is zeroed
-   * otherwise.
+   * Only meaningful while has_active_challenge() is true; zeroed otherwise.
    */
   const uint8_t* get_current_challenge() const { return current_challenge_; }
 
   /**
-   * @brief Whether a challenge is available to bind MACs to
+   * @brief Whether a challenge we sent is still waiting for its answer
    *
-   * True from the moment a challenge is generated until the session expires or
-   * is reset. Expires the state as a side effect, like get_state().
-   *
-   * @param now_ms Current time in milliseconds
+   * Expires the state as a side effect, like get_state().
    */
   bool has_active_challenge(unsigned long now_ms);
 
   /**
-   * @brief Get the authentication state, expiring it if it has timed out
-   *
-   * @param now_ms Current time in milliseconds
+   * @brief Get the challenger state, expiring it if it has timed out
    */
   ChallengeState get_state(unsigned long now_ms);
 
   /**
-   * @brief Get the last known authentication state without expiring it
+   * @brief Get the last known challenger state without expiring it
    */
   ChallengeState peek_state() const { return state_; }
 
   /**
-   * @brief Whether the session is currently authenticated
+   * @brief Whether a peer recently proved the key (a 0x3D verified)
    */
   bool is_authenticated(unsigned long now_ms) { return get_state(now_ms) == ChallengeState::AUTHENTICATED; }
 
   /**
-   * @brief Whether an authenticated session exists AND it is bound to this peer
-   *
-   * A 2W session's challenge nonce only signs frames between the two nodes that
-   * negotiated it. Reusing a session established with actuator A to command
-   * actuator B produces a frame B never authenticated and silently rejects, so
-   * a caller must confirm the session belongs to the target before sending.
+   * @brief Whether the last verified 0x3D came from this peer, recently
    */
   bool is_authenticated_with(const uint8_t peer[NODE_ID_SIZE], unsigned long now_ms);
 
   /**
-   * @brief Reset the authentication state and wipe the stored challenge
+   * @brief Reset the challenger state and wipe the stored challenge
+   *
+   * The initiator's pending request is left alone; see clear_pending_request().
    */
   void reset();
 
   void set_challenge_timeout_ms(uint32_t timeout_ms) { challenge_timeout_ms_ = timeout_ms; }
   void set_session_timeout_ms(uint32_t timeout_ms) { session_timeout_ms_ = timeout_ms; }
+  void set_response_window_ms(uint32_t window_ms) { response_window_ms_ = window_ms; }
 
 protected:
   uint8_t system_key_[AES_KEY_SIZE];
+  bool key_set_;
+
+  // Challenger
   uint8_t current_challenge_[HMAC_SIZE];
   /// Who we challenged, and as whom - only a response between these two counts.
   uint8_t peer_node_[NODE_ID_SIZE];
@@ -321,7 +407,20 @@ protected:
   unsigned long state_timestamp_ms_;
   uint32_t challenge_timeout_ms_;
   uint32_t session_timeout_ms_;
-  bool key_set_;
+  /// The peer's command the pending challenge authenticates.
+  frame::IoFrame held_request_;
+  bool held_valid_;
+  bool verified_ready_;
+
+  // Initiator
+  uint8_t pending_request_[MAX_REQUEST_SIZE];
+  size_t pending_len_;
+  uint8_t pending_dest_[NODE_ID_SIZE];
+  uint8_t pending_src_[NODE_ID_SIZE];
+  unsigned long pending_ts_ms_;
+  uint8_t pending_answers_;
+  bool pending_valid_;
+  uint32_t response_window_ms_;
 };
 
 // ============================================================================

@@ -17,7 +17,7 @@
 # the component knows which slot each family wants them in.
 #
 #   Heltec WiFi LoRa 32 V2 / V2.1 (SX1276):
-#     cs_pin: 18, rst_pin: 14, dio0_pin: 26, dio1_pin: 33
+#     cs_pin: 18, rst_pin: 14, dio0_pin: 26, dio1_pin: 35   (V1: 33)
 #     sck_pin: 5, mosi_pin: 27, miso_pin: 19
 #
 #   Heltec WiFi LoRa 32 V3 (SX1262):
@@ -74,7 +74,7 @@ iown_homecontrol:
   cs_pin: 18            # SPI Chip Select
   rst_pin: 14           # Radio Reset
   dio0_pin: 26          # Radio DIO0 / IRQ
-  dio1_pin: 33          # Radio DIO1
+  dio1_pin: 35          # Radio DIO1 (Heltec V2; V1 uses 33)
   # Custom SPI pins are optional, but must be given as a complete set.
   sck_pin: 5            # SPI Clock
   mosi_pin: 27          # SPI MOSI
@@ -105,9 +105,9 @@ iown_homecontrol:
   acei: 0x61
   originator: USER
 
-  # Experimental: update cover positions from frames the actuators send.
-  # Off by default because those frames are not authenticated here, so a
-  # spoofed frame could show a wrong position in Home Assistant.
+  # Update cover positions from frames the actuators send. Frames are MAC-
+  # and rolling-code-verified before use (see docs/SECURITY-MODEL.md); off by
+  # default because it needs system_key.
   position_feedback: false
 
 # Cover entities for io-homecontrol blinds/shutters

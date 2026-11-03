@@ -1,7 +1,7 @@
 # Hardware bring-up
 
 Everything this library claims about the io-homecontrol wire format is checked
-against captures in `docs/` and reproduced by 234 host-run tests. The core path
+against captures in `docs/` and reproduced by the host-run unit tests in `test/`. The core path
 has now also been checked against a **physical actuator** on a Heltec V4: it
 pairs, it obeys open/close/position/ventilation (the actuator actually moves),
 and its own frames decode byte-correct. What a laptop still cannot close is the
@@ -34,14 +34,15 @@ settle.
   The V4's radio pins are the V3's - CS 8, RST 12, BUSY 13, DIO1 14, SCK 9,
   MISO 11, MOSI 10 - confirmed against Meshtastic's `variants/esp32s3/heltec_v4`
   board definition rather than guessed. Two things about it are *not* like the
-  V3, and neither is handled by this firmware environment:
+  V3:
 
   - **The TCXO wants 1.8 V, not RadioLib's default 1.6 V.** RadioLib applies
     the default from `beginFSK()`, so the oscillator does start - just below
     its rated supply. Worse, `SX126x::config()` reacts to an oscillator start
     error by silently falling back to a plain crystal, which the V4 does not
     have. The result is a radio that initialises without complaint and sits on
-    the wrong frequency.
+    the wrong frequency. The PlatformIO firmware now passes 1.8 V on the
+    Heltec V3 and V4 environments.
   - **The V4.2 has a GC1109 PA/LNA in front of the antenna** that has to be
     powered (VEXT on GPIO 36, active low; FEM LDO on GPIO 7; chip enable on
     GPIO 2) and whose TX/RX select line (GPIO 46) must follow the radio's mode.
@@ -49,7 +50,8 @@ settle.
 
   Both are configurable through the ESPHome component (`tcxo_voltage`,
   `vext_pin`, `rf_frontend`); see `esphome/example.yaml`. The PlatformIO
-  firmware in `src/` does not expose them yet.
+  firmware in `src/` sets the TCXO voltage but does not drive the front end
+  yet.
 
   The **V4.3 is a different board**: it uses a KCT8103L front end on other pins
   and lets the SX1262's own DIO2 do the TX/RX switching. Do not apply the V4.2
@@ -119,11 +121,10 @@ To find the right macro name for a board, `tools/list_board_macros.py`.
 
 ### The V4 in particular
 
-`[env:heltec_wifi_lora_32_V4]` carries the **V3's** radio pins, because
-PlatformIO has no V4 manifest and nobody has confirmed the numbers. Step 1 is
-exactly the test: if it reaches "Listening", the pins are right and the entry
-can be marked confirmed. If it prints `-2`, correct the `IOHC_PIN_*` flags in
-`platformio.ini` and it is settled either way in two minutes.
+`[env:heltec_wifi_lora_32_V4]` borrows the V3 board manifest (PlatformIO has
+none for the V4) and supplies the radio pins through `IOHC_BOARD_CUSTOM`. The
+pins are confirmed, both against Meshtastic's board definition and on hardware.
+If a V4 still prints `-2`, suspect the TCXO voltage (above) before the pin map.
 
 ---
 
@@ -289,12 +290,11 @@ which works for receiving; for transmitting, install the length hook so each
 frame is sent at its own length:
 
 ```cpp
-controller.set_packet_length_callback(
-  [](uint8_t len, void* ctx) -> int16_t {
-    return static_cast<SX1276*>(ctx)->fixedPacketLengthMode(len);
-  },
-  &radio);
+controller.use_radio_packet_length(radio);
 ```
+
+It works for any RadioLib class with `fixedPacketLengthMode(uint8_t)` (SX1276,
+SX1262, ...) and installs the `set_packet_length_callback` hook for you.
 
 See `docs/RADIO-SETUP.md`.
 

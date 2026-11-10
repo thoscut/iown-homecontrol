@@ -10,7 +10,7 @@ ESPHome integration (`esphome/components/iown_homecontrol/`).
 **Current Status: BETA**
 
 The protocol layer is verified against the byte-for-byte captures in `docs/`,
-covered by 234 host-run unit tests, and hardened against the receive path being
+covered by the host-run unit tests in `test/`, and hardened against the receive path being
 attacker-controlled. The core path is now also confirmed on **real hardware**:
 on a Heltec V4 a physical io-homecontrol actuator pairs, obeys our
 open/close/position/ventilation commands (it actually moves), and its own frames
@@ -118,7 +118,7 @@ claim.
 | V37 | High | ESPHome cover | Tilt was sent uninverted. FP1 shares the Main Parameter's scale, which counts closure, while ESPHome counts openness - so a request to open the slats closed them. The position path in the same file inverts in three places. |
 | V38 | Medium | `src/velux/iohome_velux.h` | `create_tilt_frame()` took `tilt_percent` with no direction stated while its sibling takes an explicit `percent_open`; the implementation treated it as closure. That ambiguity is what V37 read the wrong way. It now takes `percent_open` and inverts internally. |
 | V39 | **High** | `platformio.ini`, `.github/workflows/platformio.yml` | `pio run` builds only `default_envs`, so CI had always compiled exactly one board. Four entries in `src/board_pins.h` were keyed on macro names PlatformIO does not define - `ARDUINO_TTGO_LORA32_V21NEW`, `ARDUINO_TTGO_LORA32_V1`, `ARDUINO_TBEAM`, `ARDUINO_HELTEC_WIFI_LORA_32_V3` - and every one of those boards fell through to "unknown board" without a word. There is now an environment per board and a CI job that builds all of them. |
-| V40 | Low | ESPHome component | The CRC and MAC initial value were duplicated from `src/protocol/` with nothing checking they agreed. They did - but so did the 2W key transfer, right up until it did not. Now extracted into a dependency-free header and compared byte for byte by `test_esphome_crypto`. |
+| V40 | Low | ESPHome component | The CRC and MAC initial value were duplicated from `src/protocol/` with nothing checking they agreed. They did - but so did the 2W key transfer, right up until it did not. Now extracted into a dependency-free header and compared byte for byte by `test_esphome_crypto` (superseded by V51: `tools/sync_esphome_protocol.py`, CI-checked). |
 | V41 | **High** | ESPHome component | The SX1262 path handed RadioLib the pins in the SX127x order, so an SX1262 only worked if you put its DIO1 in `dio0_pin` and its BUSY in `dio1_pin` - which is what the example config told people to do. Filling the fields in with what the pins are actually called produced a radio whose interrupt never fired. Same defect as V31, in the other implementation. The component now takes `busy_pin`, builds the Module per family, and the schema rejects every combination that cannot be wired. |
 | V42 | Medium | ESPHome `__init__.py` | The component pinned RadioLib 7.1.2 while `platformio.ini` pinned 7.7.1, so the two halves of the repository compiled against different versions of the same library and only the firmware side was covered by `check_radiolib_mock.sh`. CI now compares the two pins. |
 | V43 | Medium | `docs/devices/` | The tree carried both `Velux/` and `velux/` - 46 files each, 57 MB duplicated, and seven pairs that were not byte-identical. macOS and Windows use case-insensitive filesystems by default, so git cannot check both out: one overwrites the other and the working tree reads as permanently modified for the pairs that differ. The lower-case tree was kept and CI now rejects any two tracked paths that collide when lower-cased. |
@@ -160,6 +160,8 @@ claim.
 | V75 | Medium | `.github/workflows/` | An eleventh review round re-verified round 10's CI fixes and re-confirmed the code; the code re-confirmation and doc-count lenses returned clean, leaving two more non-code findings - both the same class as round 10's. **`include/**` missing from `tests.yml` triggers (Medium):** exactly the gap round 10 fixed for `scripts/**`, left for `include/`. `tests.yml` carries guards that exist only to protect `include/` - the "Compile the C headers as C" step (`gcc -I include` on a probe that catches an `enum class` inside an `extern "C"` block, which `include/iown_node_types.h` still has) and the `_Static_assert` frame-length-macro probe against `include/iown_frame.h` - yet `include/**` was in neither path filter. An include-only change (e.g. flipping `IOWN_FRAME_SIZE_BIAS`, which `pio run`/CodeQL compile green) would skip the one workflow written to catch it. Added `include/**` to both path lists; `tests.yml` now triggers on every directory it guards. **Stale `arduino-lint.yml` header comment (Low):** the header argued for `library-manager: false` because "three tracked .exe files ... block addition to the index" and pointed at a nonexistent `K10`. All false now: the actual config is `library-manager: submit`, `git ls-files` shows zero tracked `.exe` files (removed in V47), and there is no `K10` (V68 already scrubbed one phantom K10 but missed this copy). Rewrote the comment to state that submit mode passes clean since V47 removed the executables, and repointed the reference at V47. |
 | V76 | Low | `.github/workflows/codeql.yml`, `keywords.txt` | A twelfth review round swept every workflow, manifest and doc cross-reference in one pass and re-confirmed the code a third time; the code and doc-crossref lenses returned clean, leaving two more Low non-code nits of the same staleness class. **Stale CodeQL header (Low):** `codeql.yml`'s header told the reader to "modify the if step" and edit a "commented block [that] configures Python and PlatformIO" - neither exists; the file builds via an unconditional "Build for analysis" g++ step with `build-mode: manual` already set (carried over verbatim from GitHub's CodeQL starter template). Rewrote the header to describe the actual build step. **Stale keyword (Low):** `keywords.txt` listed `DeviceType`, an enum renamed to `NodeType` back at V59 (`git grep` finds `DeviceType` in no `src/`/`include/` source), while the current public `NodeType` enum (`iohome_constants.h`) was unlisted - only Arduino IDE syntax coloring is affected. Replaced the entry with `NodeType`. |
 | V77 | **Critical** | ESPHome component, `IoHomeControl`, `iohome_frame.cpp` | 1W commands went out with order bits 00 in ctrl0 and the sequence number low byte first. Every captured remote command has order 11 (ctrl0 `0xF6`) and keeps its first sequence byte fixed while the second steps per press (`04 9B`..`04 A2`, `docs/devices/velux/captures/`). An actuator silently ignores an order-00 command, since MAC and CRC still check out, so no 1W command could have moved anything. The fix was found on hardware on a side branch and is now in both implementations: order 11 on every authenticated 1W command, the sequence high byte first, and `get_rolling_code()` reading it the same way so the receive-side replay check sees the counter real remotes send. The component also gains `send_1w_pairing()`/`send_1w_remove()`, an `initial_rolling_code` option, and a 10 dBm default TX power (20 dBm browns out a USB-powered Heltec). |
+| V78 | **High** | `iohome_replay_guard`, `iohome_frame`, `iohome_2w`, `IoHomeControl`, ESPHome component | Expert review round (protocol/crypto, firmware, ESPHome, security/CI, docs). **Replay by re-addressing:** the MAC does not cover the addresses, and an unknown source was accepted at any sequence, so a recorded frame with a changed source byte replayed without limit - now a 32-entry MAC ring shared across sources plus an optional strict known-peer mode (on in ESPHome with `position_feedback`). **`validate_frame()` accepted MAC-less frames when given a key**, so a plain 0x3D authenticated a session - now rejected. **2W authentication reworked to `docs/linklayer.md`:** 2W frames carry no trailer; the actuator challenges with a plain 0x3C and the controller answers 0x3D with the MAC over its pending request (only its own, to that peer, within 1 s) - verified against both documented captures; host-tested only, not yet on hardware. ESPHome: rolling-code reservation committed to flash immediately (was up to 60 s late), key-transfer frames kept out of DEBUG/VERBOSE hex dumps unless `key_capture`, no STOP cutting native positioning short, tilt freezes the travel estimate. Library: TX power capped at 14 dBm (EU), key frames redacted in TX log, failed rolling-code save aborts the send, pairing window auto-closes after 120 s, `FRAME_MAX_DATA_SIZE` 21 → 23. Firmware/packaging: `main.cpp` no longer compiled into library consumers, 1.8 V TCXO on Heltec V3/V4, packet-length hook installed, CC0 licence metadata. CI: key-material scanner catches base64/xxd/offset-hex/commented arrays and no longer skips paths with spaces; least-privilege workflow permissions, pinned codespell and ESPHome (2026.6.5). Known gap: 2W key push still differs from the documented 0x32 challenge flow. |
+| V79 | Low | `scripts/rtl_433/` | A third-party Windows rtl_433 nightly (`rtl_433-msvc-nightly-rtlsdrblog.7z`, 464 KB) was tracked unverified. Removed; the folder's README now points to https://github.com/merbanan/rtl_433/releases, as V47 did for the executables. |
 
 ### 🔶 KNOWN Issues (Not Yet Fixed)
 
@@ -210,7 +212,7 @@ model. Summary of what remains, by design of the protocol:
 | Receive path | ✅ Complete | Interrupt driven, CRC → MAC → replay, with statistics |
 | Frequency hopping | ✅ Complete | Microsecond timing |
 | Device discovery | ✅ Complete | Collects multiple devices, honours its timeout |
-| Device pairing | ✅ 1W + 2W | 2W push (0x31/0x3C/0x32/0x33) and pull (0x38/0x32) both run end to end, host-tested; not yet tried against hardware (K1) |
+| Device pairing | ✅ 1W + 2W | 2W push (0x31/0x3C/0x32/0x33) and pull (0x38/0x32) both run end to end, host-tested. 1W pairing is confirmed on hardware (V77); 2W pairing is host-tested only (K1) |
 | Beacon handling | ✅ Complete | |
 | Rolling code persistence | ✅ Complete | Block-reserved NVS writes |
 | Memory management | ✅ Complete | Destructor, `nothrow`, non-copyable |
@@ -246,14 +248,14 @@ model. Summary of what remains, by design of the protocol:
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Unit tests | ✅ 234 tests | 9 suites, ASan + UBSan by default |
+| Unit tests | ✅ Host-run (`test/`) | 9 suites, ASan + UBSan by default |
 | Spec conformance | ✅ Complete | Three documented captures replayed byte for byte |
 | Parser robustness | ✅ Complete | Control-byte sweep plus 7000 fuzz rounds through the full receive path, under ASan and UBSan |
 | Mutation checks | ✅ Complete | Eight deliberate regressions - inverted mode bit, wrong size bias, dropped ACEI check, disabled replay guard, always-true MAC comparison, constant-seeded RNG, ignored log level, log message used as its own format string - are each caught by the suite |
 | ESPHome config validation | ✅ Complete | Positive and six negative cases |
 | ESPHome compile | ✅ CI | `esphome compile` on every change |
 | Integration tests | ❌ None | Requires hardware |
-| Hardware conformance | ❌ None | See K1 |
+| Hardware conformance | 🔶 Partial | Core 1W path confirmed on a Heltec V4 (pair, open/close/position/ventilation, RX decode); FP1 tilt direction and 2W session open - see K1 |
 
 Run the tests with:
 
@@ -268,9 +270,8 @@ pio test -e native                     # via PlatformIO
 ## Recommended Next Steps
 
 ### P0 - Before any deployment
-1. Verify against a real actuator (K1). Everything else is downstream of this,
-   including the 2W pairing exchange, which is host-tested end to end but has
-   never run against a real device.
+1. Confirm the FP1 tilt direction on a slatted product and run the 2W session
+   against a real device (K1). The core 1W path is already confirmed on hardware.
 
 ### P2 - Medium priority
 2. Give the SPI register helpers runtime coverage, or remove them (K8). They

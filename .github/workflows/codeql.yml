@@ -4,6 +4,9 @@
 # step fails, adjust that step's g++ invocation or the language matrix - there is
 # no if-gated step or commented Python/PlatformIO block to edit.
 #
+# The path filter lists what the build step below compiles (src, include, and
+# the RadioLib mock in test/mocks). esphome/** is not compiled here, so it is
+# not in the filter: a change there would only re-analyse unchanged code.
 name: "GH CodeQL"
 
 on:
@@ -12,13 +15,13 @@ on:
     paths:
       - "include/**"
       - "src/**"
-      - "esphome/**"
+      - "test/mocks/**"
       - ".github/workflows/codeql.yml"
   pull_request:
     paths:
       - "include/**"
       - "src/**"
-      - "esphome/**"
+      - "test/mocks/**"
       - ".github/workflows/codeql.yml"
   schedule:
     - cron: '39 19 * * 1'

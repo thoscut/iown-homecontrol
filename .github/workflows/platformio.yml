@@ -34,8 +34,10 @@ on:
   # Allows to run this workflow manually from the Actions tab
   workflow_dispatch:
 
+# Nothing here writes to the repository or uploads results (no SARIF, no
+# release): read-only token for every job.
 permissions:
-  contents: write
+  contents: read
 
 # TODO Set enviroment variable for later use
 # env:
@@ -51,23 +53,17 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         include:
           - os: windows-latest
-            path:
+            path: |
               ~\AppData\Local\pip\Cache
               ~\.platformio\.cache
           - os: ubuntu-latest
-            path:
+            path: |
               ~/.cache/pip
               ~/.platformio/.cache
           - os: macos-latest
-            path:
+            path: |
               ~/Library/Caches/pip
               ~/.platformio/.cache
-
-    permissions:
-      actions: read          # private repos
-      contents: write        # private repos
-      packages: read         # fetch internal or private CodeQL packs
-      security-events: write # all workflows
 
     steps:
     - name: Checkout Repo
@@ -75,13 +71,13 @@ jobs:
     - name: Setup Cache
       uses: actions/cache@v4
       with:
-        key:
-          ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          ${{ runner.os }}-pio
+        # Block scalars (|), not multi-line plain scalars: a plain scalar folds
+        # its lines into ONE space-separated string, so the old key/path/
+        # restore-keys were each a single bogus entry.
+        key: ${{ runner.os }}-pio-${{ hashFiles('**/requirements.txt', 'platformio.ini') }}
         path: ${{ matrix.path }}
-        restore-keys:
-          ${{ runner.os }}-pip-
-          ${{ runner.os }}-pio
+        restore-keys: |
+          ${{ runner.os }}-pio-
     - name: Setup Python
       uses: actions/setup-python@v5
       with:

@@ -84,17 +84,12 @@ bool IOWNCover::update_estimate_(uint32_t now) {
   this->position = estimate;
 
   if (arrived) {
-    // For an intermediate target the actuator is still running: it was told to
-    // travel all the way, so it needs an explicit STOP at the right moment. If
-    // that STOP cannot be sent (a lapsed 2W session), do NOT report arrival -
-    // the actuator keeps travelling, so leave the movement running and retry on
-    // the next tick rather than freezing the estimate at a position it overshoots.
-    if (this->position > 0.01f && this->position < 0.99f) {
-      if (!this->send_main_param_(IOHC_PARAM_STOP)) {
-        return false;
-      }
-    }
-
+    // An intermediate target was sent as an absolute main parameter, which the
+    // actuator positions itself to. Sending STOP when the *timed estimate* runs
+    // out used to cut that short whenever the real travel was slower than the
+    // configured full_*_duration (the defaults are guesses), while Home
+    // Assistant reported the target as reached. It also retried a failed STOP
+    // on every loop() tick, burning a rolling code per attempt.
     this->finish_movement_();
     return true;
   }
@@ -167,12 +162,12 @@ void IOWNCover::control(const cover::CoverCall &call) {
   if (call.get_stop()) {
     ESP_LOGI(TAG, "STOP -> 0x%06X", static_cast<unsigned int>(this->target_address_));
     if (!this->send_main_param_(IOHC_PARAM_STOP)) {
-      // The STOP did not go out - most often a 2W session lapsed mid-travel. The
-      // actuator never received it and keeps moving, so leaving the movement
+      // The STOP did not go out (radio error, missing system key, or a failed
+      // rolling-code write). The actuator never received it and keeps moving, so leaving the movement
       // running lets the estimate keep tracking; freezing here would strand the
       // reported position at a value the actuator sails past. Same gating the
       // OPEN/CLOSE/position paths already use.
-      ESP_LOGW(TAG, "STOP not sent (2W session not ready?); cover still moving");
+      ESP_LOGW(TAG, "STOP not sent (radio or key error?); cover still moving");
       return;
     }
 
@@ -202,6 +197,13 @@ void IOWNCover::control(const cover::CoverCall &call) {
     // straight through, a request to open the slats fully closed them.
     const uint8_t fp1 = static_cast<uint8_t>((1.0f - tilt) * 200.0f + 0.5f);
     if (this->send_main_param_(IOHC_PARAM_STOP, fp1)) {
+      // The "current position" main parameter halts any travel in progress, so
+      // freeze the estimate too - otherwise loop() keeps animating towards the
+      // old target and later reports it as reached.
+      if (this->target_position_ >= 0.0f) {
+        this->position = this->estimate_position_(millis(), nullptr);
+        this->finish_movement_();
+      }
       this->tilt = tilt;
       this->publish_state();
     }
@@ -229,9 +231,9 @@ void IOWNCover::control(const cover::CoverCall &call) {
     target = cover::COVER_CLOSED;
     op = cover::COVER_OPERATION_CLOSING;
   } else {
-    // Ask the actuator for the position directly. Actuators that honour a
-    // percentage stop on their own; for the rest, loop() sends STOP once the
-    // timed estimate reaches the target.
+    // Ask the actuator for the position directly: the main parameter is an
+    // absolute target, so the actuator stops there on its own. The timed
+    // estimate below only animates the reported position.
     const uint8_t percent_closed = static_cast<uint8_t>((1.0f - pos) * 100.0f + 0.5f);
     const uint16_t main_param =
         IOWNHomeControlComponent::main_param_from_percent_closed(percent_closed);
@@ -245,13 +247,14 @@ void IOWNCover::control(const cover::CoverCall &call) {
                                 : cover::COVER_OPERATION_CLOSING;
   }
 
-  // If the command did not actually go out - most commonly because a 2W session
-  // is still handshaking and send_2w_command_() deferred it - do NOT animate to
-  // a position the actuator never received. Leaving the state untouched keeps
-  // the reported position honest; the user re-issues once the session is up.
-  // (The tilt path above already guards this way.)
+  // If the command did not actually go out - a radio error, a missing system
+  // key, or a rolling code that could not be persisted - do NOT animate to a
+  // position the actuator never received. (2W commands are no longer deferred
+  // behind a handshake: they go out at once and the actuator's 0x3C is
+  // answered when it arrives.) Leaving the state untouched keeps the reported
+  // position honest. (The tilt path above already guards this way.)
   if (!sent) {
-    ESP_LOGW(TAG, "command not sent (2W session not ready?); position unchanged");
+    ESP_LOGW(TAG, "command not sent (radio or key error?); position unchanged");
     return;
   }
 

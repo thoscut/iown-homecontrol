@@ -5,7 +5,7 @@ Several things this project needed to know about io-homecontrol were marked
 
 Velux publishes the full technical specification of the **KLF 200**, its own
 io-homecontrol gateway, and three revisions of it have been sitting in
-[`docs/devices/velux/KLF200/`](devices/velux/KLF200/) the whole time. The KLF 200
+[`docs/devices/velux/KLF200/`](https://github.com/thoscut/iown-homecontrol/tree/main/docs/devices/velux/KLF200) the whole time. The KLF 200
 speaks a documented API on the LAN side and io-homecontrol on the RF side, so its
 specification describes the actuator model in detail: what a command originator
 is, what the priority levels mean, how a position value is encoded, what an

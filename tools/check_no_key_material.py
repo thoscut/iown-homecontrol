@@ -29,6 +29,7 @@ Run: python3 tools/check_no_key_material.py   (exit 1 on any finding)
 """
 
 import base64
+import os
 import re
 import subprocess
 import sys
@@ -45,6 +46,7 @@ KEY_TRANSFER_CMDS = {0x30, 0x32}  # 1W send-key, 2W key-transfer
 CTRL0_LENGTH_MASK = 0x1F
 FRAME_SIZE_FIELD_BIAS = 3
 CMD_OFFSET = 8                    # ctrl0 ctrl1 dest[3] src[3] cmd
+_KEY_CMD_RE = re.compile(b"[\\x30\\x32]")
 
 
 def looks_binary(data: bytes) -> bool:
@@ -74,19 +76,20 @@ def frame_crc_ok(frame: bytes) -> bool:
 
 
 def deframe(wire: bytes) -> bytes:
-    """Strip UART framing: 10-bit cells, start 0, 8 data LSB-first, stop 1."""
-    bits = []
-    for b in wire:
-        for i in range(7, -1, -1):
-            bits.append((b >> i) & 1)
+    """Strip UART framing: 10-bit cells, start 0, 8 data LSB-first, stop 1.
+    Stops at the first invalid cell; bits are read on demand, so a long stream
+    that is not framed costs only a few cells."""
+    def bit(p):
+        return (wire[p >> 3] >> (7 - (p & 7))) & 1
     out = bytearray()
+    total = len(wire) * 8
     pos = 0
-    while pos + 10 <= len(bits):
-        if bits[pos] != 0 or bits[pos + 9] != 1:
+    while pos + 10 <= total:
+        if bit(pos) != 0 or bit(pos + 9) != 1:
             break
         val = 0
         for k in range(8):
-            val |= bits[pos + 1 + k] << k
+            val |= bit(pos + 1 + k) << k
         out.append(val)
         pos += 10
     return bytes(out)
@@ -97,9 +100,12 @@ def targeted_scan(stream: bytes, name: str, kind: str, hits: list) -> bool:
     the frame the size field declares and flag it if the CRC validates and the
     source is not a placeholder. O(n) with a CRC check only at candidate starts."""
     n = len(stream)
-    for i in range(0, n - CMD_OFFSET - 3):
-        if stream[i + CMD_OFFSET] not in KEY_TRANSFER_CMDS:
-            continue
+    # Jump straight to command-byte candidates (C-speed search) rather than
+    # testing every offset in Python.
+    for m in _KEY_CMD_RE.finditer(stream, CMD_OFFSET):
+        i = m.start() - CMD_OFFSET
+        if i >= n - CMD_OFFSET - 3:
+            break
         declared = (stream[i] & CTRL0_LENGTH_MASK) + FRAME_SIZE_FIELD_BIAS
         if declared < 27 or i + declared > n:
             continue
@@ -130,31 +136,120 @@ def hex_candidates(text: str):
     text = re.sub(r"0x|\\x", "", text, flags=re.IGNORECASE)
     for m in re.finditer(r"[0-9a-fA-F][0-9a-fA-F\s,:_|.;/\-]{38,}[0-9a-fA-F]", text):
         raw = re.sub(r"[^0-9a-fA-F]", "", m.group(0))
-        if len(raw) % 2:
-            raw = raw[:-1]
-        if len(raw) >= 40:
-            try:
-                yield bytes.fromhex(raw)
-            except ValueError:
-                pass
+        # A region can start half a byte early: a stray hex letter just before the
+        # frame ("Frame: 1a 00 ..." yields "e1a00...") shifts every byte by a
+        # nibble. Yield both nibble alignments so the frame is found either way.
+        for start in (0, 1):
+            r = raw[start:]
+            if len(r) % 2:
+                r = r[:-1]
+            if len(r) >= 40:
+                try:
+                    yield bytes.fromhex(r)
+                except ValueError:
+                    pass
+
+
+# A hex-dump line: an offset column (xxd "00000010: ", hexdump -C "00000010  ",
+# od-style), then the hex bytes, then an ASCII column. The offset and ASCII
+# columns would otherwise be read as frame bytes (or break the hex region), so a
+# frame pasted as a dump slipped through.
+_DUMP_OFFSET = re.compile(r"^\s*(?:0x)?[0-9a-fA-F]{4,16}:?\s+")
+_DUMP_ASCII_PIPE = re.compile(r"\|[^|]*\|?\s*$")
+_DUMP_HEX = re.compile(r"(?:[0-9a-fA-F]{2}){1,2}(?=\s|$)")
+
+
+def strip_dump_columns(text: str) -> str:
+    """Rewrite every hex-dump-looking line to just its hex bytes (offset and
+    ASCII columns removed); other lines pass through unchanged."""
+    out = []
+    for line in text.splitlines():
+        m = _DUMP_OFFSET.match(line)
+        if not m:
+            out.append(line)
+            continue
+        body = _DUMP_ASCII_PIPE.sub("", line[m.end():])
+        groups = []
+        pos = 0
+        # Take consecutive 1- or 2-byte groups from the start; the first token
+        # that is not one (the xxd ASCII column, typically) ends the hex area.
+        while True:
+            while pos < len(body) and body[pos] in " \t":
+                pos += 1
+            g = _DUMP_HEX.match(body, pos)
+            if not g:
+                break
+            groups.append(g.group(0))
+            pos = g.end()
+        out.append(" ".join(groups) if groups else line)
+    return "\n".join(out)
+
+
+def strip_comments(text: str) -> str:
+    """Drop C block comments and //, # line comments: a C array with a comment on
+    every row ("0x1a, 0x00, ...  // header") otherwise breaks the multi-line hex
+    region at the comment text."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    return "\n".join(re.sub(r"(//|#).*$", "", line) for line in text.splitlines())
 
 
 def base64_candidates(text: str):
-    for m in re.finditer(r"[A-Za-z0-9+/]{40,}={0,2}", text):
+    # 36 chars is the shortest encoding of the shortest key frame (27 bytes ->
+    # 36 chars, padding excluded). Try every 4-char alignment, since a run can be
+    # glued to preceding base64-alphabet text ("key" + base64...).
+    for m in re.finditer(r"[A-Za-z0-9+/]{36,}={0,2}", text):
         s = m.group(0)
-        try:
-            yield base64.b64decode(s + "=" * (-len(s) % 4), validate=True)
-        except Exception:  # noqa: BLE001 - best-effort decode, skip anything invalid
-            pass
+        for start in range(4):
+            t = s[start:]
+            if len(t.rstrip("=")) < 36:
+                break
+            try:
+                yield base64.b64decode(t + "=" * (-len(t) % 4), validate=True)
+            except Exception:  # noqa: BLE001 - best-effort decode, skip anything invalid
+                pass
+
+
+def scan_text(text: str, name: str, hits: list) -> None:
+    """Run every candidate extractor over one file's text."""
+    already = len(hits)
+    # Per line: catches a framed frame on its own line (de-framed from the
+    # line's start) and any single-line de-framed frame, in any separator
+    # style. Whole text: catches a de-framed frame wrapped across lines.
+    for line in text.splitlines():
+        for seq in hex_candidates(line):
+            scan_bytes(seq, name, "hex", hits)
+    for seq in hex_candidates(text):
+        scan_bytes(seq, name, "hex/multiline", hits)
+    # Derived views: hex dumps with their offset/ASCII columns removed, and the
+    # text with code comments removed. Only rescanned when they differ, and
+    # only when the raw passes found nothing (one report per frame is enough).
+    if len(hits) > already:
+        return
+    for kind, derived in (("hexdump", strip_dump_columns(text)),
+                          ("uncommented", strip_comments(text))):
+        if derived != text:
+            for seq in hex_candidates(derived):
+                scan_bytes(seq, name, kind, hits)
+    for seq in base64_candidates(text):
+        scan_bytes(seq, name, "base64", hits)
 
 
 def main() -> int:
-    files = subprocess.check_output(["git", "ls-files"]).decode().split()
+    # -z: NUL-separated, unquoted paths. Splitting the default output on
+    # whitespace silently dropped paths with spaces, and git C-quotes non-ASCII
+    # paths, which then failed to open and were skipped.
+    out = subprocess.check_output(["git", "ls-files", "-z"])
+    files = [os.fsdecode(p) for p in out.split(b"\0") if p]
     hits: list = []
+    errors: list = []
     for f in files:
         try:
-            data = open(f, "rb").read()
-        except OSError:
+            with open(f, "rb") as fh:
+                data = fh.read()
+        except OSError as e:
+            # An unreadable tracked file is unscanned, so it cannot be passed.
+            # (A tracked file deleted in the working tree is reported too.)
+            errors.append((f, e))
             continue
         # Skip genuinely binary files by CONTENT RATIO, not by the mere presence of
         # a NUL: a real binary (PDF, image, firmware) is mostly control bytes, while
@@ -174,17 +269,12 @@ def main() -> int:
         # (U+0000) and left in place. Skipping on either condition let a real frame
         # ride through while CI printed OK - the pattern this guard exists to stop.
         text = data.decode("utf-8", errors="replace")
-        # Per line: catches a framed frame on its own line (de-framed from the
-        # line's start) and any single-line de-framed frame, in any separator
-        # style. Whole text: catches a de-framed frame wrapped across lines.
-        for line in text.splitlines():
-            for seq in hex_candidates(line):
-                scan_bytes(seq, f, "hex", hits)
-        for seq in hex_candidates(text):
-            scan_bytes(seq, f, "hex/multiline", hits)
-        for seq in base64_candidates(text):
-            scan_bytes(seq, f, "base64", hits)
+        scan_text(text, f, hits)
 
+    if errors:
+        print("FAIL: could not read tracked file(s); they were not scanned:")
+        for name, e in errors:
+            print(f"  {name}: {e}")
     if hits:
         print("FAIL: real key-transfer (0x30/0x32) frame(s) committed to the repo:")
         for name, where, src, sample in hits:
@@ -193,6 +283,8 @@ def main() -> int:
         print("Such a frame carries the installation key masked only with the public")
         print("transfer key. Redact it, or replace it with a synthetic frame addressed")
         print("from a placeholder (AB CD EF etc.); see test/test_phy_framing for how.")
+        return 1
+    if errors:
         return 1
 
     print("OK: no real 0x30/0x32 key-transfer frames committed (placeholder src only).")

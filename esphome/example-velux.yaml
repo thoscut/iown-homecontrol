@@ -34,7 +34,7 @@ iown_homecontrol:
   cs_pin: 18
   rst_pin: 14
   dio0_pin: 26
-  dio1_pin: 33
+  dio1_pin: 35          # Heltec V2/V2.1 (a V1 uses 33)
   sck_pin: 5
   mosi_pin: 27
   miso_pin: 19

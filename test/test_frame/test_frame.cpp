@@ -251,8 +251,8 @@ void test_set_command_too_large(void) {
     IoFrame frame;
     iohome::frame::init_frame(&frame, true);
 
-    uint8_t params[22] = {0};
-    TEST_ASSERT_FALSE(iohome::frame::set_command(&frame, 0x00, params, 22));
+    uint8_t params[iohome::FRAME_MAX_DATA_SIZE + 1] = {0};
+    TEST_ASSERT_FALSE(iohome::frame::set_command(&frame, 0x00, params, sizeof(params)));
 }
 
 void test_set_command_rejects_unencodable_length(void) {
@@ -545,7 +545,8 @@ void test_validate_detects_mac_forgery(void) {
 }
 
 void test_max_payload_frame_roundtrips(void) {
-    // Largest plain frame: the documented 21-byte payload maximum.
+    // Largest plain frame: 34 bytes, 23 of them parameters. FRAME_MAX_DATA_SIZE
+    // used to be 21, so a legal 34-byte frame failed to parse.
     IoFrame frame;
     iohome::frame::init_frame(&frame, false);
 
@@ -554,13 +555,14 @@ void test_max_payload_frame_roundtrips(void) {
     TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, 0x20, params, sizeof(params)));
     TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
 
-    // 9 header + 21 data + 2 CRC, comfortably inside the 34-byte encodable max.
-    TEST_ASSERT_EQUAL_UINT8(32, frame.frame_length);
+    // 9 header + 23 data + 2 CRC = the 34-byte encodable max.
+    TEST_ASSERT_EQUAL_UINT8(23, iohome::FRAME_MAX_DATA_SIZE);
+    TEST_ASSERT_EQUAL_UINT8(34, frame.frame_length);
     TEST_ASSERT_LESS_OR_EQUAL(iohome::FRAME_MAX_SIZE, frame.frame_length);
 
     uint8_t buffer[iohome::FRAME_MAX_SIZE];
     const size_t len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
-    TEST_ASSERT_EQUAL_UINT(32, len);
+    TEST_ASSERT_EQUAL_UINT(34, len);
 
     // Command 0x20 has no documented parameter length, so AUTO cannot tell a
     // plain frame from an authenticated one and errs towards assuming a MAC -
@@ -591,8 +593,10 @@ void test_auto_trailer_uses_command_metadata(void) {
     TEST_ASSERT_FALSE(parsed.authenticated);
     TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, parsed.data_len);
 
-    // Same command, payload = parameters + MAC => authenticated. A 2W frame
-    // carries a MAC too, so keying only on the protocol mode gets this wrong.
+    // A 2W frame is never read as carrying a MAC under AUTO: the protocol puts
+    // none in it (docs/linklayer.md, "2W Authentication"). Twelve payload bytes
+    // after an Execute are twelve parameter bytes, not six plus a MAC. A caller
+    // that really built a trailer says so with PRESENT.
     const uint8_t key[16] = {0x5A};
     const uint8_t challenge[6] = {1, 2, 3, 4, 5, 6};
     iohome::frame::init_frame(&frame, false);
@@ -601,6 +605,11 @@ void test_auto_trailer_uses_command_metadata(void) {
     len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
 
     TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_FALSE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE + iohome::HMAC_SIZE, parsed.data_len);
+    TEST_ASSERT_FALSE(iohome::frame::validate_frame(&parsed, key, challenge));
+
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed, AuthTrailer::PRESENT));
     TEST_ASSERT_TRUE(parsed.authenticated);
     TEST_ASSERT_EQUAL_UINT8(iohome::EXECUTE_PAYLOAD_MIN_SIZE, parsed.data_len);
     TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed, key, challenge));
@@ -624,7 +633,9 @@ void test_command_metadata(void) {
     TEST_ASSERT_TRUE(iohome::frame::is_unauthenticated_command(iohome::CMD_SEND_1W_KEY));
     TEST_ASSERT_TRUE(iohome::frame::is_unauthenticated_command(iohome::CMD_KEY_TRANSFER));
     TEST_ASSERT_FALSE(iohome::frame::is_unauthenticated_command(iohome::CMD_EXECUTE));
-    TEST_ASSERT_FALSE(iohome::frame::is_unauthenticated_command(iohome::CMD_CHALLENGE_RESPONSE));
+    // The 2W challenge exchange is plain on the wire; it IS the authentication.
+    TEST_ASSERT_TRUE(iohome::frame::is_unauthenticated_command(iohome::CMD_CHALLENGE_REQUEST));
+    TEST_ASSERT_TRUE(iohome::frame::is_unauthenticated_command(iohome::CMD_CHALLENGE_RESPONSE));
 
     // Execute has no fixed length: captures show both 6 and 8 payload bytes.
     // Reporting an exact 6 made the 8-byte form miss the parser's precise test.
@@ -861,20 +872,15 @@ void test_execute_command_with_extra_functional_params(void) {
 }
 
 void test_unexpected_length_on_a_fixed_command_still_assumes_a_trailer(void) {
-    // A challenge request has a documented 6-byte payload. Give it 10 - neither
-    // 6 nor 6 + trailer - and the parser must fall back to assuming a trailer,
-    // not to "our table says 6, so 10 bytes cannot include one".
-    //
-    // The distinction matters because the table has been wrong before: Execute
-    // was listed as exactly 6 while real frames carry 8. Treating a documented
-    // length as a floor for every command would have turned that kind of gap
-    // into silently rejected authenticated frames.
+    // A 1W command with no documented length falls back to assuming a trailer
+    // when one fits, rather than passing parameters off as plain. (The fixed-
+    // length commands in the table are all bootstrap or 2W-challenge commands
+    // now, which never carry one; the next test covers that side.)
     IoFrame frame;
     iohome::frame::init_frame(&frame, true);
     uint8_t params[10];
     memset(params, 0x5A, sizeof(params));
-    TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, iohome::CMD_CHALLENGE_REQUEST,
-                                                params, sizeof(params)));
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, 0x20, params, sizeof(params)));
     TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
 
     uint8_t buffer[iohome::FRAME_MAX_SIZE];
@@ -884,6 +890,69 @@ void test_unexpected_length_on_a_fixed_command_still_assumes_a_trailer(void) {
     TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
     TEST_ASSERT_TRUE(parsed.authenticated);
     TEST_ASSERT_EQUAL_UINT8(10 - 8, parsed.data_len);
+}
+
+void test_challenge_frames_never_assume_a_trailer(void) {
+    // 0x3C/0x3D are plain by definition, whatever their length and mode.
+    for (int one_way = 0; one_way <= 1; one_way++) {
+        IoFrame frame;
+        iohome::frame::init_frame(&frame, one_way != 0);
+        uint8_t params[14];
+        memset(params, 0x5A, sizeof(params));
+        TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, iohome::CMD_CHALLENGE_REQUEST,
+                                                    params, sizeof(params)));
+        TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
+        uint8_t buffer[iohome::FRAME_MAX_SIZE];
+        const size_t len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
+        IoFrame parsed;
+        TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+        TEST_ASSERT_FALSE(parsed.authenticated);
+        TEST_ASSERT_EQUAL_UINT8(sizeof(params), parsed.data_len);
+    }
+}
+
+void test_unknown_2w_command_is_parsed_plain(void) {
+    // The AUTO parser used to guess that the last six bytes of an unknown 2W
+    // command were a MAC.
+    IoFrame frame;
+    iohome::frame::init_frame(&frame, false);
+    uint8_t params[10];
+    memset(params, 0x33, sizeof(params));
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, 0x54, params, sizeof(params)));
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
+    uint8_t buffer[iohome::FRAME_MAX_SIZE];
+    const size_t len = iohome::frame::serialize_frame(&frame, buffer, sizeof(buffer));
+    IoFrame parsed;
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(buffer, len, &parsed));
+    TEST_ASSERT_FALSE(parsed.authenticated);
+    TEST_ASSERT_EQUAL_UINT8(10, parsed.data_len);
+}
+
+void test_max_size_plain_2w_frame_parses(void) {
+    // The reviewer's case: a 34-byte plain 2W frame carries 23 parameter bytes.
+    uint8_t big[34];
+    memset(big, 0, sizeof(big));
+    big[0] = 0x1F;   // 2W, size field 31 -> 34 bytes
+    big[8] = 0x51;
+    const uint16_t crc = iohome::crypto::compute_crc16(big, 32);
+    big[32] = static_cast<uint8_t>(crc & 0xFF);
+    big[33] = static_cast<uint8_t>(crc >> 8);
+    IoFrame parsed;
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(big, sizeof(big), &parsed, AuthTrailer::NONE));
+    TEST_ASSERT_TRUE(iohome::frame::parse_frame(big, sizeof(big), &parsed));
+    TEST_ASSERT_EQUAL_UINT8(23, parsed.data_len);
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&parsed));
+}
+
+void test_validate_frame_with_key_requires_a_mac(void) {
+    // Finding 2: asking for MAC verification of a plain frame must fail.
+    const uint8_t key[16] = {0x5A};
+    IoFrame frame;
+    iohome::frame::init_frame(&frame, true);
+    TEST_ASSERT_TRUE(iohome::frame::set_execute_command(&frame, iohome::MP_CLOSE));
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame_plain(&frame));
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&frame));
+    TEST_ASSERT_FALSE(iohome::frame::validate_frame(&frame, key));
 }
 
 void test_long_execute_payload_without_trailer_is_plain(void) {
@@ -1022,6 +1091,10 @@ int main(int, char **) {
     RUN_TEST(test_execute_command_with_extra_functional_params);
     RUN_TEST(test_long_execute_payload_without_trailer_is_plain);
     RUN_TEST(test_unexpected_length_on_a_fixed_command_still_assumes_a_trailer);
+    RUN_TEST(test_challenge_frames_never_assume_a_trailer);
+    RUN_TEST(test_unknown_2w_command_is_parsed_plain);
+    RUN_TEST(test_max_size_plain_2w_frame_parses);
+    RUN_TEST(test_validate_frame_with_key_requires_a_mac);
     RUN_TEST(test_key_transfer_sized_frames_fit);
     RUN_TEST(test_parse_never_overflows_for_any_control_byte);
     RUN_TEST(test_print_frame_handles_nullptr);

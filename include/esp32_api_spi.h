@@ -13,6 +13,10 @@
 
 #pragma once
 
+// ESP32-only: the ESP-IDF SPI master driver does not exist elsewhere, so on any
+// other target this header is empty instead of failing on driver/spi_master.h.
+#if defined(ESP32) || defined(ESP_PLATFORM)
+
 #include <Arduino.h>
 
 #ifdef __cplusplus
@@ -50,3 +54,5 @@ int fWriteSPIdata8bits( spi_device_handle_t &h, int address, int sendData );
 #ifdef __cplusplus
 }
 #endif
+
+#endif  // ESP32 || ESP_PLATFORM

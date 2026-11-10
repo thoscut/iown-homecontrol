@@ -25,11 +25,11 @@ on:
   # Allow to run workflow manually from Actions tab
   workflow_dispatch:
 
-# Allow GITHUB_TOKEN deployment to GitHub Pages
+# `mkdocs gh-deploy` pushes the built site to the gh-pages branch, which needs
+# contents: write and nothing else (no Pages-deploy action, so no pages: or
+# id-token: write).
 permissions:
   contents: write
-  id-token: write
-  pages: write
 
 jobs:
   deploy:

@@ -8,8 +8,8 @@
  * directly; for the actual protocol - frames, authentication, replay
  * protection - use IoHomeControl, as src/main.cpp does.
  *
- * MIT License
- * Copyright (c) Velocet
+ * Released under CC0 1.0 Universal - see the LICENSE file in the repository
+ * root.
  */
 
 #include <Arduino.h>

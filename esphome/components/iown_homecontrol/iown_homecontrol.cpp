@@ -157,6 +157,24 @@ void IOWNHomeControlComponent::setup() {
 
   this->restore_rolling_code_();
 
+  // Position reports are only ever taken from the configured covers, so tell
+  // the replay guard exactly those and nobody else. Without it, a recorded
+  // report re-addressed to a made-up source (the MAC does not cover addresses;
+  // the CRC is trivial to recompute) was a fresh "first frame" every time.
+  if (this->position_feedback_) {
+    this->replay_guard_.set_strict(true);
+    for (IOWNCover *cover : this->covers_) {
+      if (cover == nullptr) {
+        continue;
+      }
+      uint8_t node[iohome::NODE_ID_SIZE];
+      address_to_node(cover->get_target_address(), node);
+      if (!iohome::frame::is_broadcast(node)) {
+        this->replay_guard_.add_known_peer(node);
+      }
+    }
+  }
+
   // Set up interrupt-driven receive
   this->phy_->setPacketReceivedAction(packet_isr_);
   clear_packet_flag_();
@@ -415,7 +433,19 @@ uint16_t IOWNHomeControlComponent::consume_rolling_code_() {
   if (remaining == 0 || remaining > ROLLING_CODE_RESERVE_BLOCK) {
     this->rolling_code_reserved_until_ =
         static_cast<uint16_t>(this->rolling_code_ + ROLLING_CODE_RESERVE_BLOCK);
-    this->rolling_code_pref_.save(&this->rolling_code_reserved_until_);
+    const bool saved = this->rolling_code_pref_.save(&this->rolling_code_reserved_until_);
+    // save() only queues the write; ESPHome commits the queue on its
+    // flash_write_interval timer (60 s by default) or on a clean shutdown. A
+    // brownout or crash before that would hand out the same codes again after
+    // the reboot, and the actuator rejects them as replays. Commit now - this
+    // runs once per reserved block, so the flash wear stays negligible.
+    if (!saved || !global_preferences->sync()) {
+      // Nothing better to do than shout: refusing to transmit would leave the
+      // cover dead. After a reboot the codes since the last good write repeat
+      // and the actuator ignores them until the counter catches up.
+      ESP_LOGE(TAG, "Could not persist the rolling-code reservation (0x%04X)",
+               this->rolling_code_reserved_until_);
+    }
   }
 
   return code;
@@ -433,29 +463,28 @@ bool IOWNHomeControlComponent::compute_hmac_(const uint8_t *frame_data, size_t d
 // ---------------------------------------------------------------------------
 // 2W challenge-response
 //
-// A 1W frame proves itself with a rolling code, which a receiver can only
-// check if it already knows where the counter stands. 2W instead binds each
-// MAC to a nonce the *receiver* chose moments earlier, so a recorded frame is
-// worthless the instant the session ends.
+// docs/linklayer.md, "2W Authentication": 2W frames carry no MAC. A command
+// goes out plain; the actuator answers it with a plain 0x3C carrying a fresh
+// 6-byte challenge; we answer with a plain 0x3D whose payload is the MAC over
+// the command we sent and that challenge; then the actuator executes. The
+// reverse direction is the same with the roles swapped.
 //
-// The exchange is: we send command 0x3C carrying a random challenge, the peer
-// answers 0x3D with a MAC over it, and from then until the session times out
-// every command we send is MAC'd against that same challenge.
+// This used to be modelled as a session we opened with our own 0x3C, MAC'd
+// trailers on every 2W frame, and a 0x3D echoing the challenge - none of which
+// a real actuator sends or accepts.
 // ---------------------------------------------------------------------------
 
 bool IOWNHomeControlComponent::frame_is_fresh_(const iohome::frame::IoFrame &frame) {
   if (frame.is_1w_mode) {
-    return this->replay_guard_.accept(frame.src_node, iohome::frame::get_rolling_code(&frame));
+    // The MAC goes in with the sequence: it is not bound to the addresses, so
+    // the guard's global MAC ring is what catches a re-addressed replay.
+    return this->replay_guard_.accept(frame.src_node, iohome::frame::get_rolling_code(&frame),
+                                      frame.hmac);
   }
 
-  // 2W frames carry no sequence number, so the rolling-code check has nothing
-  // to work with - and the component used to simply skip the check for them.
-  // A 2W position report was therefore authenticated but never fresh: record
-  // one and re-transmit it, and it was applied again every time, for as long
-  // as the session lasted. Freshness here comes from the session challenge,
-  // which signs several frames, so what is left to catch is a MAC this node
-  // produced recently - a protocol repeat to act on once, or a replay.
-  return this->replay_guard_.accept_mac(frame.src_node, frame.hmac);
+  // 2W frames carry no MAC trailer, so none reaches here as "authenticated";
+  // their freshness is the nonce in the 0x3C/0x3D exchange.
+  return false;
 }
 
 bool IOWNHomeControlComponent::send_protocol_frame_(const iohome::frame::IoFrame *frame) {
@@ -472,46 +501,12 @@ bool IOWNHomeControlComponent::is_2w_authenticated() {
   return this->two_way_ && this->auth_.is_authenticated(millis());
 }
 
-bool IOWNHomeControlComponent::ensure_2w_session_(uint32_t target_address) {
-  const uint32_t now = millis();
-
-  uint8_t dest[iohome::NODE_ID_SIZE];
-  uint8_t src[iohome::NODE_ID_SIZE];
-  address_to_node(target_address, dest);
-  address_to_node(this->source_address_, src);
-
-  // The session must belong to THIS actuator. A session negotiated with a
-  // different cover cannot sign a frame to this one - its challenge nonce only
-  // signs frames between the two nodes that negotiated it - so reusing it would
-  // send a frame the target silently rejects while we report success. When the
-  // held session is for another peer, fall through and challenge this target.
-  if (this->auth_.is_authenticated_with(dest, now)) {
-    return true;
-  }
-
-  if (this->auth_.get_state(now) == iohome::mode2w::ChallengeState::CHALLENGE_SENT) {
-    // A request is already in flight. Saying so beats sending a second one and
-    // invalidating the challenge the peer is answering.
-    ESP_LOGD(TAG, "2W handshake in progress, command not sent");
-    return false;
-  }
-
-  iohome::frame::IoFrame request;
-  if (!this->auth_.create_challenge_request(&request, dest, src, now)) {
-    // The only way this fails with valid arguments is no secure random source,
-    // and a predictable challenge is worse than no session at all.
-    ESP_LOGE(TAG, "Could not create a 2W challenge - no secure random source?");
-    return false;
-  }
-
-  ESP_LOGI(TAG, "2W: challenging 0x%06X", static_cast<unsigned int>(target_address));
-  this->send_protocol_frame_(&request);
-  return false;
-}
-
 bool IOWNHomeControlComponent::send_2w_command_(uint32_t target_address, uint16_t main_param,
                                                 uint8_t fp1, uint8_t fp2) {
-  if (!this->ensure_2w_session_(target_address)) {
+  if (!this->system_key_set_) {
+    // Without the key the actuator's 0x3C cannot be answered, so the command
+    // would go out and never be executed.
+    ESP_LOGE(TAG, "2W needs system_key to answer the actuator's challenge");
     return false;
   }
 
@@ -527,66 +522,70 @@ bool IOWNHomeControlComponent::send_2w_command_(uint32_t target_address, uint16_
 
   if (!iohome::frame::set_execute_command(
           &frame, main_param, static_cast<iohome::Originator>(this->originator_),
-          static_cast<uint8_t>(this->acei_ | IOHC_ACEI_VALID_MASK), fp1, fp2)) {
+          static_cast<uint8_t>(this->acei_ | IOHC_ACEI_VALID_MASK), fp1, fp2) ||
+      !iohome::frame::finalize_frame_plain(&frame)) {
     ESP_LOGE(TAG, "Rejected execute payload (ACEI 0x%02X?)", this->acei_);
     return false;
   }
 
-  // The MAC is bound to the challenge the peer chose, which is what makes a
-  // recorded 2W frame useless after the session ends.
-  if (!iohome::frame::finalize_frame(&frame, this->system_key_,
-                                     this->auth_.get_current_challenge())) {
-    ESP_LOGE(TAG, "Could not sign the 2W frame");
-    return false;
-  }
+  // Remember it: the actuator's 0x3C for this command is answered with a MAC
+  // over exactly these bytes, and only within a short window.
+  this->auth_.note_request_sent(&frame, millis());
 
   ESP_LOGD(TAG, "Sending 2W command: target=0x%06X main=0x%04X",
            static_cast<unsigned int>(target_address), main_param);
-  return this->send_protocol_frame_(&frame);
+  if (!this->send_protocol_frame_(&frame)) {
+    this->auth_.clear_pending_request();
+    return false;
+  }
+  return true;
 }
 
-void IOWNHomeControlComponent::handle_challenge_frame_(const iohome::frame::IoFrame *frame) {
+void IOWNHomeControlComponent::handle_challenge_frame_(const iohome::frame::IoFrame *frame,
+                                                       int16_t rssi) {
   const uint32_t now = millis();
 
-  if (frame->command_id == iohome::CMD_CHALLENGE_RESPONSE) {
-    if (this->auth_.verify_challenge_response(frame, now)) {
-      ESP_LOGI(TAG, "2W session authenticated");
-    } else {
-      ESP_LOGW(TAG, "2W challenge response rejected");
-      this->mac_errors_++;
+  if (frame->command_id == iohome::CMD_CHALLENGE_REQUEST) {
+    // The actuator challenges a command. Answer only if it is OUR pending
+    // command to that actuator, sent moments ago: signing a nonce for anyone
+    // who asks would hand out MACs over attacker-chosen input.
+    iohome::frame::IoFrame response;
+    if (!this->auth_.answer_challenge(frame, &response, now)) {
+      ESP_LOGD(TAG, "Challenge from 0x%02X%02X%02X is not for a pending command; not answering",
+               frame->src_node[0], frame->src_node[1], frame->src_node[2]);
+      return;
     }
+    ESP_LOGD(TAG, "Answering 2W challenge");
+    this->send_protocol_frame_(&response);
     return;
   }
 
-  if (frame->command_id == iohome::CMD_CHALLENGE_REQUEST) {
-    // The peer is challenging us. Its nonce travels in the request's own
-    // payload - answering with a challenge of ours would prove nothing.
-    if (frame->data_len < iohome::HMAC_SIZE) {
-      ESP_LOGW(TAG, "Challenge request too short to carry a nonce");
-      return;
-    }
-
-    // The request is signed against the nonce it carries, and that signature
-    // has to hold before we answer. Answering an unverified request meant
-    // anyone in radio range could hand this hub a nonce of their choosing and
-    // read back the MAC computed over it with the system key - a chosen-input
-    // oracle, offered to strangers, on request.
-    if (!this->system_key_set_ ||
-        !iohome::frame::validate_frame(frame, this->system_key_, frame->data)) {
-      ESP_LOGW(TAG, "Unsigned challenge request from 0x%02X%02X%02X - not answering",
-               frame->src_node[0], frame->src_node[1], frame->src_node[2]);
+  if (frame->command_id == iohome::CMD_CHALLENGE_RESPONSE) {
+    // The answer to a challenge we sent for a command a peer sent us.
+    iohome::frame::IoFrame verified;
+    if (!this->auth_.verify_challenge_response(frame, now) ||
+        !this->auth_.take_verified_request(&verified)) {
+      ESP_LOGW(TAG, "2W challenge answer rejected");
       this->mac_errors_++;
       return;
     }
+    ESP_LOGI(TAG, "2W command from 0x%02X%02X%02X authenticated", verified.src_node[0],
+             verified.src_node[1], verified.src_node[2]);
 
-    iohome::frame::IoFrame response;
-    if (!this->auth_.create_challenge_response(&response, frame->src_node, frame->dest_node,
-                                               frame->data)) {
-      ESP_LOGW(TAG, "Could not answer the peer's challenge");
-      return;
-    }
-    ESP_LOGI(TAG, "Answering a peer-initiated 2W challenge");
-    this->send_protocol_frame_(&response);
+    ReceivedFrame rf{};
+    rf.authenticated = true;
+    rf.ctrl0 = verified.ctrl_byte_0;
+    rf.ctrl1 = verified.ctrl_byte_1;
+    rf.dest_address = (static_cast<uint32_t>(verified.dest_node[0]) << 16) |
+                      (static_cast<uint32_t>(verified.dest_node[1]) << 8) | verified.dest_node[2];
+    rf.src_address = (static_cast<uint32_t>(verified.src_node[0]) << 16) |
+                     (static_cast<uint32_t>(verified.src_node[1]) << 8) | verified.src_node[2];
+    rf.command = verified.command_id;
+    rf.payload = verified.data;
+    rf.payload_len = verified.data_len;
+    rf.is_1w = false;
+    rf.rssi = rssi;
+    this->handle_execute_(rf);
   }
 }
 
@@ -620,22 +619,6 @@ void IOWNHomeControlComponent::receive_frame_() {
     return;
   }
 
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
-  // The raw on-air bytes, framing and all, before de-framing. This is what a
-  // capture session records; it is logged at VERBOSE so it does not drown the
-  // ordinary DEBUG frame log.
-  {
-    std::string hex;
-    hex.reserve(len * 3);
-    for (size_t i = 0; i < len; i++) {
-      char b[4];
-      snprintf(b, sizeof(b), "%02X ", raw[i]);
-      hex += b;
-    }
-    ESP_LOGV(TAG, "RAW %u bytes rssi=%d: %s", static_cast<unsigned>(len), rssi, hex.c_str());
-  }
-#endif
-
   // The radio delivers the on-air bytes with the UART start/stop framing still
   // on them. De-frame to the actual frame before anything reads it: without
   // this the "control byte" is really a start bit and part of ctrl0, the length
@@ -647,14 +630,43 @@ void IOWNHomeControlComponent::receive_frame_() {
     return;
   }
 
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  // The raw on-air bytes, framing and all, before de-framing. This is what a
+  // capture session records; it is logged at VERBOSE so it does not drown the
+  // ordinary DEBUG frame log. It is logged after de-framing so a key transfer
+  // can be recognised and kept out of the log.
+  if (this->may_log_frame_contents_(frame, frame_len)) {
+    std::string hex;
+    hex.reserve(len * 3);
+    for (size_t i = 0; i < len; i++) {
+      char b[4];
+      snprintf(b, sizeof(b), "%02X ", raw[i]);
+      hex += b;
+    }
+    ESP_LOGV(TAG, "RAW %u bytes rssi=%d: %s", static_cast<unsigned>(len), rssi, hex.c_str());
+  }
+#endif
+
   this->parse_frame_(frame, frame_len, rssi);
+}
+
+bool IOWNHomeControlComponent::may_log_frame_contents_(const uint8_t *data, size_t len) const {
+  // A 0x30/0x32 key transfer is masked only with the public transfer key and the
+  // sender's address, so a hex dump of it is the system key in all but name.
+  // The DEBUG examples stream logs to Home Assistant, which made pairing a remote
+  // near the hub leak the key even with key_capture off.
+  if (this->key_capture_ || len <= 8) {
+    return true;
+  }
+  const uint8_t cmd = data[8];
+  return cmd != iohome::CMD_SEND_1W_KEY && cmd != iohome::CMD_KEY_TRANSFER;
 }
 
 void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int16_t rssi) {
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
   // The de-framed frame, as the protocol layer sees it. The raw on-air bytes
   // are logged separately at VERBOSE in receive_frame_().
-  {
+  if (this->may_log_frame_contents_(data, len)) {
     std::string hex_str;
     hex_str.reserve(len * 3);
     for (size_t i = 0; i < len; i++) {
@@ -730,7 +742,7 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
 
 #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
   // Only build the hex dump when it can actually be logged.
-  {
+  if (this->may_log_frame_contents_(data, frame_len)) {
     std::string hex_str;
     hex_str.reserve(frame_len * 3);
     for (size_t i = 0; i < frame_len; i++) {
@@ -761,9 +773,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   iohome::frame::IoFrame parsed;
   const bool parsed_ok = iohome::frame::parse_frame(data, frame_len, &parsed);
 
-  // 0x3C / 0x3D drive the 2W session and are not covers' business. They are
-  // taken before the generic check below because they verify against a nonce
-  // that generic code cannot know: a 0x3C carries the challenger's own.
+  // 0x3C / 0x3D are the 2W authentication exchange and not covers' business.
+  // Both are plain frames; what they prove is checked by the auth manager.
   if (this->two_way_ && (cmd == iohome::CMD_CHALLENGE_REQUEST ||
                          cmd == iohome::CMD_CHALLENGE_RESPONSE)) {
     // Only what is addressed to us. A house can hold several io-homecontrol
@@ -775,39 +786,43 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
       return;
     }
     if (parsed_ok) {
-      this->handle_challenge_frame_(&parsed);
+      this->handle_challenge_frame_(&parsed, rssi);
+    }
+    return;
+  }
+
+  // A plain 2W command addressed to us is authenticated the 2W way: hold it,
+  // challenge the sender, act on it only once its 0x3D verifies (handled
+  // above). Only worth doing when something would act on it.
+  if (this->two_way_ && parsed_ok && !parsed.is_1w_mode && !parsed.authenticated &&
+      dest_addr == this->source_address_ && this->position_feedback_ &&
+      this->system_key_set_ && !iohome::frame::is_unauthenticated_command(cmd)) {
+    iohome::frame::IoFrame chal;
+    uint8_t own[iohome::NODE_ID_SIZE];
+    address_to_node(this->source_address_, own);
+    if (this->auth_.create_challenge_for(&chal, &parsed, own, millis())) {
+      ESP_LOGD(TAG, "2W command from 0x%06X held; challenging it",
+               static_cast<unsigned int>(src_addr));
+      this->send_protocol_frame_(&chal);
+    } else {
+      ESP_LOGD(TAG, "2W command from 0x%06X dropped: a challenge is already pending",
+               static_cast<unsigned int>(src_addr));
     }
     return;
   }
 
   bool authenticated = false;
   if (parsed_ok && parsed.authenticated) {
-    // A 2W MAC is bound to the nonce of the session it belongs to, so the
-    // check needs that nonce - without it validate_frame() cannot verify a 2W
-    // frame at all and returns false. Passing nothing meant that with
-    // `two_way: true` no incoming 2W frame could ever authenticate: every one
-    // of them was counted as a MAC error and dropped, so position feedback
-    // never worked in 2W mode.
-    const uint8_t *challenge = nullptr;
-    if (!parsed.is_1w_mode) {
-      if (!this->auth_.has_active_challenge(millis())) {
-        ESP_LOGD(TAG, "2W frame from 0x%06X with no session to check it against",
-                 static_cast<unsigned int>(src_addr));
-        // Fall through: validate_frame() will refuse, which is the right
-        // answer - an unbound 2W MAC proves nothing.
-      } else {
-        challenge = this->auth_.get_current_challenge();
-      }
-    }
-
+    // Only 1W frames carry a MAC trailer; the parser reads 2W frames as plain.
     if (!this->system_key_set_) {
       ESP_LOGD(TAG, "Frame carries a MAC but no system_key is configured");
-    } else if (!iohome::frame::validate_frame(&parsed, this->system_key_, challenge)) {
+    } else if (!iohome::frame::validate_frame(&parsed, this->system_key_)) {
       ESP_LOGW(TAG, "MAC verification failed for frame from 0x%06X",
                static_cast<unsigned int>(src_addr));
       this->mac_errors_++;
     } else if (!this->frame_is_fresh_(parsed)) {
-      ESP_LOGW(TAG, "Replayed frame from 0x%06X", static_cast<unsigned int>(src_addr));
+      ESP_LOGW(TAG, "Replayed or unknown-source frame from 0x%06X",
+               static_cast<unsigned int>(src_addr));
       this->replay_errors_++;
     } else {
       authenticated = true;
@@ -828,32 +843,38 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
   frame.is_1w = is_1w;
   frame.rssi = rssi;
 
-  if (cmd == IOHC_CMD_EXECUTE && frame.payload_len >= IOHC_EXEC_PAYLOAD_SIZE) {
-    // Payload layout, counted from the command byte at index 8:
-    //   originator | ACEI | main parameter (2, MSB first) | FP1 | FP2
-    // Reading the main parameter from bytes 9-10 picks up the originator and
-    // the ACEI instead.
-    const uint8_t *exec = &data[8];
-    const uint8_t originator = exec[IOHC_EXEC_OFFSET_ORIGINATOR];
-    const uint8_t acei = exec[IOHC_EXEC_OFFSET_ACEI];
-    const uint16_t main_param = static_cast<uint16_t>(
-        (static_cast<uint16_t>(exec[IOHC_EXEC_OFFSET_MAIN_PARAM]) << 8) |
-        exec[IOHC_EXEC_OFFSET_MAIN_PARAM + 1]);
+  this->handle_execute_(frame);
+}
 
-    const char *action = "position";
-    if (main_param == IOHC_PARAM_OPEN) {
-      action = "OPEN";
-    } else if (main_param == IOHC_PARAM_CLOSE) {
-      action = "CLOSE";
-    } else if (main_param == IOHC_PARAM_STOP) {
-      action = "STOP";
-    }
-
-    ESP_LOGI(TAG, "Execute: %s (originator=0x%02X acei=0x%02X main=0x%04X)", action, originator,
-             acei, main_param);
-
-    this->dispatch_to_covers_(frame);
+void IOWNHomeControlComponent::handle_execute_(const ReceivedFrame &frame) {
+  if (frame.command != IOHC_CMD_EXECUTE || frame.payload == nullptr ||
+      frame.payload_len < IOHC_EXEC_PAYLOAD_SIZE) {
+    return;
   }
+
+  // Payload layout, counted from the byte after the command:
+  //   originator | ACEI | main parameter (2, MSB first) | FP1 | FP2
+  // The IOHC_EXEC_OFFSET_* values count from the command byte itself.
+  const uint8_t *p = frame.payload;
+  const uint8_t originator = p[IOHC_EXEC_OFFSET_ORIGINATOR - 1];
+  const uint8_t acei = p[IOHC_EXEC_OFFSET_ACEI - 1];
+  const uint16_t main_param = static_cast<uint16_t>(
+      (static_cast<uint16_t>(p[IOHC_EXEC_OFFSET_MAIN_PARAM - 1]) << 8) |
+      p[IOHC_EXEC_OFFSET_MAIN_PARAM]);
+
+  const char *action = "position";
+  if (main_param == IOHC_PARAM_OPEN) {
+    action = "OPEN";
+  } else if (main_param == IOHC_PARAM_CLOSE) {
+    action = "CLOSE";
+  } else if (main_param == IOHC_PARAM_STOP) {
+    action = "STOP";
+  }
+
+  ESP_LOGI(TAG, "Execute: %s (originator=0x%02X acei=0x%02X main=0x%04X)", action, originator,
+           acei, main_param);
+
+  this->dispatch_to_covers_(frame);
 }
 
 void IOWNHomeControlComponent::handle_1w_key_transfer_(const uint8_t *data, size_t frame_len,
@@ -1029,9 +1050,9 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address, uint8
     return false;
   }
 
-  // 2W authenticates against a nonce the peer chose, so it needs a handshake
-  // first and a completely different frame. The hand-rolled builder below is
-  // the 1W path; the protocol layer builds the 2W one.
+  // 2W commands go out plain and are authenticated afterwards, by answering
+  // the actuator's 0x3C. The hand-rolled builder below is the 1W path; the
+  // protocol layer builds the 2W one.
   if (this->two_way_) {
     if (command != IOHC_CMD_EXECUTE) {
       ESP_LOGW(TAG, "Only command 0x00 is implemented for 2W");

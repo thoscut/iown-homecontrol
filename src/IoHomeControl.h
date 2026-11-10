@@ -146,8 +146,9 @@ enum class RxReject : uint8_t {
   MALFORMED,        // parse_frame() rejected the buffer
   CRC,              // CRC mismatch
   MAC,              // MAC verification failed
-  REPLAY,           // Rolling code did not move forward
-  UNAUTHENTICATED   // Plain frame received while authentication is required
+  REPLAY,           // Rolling code did not move forward, or MAC seen recently
+  UNAUTHENTICATED,  // Plain frame received while authentication is required
+  CHALLENGED        // Plain 2W command for us: held, 0x3C sent, waiting for 0x3D
 };
 
 /**
@@ -163,6 +164,8 @@ struct RxStats {
   uint32_t mac_failures;
   uint32_t replays;
   uint32_t unauthenticated;
+  /// 2W commands answered with a 0x3C challenge (delivered once the 0x3D verifies).
+  uint32_t challenged;
 };
 
 /**
@@ -185,6 +188,19 @@ public:
    * @param radio Pointer to RadioLib PhysicalLayer (e.g., SX1276, SX1262)
    */
   explicit IoHomeControl(PhysicalLayer* radio);
+
+  /// Bytes to pull off the air per packet. A frame is at most FRAME_MAX_SIZE
+  /// logical bytes, each ten bits on the wire, so up to 43 arrive; 64 leaves
+  /// room for that and the trailing preamble the receiver sees after it. Use
+  /// it for the radio's initial fixed packet length.
+  static constexpr size_t RX_CAPTURE_SIZE = 64;
+
+  /// ETSI EN 300 220 / ERC 70-03: the 868.0-868.6 and 868.7-869.2 MHz sub-bands
+  /// io-homecontrol uses allow 25 mW ERP, i.e. 14 dBm.
+  static constexpr int8_t EU_MAX_TX_POWER_DBM = 14;
+
+  /// How long set_accept_pairing(true) stays open by default.
+  static constexpr uint32_t DEFAULT_PAIRING_WINDOW_MS = 120000;
 
   /**
    * @brief Destroy the IoHomeControl object
@@ -218,6 +234,17 @@ public:
    * @return RADIOLIB_ERR_NONE on success, error code otherwise
    */
   int16_t configure_radio(float frequency = FREQUENCY_CHANNEL_2);
+
+  /**
+   * @brief Set the transmit power configure_radio() programs
+   *
+   * Defaults to EU_MAX_TX_POWER_DBM (14 dBm). Values above that are clamped
+   * unless @p allow_above_eu_limit is true - only for regions or set-ups (e.g.
+   * a lossy antenna path) where that is lawful. configure_radio() steps down
+   * from this value until the module accepts one.
+   */
+  void set_tx_power(int8_t dbm, bool allow_above_eu_limit = false);
+  int8_t get_tx_power() const { return tx_power_dbm_; }
 
   /**
    * @brief Start receiving frames
@@ -402,7 +429,12 @@ public:
   int16_t get_rssi();
 
   /**
-   * @brief Get current SNR, or 0 if no radio is attached
+   * @brief Get current SNR in dB
+   *
+   * NaN when it is not available: no radio attached, or the radio is in FSK
+   * mode - which io-homecontrol always is - where RadioLib's getSNR() returns
+   * RADIOLIB_ERR_WRONG_MODEM (-20) cast to float, a plausible-looking but
+   * meaningless "-20 dB". Print it with %.1f and it reads "nan".
    */
   float get_snr();
 
@@ -447,6 +479,18 @@ public:
    * unauthenticated (discovery, key transfer, their acks) are always accepted.
    */
   void set_accept_plain_frames(bool accept) { accept_plain_frames_ = accept; }
+
+  /**
+   * @brief Only accept authenticated 1W frames from known peers
+   *
+   * Off by default. With it on, the replay guard rejects every source that was
+   * not registered with replay_guard().prime() (persisted sequence) or
+   * replay_guard().add_known_peer(). This closes the re-addressing replay: the
+   * MAC does not cover the addresses, so without it a recorded frame rewritten
+   * to a never-seen source is a fresh "first frame". The global MAC ring in the
+   * guard stops that too, but only while the MAC is still in the ring.
+   */
+  void set_strict_replay_protection(bool strict) { replay_guard_.set_strict(strict); }
 
   /**
    * @brief Install the fixed-payload-length hook
@@ -555,21 +599,17 @@ public:
    */
   mode2w::ChannelState get_current_channel() const;
 
-  /**
-   * @brief Send a challenge request (2W mode)
-   */
-  bool send_challenge_request(const uint8_t dest_node[NODE_ID_SIZE]);
+  // 2W authentication runs inside send_command() and check_received(), as
+  // docs/linklayer.md documents it: commands go out plain, the peer's 0x3C is
+  // answered with a 0x3D over the pending command, and a plain command a peer
+  // sends us is held and answered with a 0x3C until its 0x3D verifies. The old
+  // send_challenge_request()/send_challenge_response() are gone: an unbound
+  // 0x3C authenticates nothing, and answering an arbitrary nonce on request was
+  // a chosen-input MAC oracle.
 
   /**
-   * @brief Send a challenge response (2W mode)
-   *
-   * @param challenge Challenge from the request (6 bytes)
-   */
-  bool send_challenge_response(const uint8_t dest_node[NODE_ID_SIZE],
-                               const uint8_t challenge[HMAC_SIZE]);
-
-  /**
-   * @brief Get authentication state (2W mode)
+   * @brief Challenger state (2W mode): CHALLENGE_SENT while a peer's command
+   *        is held, AUTHENTICATED shortly after one verified
    */
   mode2w::ChallengeState get_auth_state();
 
@@ -663,9 +703,18 @@ public:
    * acknowledged with 0x33. The recovered key is delivered to the callback set
    * with set_key_received_callback() so it can be persisted.
    *
+   * The window closes on its own after @p window_ms (default 120 s), and as
+   * soon as a key has been adopted: a node left accepting pairing forever hands
+   * its key to - or takes a key from - anyone who asks. A window of 0 selects
+   * the default.
+   *
    * @param enabled Whether to act on pairing requests
+   * @param window_ms How long to stay open
    */
-  void set_accept_pairing(bool enabled);
+  void set_accept_pairing(bool enabled, uint32_t window_ms = DEFAULT_PAIRING_WINDOW_MS);
+
+  /// Whether the pairing window is open now (expires it as a side effect).
+  bool is_accepting_pairing();
 
   /**
    * @brief Whether a pairing exchange is currently in progress
@@ -758,6 +807,8 @@ protected:
   KeyReceivedCallback key_received_callback_;
   void* key_received_context_;
   bool accept_pairing_;
+  uint32_t accept_pairing_since_ms_;
+  uint32_t accept_pairing_window_ms_;
   Pairing2W pairing_state_;
   uint8_t pairing_peer_[NODE_ID_SIZE];
   uint8_t pairing_key_[AES_KEY_SIZE];
@@ -772,8 +823,9 @@ protected:
   /// does not keep diverting unrelated 0x3C/0x32 frames from MAC screening.
   static constexpr uint32_t PAIRING_TIMEOUT_MS = 5000;
 
-  /// Reset a pairing handshake to IDLE if it has been waiting too long. Called
-  /// on the receive path so the guard runs even without a matching answer.
+  /// Reset a pairing handshake to IDLE if it has been waiting too long, and
+  /// close the accept-pairing window once it has run out. Called on the receive
+  /// path so the guard runs even without a matching answer.
   void expire_stale_pairing();
 
   /// The clock the pairing timeout reads. In production it is NOW_MS(); a host
@@ -791,11 +843,6 @@ protected:
   }
 
  protected:
-
-  /// Bytes to pull off the air per packet. A frame is at most FRAME_MAX_SIZE
-  /// logical bytes, each ten bits on the wire, so up to 43 arrive; 64 leaves
-  /// room for that and the trailing preamble the receiver sees after it.
-  static constexpr size_t RX_CAPTURE_SIZE = 64;
 
   /// True when a frame belongs to a pairing exchange and must skip the session
   /// authentication gate (the peers do not yet share the key that gate checks).
@@ -833,8 +880,22 @@ protected:
 
   /**
    * @brief Take the next rolling code, extending the persisted reservation
+   *
+   * @return false if the reservation could not be persisted. The counter is
+   *         then left untouched and the caller must not transmit: a code that
+   *         is not covered by a persisted reservation would be reused after a
+   *         reboot, and the receiver rejects it as a replay.
    */
-  uint16_t consume_rolling_code();
+  bool consume_rolling_code(uint16_t& code);
+
+  /// Answer a 2W 0x3C for our pending request, if it is one.
+  void handle_challenge_request(const frame::IoFrame* frame);
+
+  /// RadioLib SNR, or NaN when the radio cannot report one (FSK).
+  float read_snr();
+
+  int8_t tx_power_dbm_;
+  bool allow_above_eu_limit_;
 };
 
 } // namespace iohome

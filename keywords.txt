@@ -31,8 +31,30 @@ NodeType	KEYWORD1
 WindowPosition	KEYWORD1
 VeluxModel	KEYWORD1
 RainSensorStatus	KEYWORD1
+LogLevel	KEYWORD1
+LogCallback	KEYWORD1
+KeyReceivedCallback	KEYWORD1
+RawFrameCallback	KEYWORD1
 
 # Methods and Functions (KEYWORD2)
+begin	KEYWORD2
+open	KEYWORD2
+close	KEYWORD2
+stop	KEYWORD2
+ventilate	KEYWORD2
+force	KEYWORD2
+send_execute_fp	KEYWORD2
+set_priority	KEYWORD2
+get_snr	KEYWORD2
+set_log_callback	KEYWORD2
+set_raw_frame_callback	KEYWORD2
+use_radio_packet_length	KEYWORD2
+pull_device_key_2w	KEYWORD2
+set_accept_pairing	KEYWORD2
+is_pairing	KEYWORD2
+set_key_received_callback	KEYWORD2
+set_system_key	KEYWORD2
+mp_from_percent_closed	KEYWORD2
 configure_radio	KEYWORD2
 start_receive	KEYWORD2
 stop_receive	KEYWORD2
@@ -54,8 +76,6 @@ last_reject_reason	KEYWORD2
 replay_guard	KEYWORD2
 enable_frequency_hopping	KEYWORD2
 update_frequency_hopping	KEYWORD2
-send_challenge_request	KEYWORD2
-send_challenge_response	KEYWORD2
 get_auth_state	KEYWORD2
 start_discovery	KEYWORD2
 stop_discovery	KEYWORD2

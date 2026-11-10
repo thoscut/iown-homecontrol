@@ -5,7 +5,7 @@
   "description": "io-homecontrol protocol library for Somfy, Velux and compatible devices, targeting ESP32 boards with RadioLib-supported radios.",
   "keywords": "io-homecontrol, somfy, velux, LoRa32, iown, iohome",
   "homepage": "https://github.com/thoscut/iown-homecontrol",
-  "license": "CC-BY-SA-4.0",
+  "license": "CC0-1.0",
   "platforms": "espressif32",
   "repository": {
     "type": "git",
@@ -26,13 +26,16 @@
     }
   ],
   "frameworks": [
-    "arduino",
-    "espidf"
+    "arduino"
   ],
   "examples": [
     "examples/*/*.ino"
   ],
   "build": {
-    "libLDFMode": "deep+"
+    "libLDFMode": "deep+",
+    "srcFilter": [
+      "+<*>",
+      "-<main.cpp>"
+    ]
   }
 }

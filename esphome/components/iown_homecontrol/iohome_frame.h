@@ -10,9 +10,17 @@
  *   | ctrl0 | ctrl1 | dest[3] | src[3] | cmd | data[0..n] | [seq[2]] | [mac[6]] | crc[2] |
  *
  * The sequence number and MAC form the optional *authentication trailer*.
- * It is present in authenticated 1W frames (seq + MAC) and in authenticated
- * 2W frames (MAC only, the challenge takes the place of the sequence number).
- * Plain frames - discovery, key transfer, acks - carry neither.
+ * It is present in authenticated 1W frames (seq + MAC). Plain 1W frames -
+ * discovery, key transfer, acks - carry neither.
+ *
+ * 2W frames carry NO trailer (docs/linklayer.md, "2W Authentication": "2W
+ * frames do not have any MAC or sequence number incorporated in the frame
+ * itself"). A 2W command is authenticated out of band: the receiver answers it
+ * with a 0x3C carrying a fresh challenge, and the sender proves the key with a
+ * 0x3D whose 6-byte payload is the MAC over the original command and that
+ * challenge. See mode2w::AuthenticationManager. finalize_frame() can still
+ * attach a challenge-bound MAC to a 2W frame, but no real device sends or
+ * expects one; it is kept only for experiments and old tests.
  */
 
 #pragma once
@@ -42,7 +50,7 @@ struct IoFrame {
 
   // Command and Data
   uint8_t command_id;               // Command ID (1 byte)
-  uint8_t data[FRAME_MAX_DATA_SIZE]; // Parameters (0-21 bytes)
+  uint8_t data[FRAME_MAX_DATA_SIZE]; // Parameters (0-23 bytes)
   uint8_t data_len;                 // Actual length of data
 
   // Authentication trailer (only meaningful when `authenticated` is true)
@@ -75,6 +83,10 @@ enum class AuthTrailer : uint8_t {
    *
    * This resolves every capture in docs/ correctly. Use NONE or PRESENT when
    * the caller knows better.
+   *
+   * 2W frames are always read as NONE under AUTO: the protocol puts no MAC in
+   * them. Guessing that the last six bytes of an unknown 2W command were a MAC
+   * misparsed every such command and invited spoofed "authenticated" frames.
    */
   AUTO,
   /// Payload is data only; no sequence number and no MAC.
@@ -86,8 +98,10 @@ enum class AuthTrailer : uint8_t {
 /**
  * @brief Whether a command is defined to travel without a MAC
  *
- * These are the bootstrap commands: the peers have no shared key yet, so there
- * is nothing to authenticate with. Every other command should be authenticated.
+ * These are the bootstrap commands - the peers have no shared key yet, so there
+ * is nothing to authenticate with - and the 2W challenge (0x3C) and challenge
+ * answer (0x3D), which are the authentication itself and travel plain. Every
+ * other command should be authenticated (1W: MAC trailer; 2W: 0x3C/0x3D).
  */
 bool is_unauthenticated_command(uint8_t command_id);
 
@@ -276,10 +290,17 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame,
                  AuthTrailer trailer = AuthTrailer::AUTO);
 
 /**
- * @brief Validate frame (CRC and, for authenticated frames, the MAC)
+ * @brief Validate frame (CRC and, when a key is given, the MAC)
+ *
+ * With @p system_key null only the CRC is checked. With a key, the frame must
+ * carry a MAC that verifies: a plain frame is reported INVALID. It used to be
+ * reported valid ("nothing to verify"), which let a caller that asked for MAC
+ * verification - verify_challenge_response() among them - accept a frame with
+ * no MAC at all. A caller that accepts plain frames by policy checks the CRC
+ * with no key and decides on `frame->authenticated` itself.
  *
  * @param frame Pointer to IoFrame structure
- * @param system_key System key for MAC verification (nullptr to skip MAC check)
+ * @param system_key System key for MAC verification (nullptr to check the CRC only)
  * @param challenge Challenge for 2W mode (required to verify a 2W MAC)
  * @return true if frame is valid, false otherwise
  */

@@ -2117,7 +2117,23 @@ void test_pair_device_1w_consumes_a_sequence_and_sets_order(void) {
   TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
                                               radio.last_transmission.size(), &cmd));
   TEST_ASSERT_TRUE(cmd.authenticated);
-  TEST_ASSERT_TRUE(iohome::frame::get_rolling_code(&cmd) != kt_seq);
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(kt_seq + 1), iohome::frame::get_rolling_code(&cmd));
+}
+
+void test_pair_device_1w_save_failure_sends_nothing(void) {
+  // A rolling code that cannot be persisted must stop the pairing before the
+  // 0x39: sending it and then refusing the 0x30 left the actuator with its old
+  // controller removed and no key to replace it.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  FailingStore store;
+  controller.set_rolling_code_store(&store, 16);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  const uint8_t new_key[16] = {0x01, 0x02, 0x03};
+  TEST_ASSERT_FALSE(controller.pair_device_1w(PEER_NODE, new_key, 0x02));
+  TEST_ASSERT_EQUAL_UINT(0, radio.transmissions.size());
+  TEST_ASSERT_EQUAL_UINT16(0, controller.get_rolling_code());
 }
 
 void test_hopping_waits_for_a_pending_packet(void) {
@@ -2219,6 +2235,7 @@ int main(int, char**) {
   RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);
   RUN_TEST(test_pair_device_1w_emits_two_frames);
   RUN_TEST(test_pair_device_1w_consumes_a_sequence_and_sets_order);
+  RUN_TEST(test_pair_device_1w_save_failure_sends_nothing);
   RUN_TEST(test_pair_rejects_nullptr);
   RUN_TEST(test_discovery_transmits_request);
 

@@ -1101,19 +1101,22 @@ bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE],
 
   LOG_INFO("Pairing device (1W mode)");
 
+  // The 0x30 carries a sequence number the actuator records for us. Consume it
+  // like any command's: handing out rolling_code_ without advancing it made the
+  // first command after pairing repeat that sequence, which reads as a replay.
+  // Consumed before the 0x39 goes out: if the reservation cannot be persisted
+  // we refuse here, rather than after the actuator has already dropped its
+  // existing controller and with no 0x30 to replace it.
+  uint16_t sequence = 0;
+  if (!consume_rolling_code(sequence)) {
+    return false;
+  }
+
   // docs/linklayer.md "1W Discovery": remove the previous 1W key (0x39), then
   // send the encrypted key (0x30). Both frames are plain.
   frame::IoFrame tx_frame;
   if (discovery_manager_->create_remove_1w_controller(&tx_frame, dest_node, own_node_id_)) {
     transmit_frame(&tx_frame);
-  }
-
-  // The 0x30 carries a sequence number the actuator records for us. Consume it
-  // like any command's: handing out rolling_code_ without advancing it made the
-  // first command after pairing repeat that sequence, which reads as a replay.
-  uint16_t sequence = 0;
-  if (!consume_rolling_code(sequence)) {
-    return false;
   }
 
   if (!discovery_manager_->create_key_transfer_1w(&tx_frame, dest_node, own_node_id_,

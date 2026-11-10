@@ -188,18 +188,20 @@ bool set_command(IoFrame* frame, uint8_t cmd_id, const uint8_t* params, size_t p
 
   const uint8_t previous_len = frame->data_len;
 
-  frame->command_id = cmd_id;
+  // Check the new length before touching the payload: refresh_length() only
+  // looks at data_len, and copying first left a rejected update's bytes in
+  // data under the old data_len (and the old command id).
   frame->data_len = static_cast<uint8_t>(params_len);
-
-  if (params_len > 0) {
-    memcpy(frame->data, params, params_len);
-  }
-
   if (!refresh_length(frame)) {
     // Roll back so the frame stays consistent after a rejected update.
     frame->data_len = previous_len;
     refresh_length(frame);
     return false;
+  }
+
+  frame->command_id = cmd_id;
+  if (params_len > 0) {
+    memcpy(frame->data, params, params_len);
   }
 
   return true;

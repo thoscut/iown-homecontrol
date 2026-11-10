@@ -316,6 +316,12 @@ class IOWNHomeControlComponent : public Component {
     node[2] = static_cast<uint8_t>(address & 0xFF);
   }
 
+  /// Inverse of address_to_node(): three bytes, most significant first.
+  static uint32_t node_to_address(const uint8_t node[iohome::NODE_ID_SIZE]) {
+    return (static_cast<uint32_t>(node[0]) << 16) | (static_cast<uint32_t>(node[1]) << 8) |
+           node[2];
+  }
+
   /// Whether an authenticated frame is also *fresh*, by whichever mechanism
   /// its mode carries. A valid MAC proves authorship, never freshness.
   bool frame_is_fresh_(const iohome::frame::IoFrame &frame);

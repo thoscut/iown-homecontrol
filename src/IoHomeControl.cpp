@@ -996,14 +996,17 @@ bool IoHomeControl::update_frequency_hopping() {
     return false;
   }
 
-  // The 2.7 ms dwell time needs microsecond timing; millis() cannot express it.
-  if (!channel_hopper_->update_us(NOW_US())) {
+  // A packet is waiting in the radio's buffer: restarting reception now would
+  // discard it before check_received() reads it. Hop on the next call instead.
+  // Checked before update_us(), which advances the hopper's channel and dwell
+  // timer: bailing out after it left the hopper one channel ahead of the radio
+  // and skipped that channel's dwell entirely.
+  if (receiving_ && g_packet_flag) {
     return false;
   }
 
-  // A packet is waiting in the radio's buffer: restarting reception now would
-  // discard it before check_received() reads it. Hop on the next call instead.
-  if (receiving_ && g_packet_flag) {
+  // The 2.7 ms dwell time needs microsecond timing; millis() cannot express it.
+  if (!channel_hopper_->update_us(NOW_US())) {
     return false;
   }
 
@@ -1105,8 +1108,16 @@ bool IoHomeControl::pair_device_1w(const uint8_t dest_node[NODE_ID_SIZE],
     transmit_frame(&tx_frame);
   }
 
+  // The 0x30 carries a sequence number the actuator records for us. Consume it
+  // like any command's: handing out rolling_code_ without advancing it made the
+  // first command after pairing repeat that sequence, which reads as a replay.
+  uint16_t sequence = 0;
+  if (!consume_rolling_code(sequence)) {
+    return false;
+  }
+
   if (!discovery_manager_->create_key_transfer_1w(&tx_frame, dest_node, own_node_id_,
-                                                  new_system_key, manufacturer, rolling_code_)) {
+                                                  new_system_key, manufacturer, sequence)) {
     LOG_ERROR("Failed to create key transfer frame");
     return false;
   }

@@ -145,7 +145,7 @@ public:
    * A primed node is also a known peer for strict mode, and its sequence is
    * treated as real: the next frame must move forward from it.
    *
-   * @return false if the table is full and no entry could be evicted
+   * @return false if the table is full of known peers (none is evicted)
    */
   bool prime(const uint8_t node_id[NODE_ID_SIZE], uint16_t sequence);
 
@@ -211,7 +211,9 @@ private:
 
   Entry* find(const uint8_t node_id[NODE_ID_SIZE]);
   const Entry* find(const uint8_t node_id[NODE_ID_SIZE]) const;
-  Entry* allocate(const uint8_t node_id[NODE_ID_SIZE]);
+  /// Claim a slot for @p node_id: a free one, else the LRU non-known entry,
+  /// else (only if @p may_evict_known) the LRU known peer. nullptr if none.
+  Entry* allocate(const uint8_t node_id[NODE_ID_SIZE], bool may_evict_known);
 
   /// Find the node's entry; create one unless strict mode forbids it.
   Entry* lookup_for_accept(const uint8_t node_id[NODE_ID_SIZE]);

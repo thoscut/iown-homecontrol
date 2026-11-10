@@ -311,7 +311,7 @@ bool validate_frame(const IoFrame* frame, const uint8_t* system_key = nullptr, c
  *
  * Used for the 1W trailer MAC and for the 2W 0x3D answer alike.
  *
- * @return Number of bytes written (1 + data_len)
+ * @return Number of bytes written (1 + data_len, data_len capped at FRAME_MAX_DATA_SIZE)
  */
 size_t build_mac_input(const IoFrame* frame, uint8_t out[1 + FRAME_MAX_DATA_SIZE]);
 

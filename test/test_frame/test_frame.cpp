@@ -1038,6 +1038,31 @@ void test_print_frame_handles_nullptr(void) {
     iohome::frame::print_frame(&frame, nullptr);
 }
 
+void test_rejected_set_command_leaves_the_frame_alone(void) {
+    // An authenticated 1W frame has 8 bytes less room for parameters. A
+    // set_command() that does not fit must not overwrite the payload or the
+    // command id it already carries.
+    const uint8_t key[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+    IoFrame frame;
+    iohome::frame::init_frame(&frame, true);
+    const uint8_t params[6] = {0x01, 0xE7, 0x00, 0x00, 0x00, 0x00};
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&frame, 0x00, params, sizeof(params)));
+    iohome::frame::set_rolling_code(&frame, 0x0102);
+    TEST_ASSERT_TRUE(iohome::frame::finalize_frame(&frame, key));
+    const IoFrame before = frame;
+
+    uint8_t big[20];
+    memset(big, 0xAB, sizeof(big));
+    TEST_ASSERT_FALSE(iohome::frame::set_command(&frame, 0x01, big, sizeof(big)));
+
+    TEST_ASSERT_EQUAL_UINT8(before.command_id, frame.command_id);
+    TEST_ASSERT_EQUAL_UINT8(before.data_len, frame.data_len);
+    TEST_ASSERT_EQUAL_UINT8(before.frame_length, frame.frame_length);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(before.data, frame.data, sizeof(frame.data));
+    TEST_ASSERT_TRUE(iohome::frame::validate_frame(&frame, key));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
 
@@ -1098,6 +1123,7 @@ int main(int, char **) {
     RUN_TEST(test_key_transfer_sized_frames_fit);
     RUN_TEST(test_parse_never_overflows_for_any_control_byte);
     RUN_TEST(test_print_frame_handles_nullptr);
+    RUN_TEST(test_rejected_set_command_leaves_the_frame_alone);
 
     return UNITY_END();
 }

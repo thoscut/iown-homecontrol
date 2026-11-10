@@ -39,7 +39,8 @@ const ReplayGuard::Entry* ReplayGuard::find(const uint8_t node_id[NODE_ID_SIZE])
   return nullptr;
 }
 
-ReplayGuard::Entry* ReplayGuard::allocate(const uint8_t node_id[NODE_ID_SIZE]) {
+ReplayGuard::Entry* ReplayGuard::allocate(const uint8_t node_id[NODE_ID_SIZE],
+                                          bool may_evict_known) {
   // Prefer a free slot.
   Entry* victim = nullptr;
   for (Entry& entry : entries_) {
@@ -52,7 +53,8 @@ ReplayGuard::Entry* ReplayGuard::allocate(const uint8_t node_id[NODE_ID_SIZE]) {
   // Otherwise evict the least recently used entry that is not a known peer -
   // a flood of frames from made-up sources must not push a registered peer
   // (and its sequence) out of the table. Only when every slot is a known peer
-  // does the LRU known peer go.
+  // does the LRU known peer go, and only if the caller allows it: registering
+  // a peer must not silently push out another registered peer.
   if (victim == nullptr) {
     for (Entry& entry : entries_) {
       if (!entry.known && (victim == nullptr || entry.last_use < victim->last_use)) {
@@ -61,6 +63,9 @@ ReplayGuard::Entry* ReplayGuard::allocate(const uint8_t node_id[NODE_ID_SIZE]) {
     }
   }
   if (victim == nullptr) {
+    if (!may_evict_known) {
+      return nullptr;
+    }
     victim = &entries_[0];
     for (size_t i = 1; i < MAX_NODES; i++) {
       if (entries_[i].last_use < victim->last_use) {
@@ -84,7 +89,7 @@ ReplayGuard::Entry* ReplayGuard::lookup_for_accept(const uint8_t node_id[NODE_ID
   if (strict_) {
     return nullptr;  // Unknown source: refused, and no slot spent on it.
   }
-  return allocate(node_id);
+  return allocate(node_id, /*may_evict_known=*/true);
 }
 
 bool ReplayGuard::sequence_ok(const Entry* entry, uint16_t sequence) const {
@@ -197,9 +202,9 @@ bool ReplayGuard::prime(const uint8_t node_id[NODE_ID_SIZE], uint16_t sequence) 
 
   Entry* entry = find(node_id);
   if (entry == nullptr) {
-    entry = allocate(node_id);
+    entry = allocate(node_id, /*may_evict_known=*/false);
     if (entry == nullptr) {
-      return false;
+      return false;  // Table full of known peers
     }
   }
 
@@ -217,22 +222,9 @@ bool ReplayGuard::add_known_peer(const uint8_t node_id[NODE_ID_SIZE]) {
 
   Entry* entry = find(node_id);
   if (entry == nullptr) {
-    // allocate() falls back to evicting the LRU known peer when every slot is
-    // one. Registering a peer must not silently push out another registered
-    // peer, so report a full table instead.
-    bool has_room = false;
-    for (const Entry& e : entries_) {
-      if (!e.used || !e.known) {
-        has_room = true;
-        break;
-      }
-    }
-    if (!has_room) {
-      return false;
-    }
-    entry = allocate(node_id);
+    entry = allocate(node_id, /*may_evict_known=*/false);
     if (entry == nullptr) {
-      return false;
+      return false;  // Table full of known peers
     }
   }
 

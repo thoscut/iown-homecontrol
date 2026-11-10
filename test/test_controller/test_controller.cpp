@@ -13,6 +13,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2090,6 +2091,64 @@ void test_hopping_retunes_from_standby_quietly(void) {
   TEST_ASSERT_EQUAL_UINT(0, capture.count(iohome::LogLevel::INFO));
 }
 
+void test_pair_device_1w_consumes_a_sequence_and_sets_order(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  const uint8_t new_key[16] = {0x01, 0x02, 0x03};
+  const uint16_t before = controller.get_rolling_code();
+  TEST_ASSERT_TRUE(controller.pair_device_1w(PEER_NODE, new_key, 0x02));
+  TEST_ASSERT_EQUAL_UINT(2, radio.transmissions.size());
+
+  // Real 0x39/0x30 frames carry order bits 11; order 00 is ignored.
+  TEST_ASSERT_EQUAL_HEX8(0xC0, radio.transmissions[0][0] & 0xC0);
+  TEST_ASSERT_EQUAL_HEX8(0xC0, radio.transmissions[1][0] & 0xC0);
+
+  // The 0x30's sequence (after key, manufacturer and reserved byte) is spent:
+  // the next command must not repeat it, or it reads as a replay.
+  const std::vector<uint8_t>& kt = radio.transmissions[1];
+  const uint16_t kt_seq = static_cast<uint16_t>((kt[9 + 18] << 8) | kt[9 + 19]);
+  TEST_ASSERT_EQUAL_UINT16(before, kt_seq);
+  TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(before + 1), controller.get_rolling_code());
+
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  iohome::frame::IoFrame cmd;
+  TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
+                                              radio.last_transmission.size(), &cmd));
+  TEST_ASSERT_TRUE(cmd.authenticated);
+  TEST_ASSERT_TRUE(iohome::frame::get_rolling_code(&cmd) != kt_seq);
+}
+
+void test_hopping_waits_for_a_pending_packet(void) {
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY, false));
+  controller.start_receive();
+  TEST_ASSERT_TRUE(controller.enable_frequency_hopping(true));
+  const float start_freq = radio.frequency;
+
+  // A packet is waiting: no hop may happen, and the hopper must not move on
+  // without the radio either, however many dwell times pass.
+  IoHomeControl::notify_packet_received();
+  const clock_t until = clock() + (CLOCKS_PER_SEC / 100);  // ~10 ms CPU, > 3 dwells
+  while (clock() < until) {
+    TEST_ASSERT_FALSE(controller.update_frequency_hopping());
+  }
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(iohome::mode2w::ChannelState::CHANNEL_2),
+                        static_cast<int>(controller.get_current_channel()));
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, start_freq, radio.frequency);
+
+  // Once the packet is gone the deferred hop happens - to the NEXT channel,
+  // not one past it.
+  controller.stop_receive();
+  controller.start_receive();
+  TEST_ASSERT_TRUE(controller.update_frequency_hopping());
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(iohome::mode2w::ChannelState::CHANNEL_3),
+                        static_cast<int>(controller.get_current_channel()));
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 869.85f, radio.frequency);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
 
@@ -2120,6 +2179,7 @@ int main(int, char**) {
   RUN_TEST(test_snr_is_nan_in_fsk_mode);
   RUN_TEST(test_key_transfer_is_redacted_from_the_tx_log);
   RUN_TEST(test_hopping_retunes_from_standby_quietly);
+  RUN_TEST(test_hopping_waits_for_a_pending_packet);
 
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_goes_high_byte_first);
@@ -2158,6 +2218,7 @@ int main(int, char**) {
   RUN_TEST(test_2w_pairing_is_off_by_default);
   RUN_TEST(test_1w_node_ignores_pairing_frames_without_crashing);
   RUN_TEST(test_pair_device_1w_emits_two_frames);
+  RUN_TEST(test_pair_device_1w_consumes_a_sequence_and_sets_order);
   RUN_TEST(test_pair_rejects_nullptr);
   RUN_TEST(test_discovery_transmits_request);
 

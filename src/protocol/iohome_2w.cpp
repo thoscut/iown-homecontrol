@@ -714,6 +714,10 @@ bool DiscoveryManager::create_key_transfer_1w(
   }
 
   frame::init_frame(frame, true);
+  // Real 0x30 frames carry order bits 11 (ctrl0 0xFC); an actuator ignores an
+  // otherwise valid 1W frame sent as order 00. Matches the ESPHome component's
+  // send_1w_pairing() and IoHomeControl::send_command().
+  frame::set_order(frame, FrameOrder::GROUP_END);
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 
@@ -795,6 +799,7 @@ bool DiscoveryManager::create_remove_1w_controller(
   }
 
   frame::init_frame(frame, true);
+  frame::set_order(frame, FrameOrder::GROUP_END);  // order 11, as on the wire
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 

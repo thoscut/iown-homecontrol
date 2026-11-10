@@ -454,6 +454,11 @@ uint16_t IOWNHomeControlComponent::consume_rolling_code_() {
       // and the actuator ignores them until the counter catches up.
       ESP_LOGE(TAG, "Could not persist the rolling-code reservation (0x%04X)",
                this->rolling_code_reserved_until_);
+      // Do not trust a reservation that is not on flash: leaving it in place
+      // skipped the write for the rest of the block, so a transient failure
+      // kept up to a block of codes unpersisted. Make the next call retry
+      // (remaining wraps past the block), as src/IoHomeControl.cpp does.
+      this->rolling_code_reserved_until_ = this->rolling_code_;
     }
   }
 
@@ -585,10 +590,8 @@ void IOWNHomeControlComponent::handle_challenge_frame_(const iohome::frame::IoFr
     rf.authenticated = true;
     rf.ctrl0 = verified.ctrl_byte_0;
     rf.ctrl1 = verified.ctrl_byte_1;
-    rf.dest_address = (static_cast<uint32_t>(verified.dest_node[0]) << 16) |
-                      (static_cast<uint32_t>(verified.dest_node[1]) << 8) | verified.dest_node[2];
-    rf.src_address = (static_cast<uint32_t>(verified.src_node[0]) << 16) |
-                     (static_cast<uint32_t>(verified.src_node[1]) << 8) | verified.src_node[2];
+    rf.dest_address = node_to_address(verified.dest_node);
+    rf.src_address = node_to_address(verified.src_node);
     rf.command = verified.command_id;
     rf.payload = verified.data;
     rf.payload_len = verified.data_len;
@@ -719,10 +722,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
 
   // Fixed-length receive mode delivers trailing bytes past the frame, so every
   // field below is taken relative to frame_len, never to the received count.
-  const uint32_t dest_addr =
-      (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 8) | data[4];
-  const uint32_t src_addr =
-      (static_cast<uint32_t>(data[5]) << 16) | (static_cast<uint32_t>(data[6]) << 8) | data[7];
+  const uint32_t dest_addr = node_to_address(&data[2]);
+  const uint32_t src_addr = node_to_address(&data[5]);
   const uint8_t cmd = data[8];
 
   // CRC-16/KERMIT over everything but the last two bytes, LSB transmitted first.

@@ -98,7 +98,7 @@ def main():
           fires_on("{" + ",".join("0x" + real_hex[i:i + 2]
                                   for i in range(0, len(real_hex), 2)) + "}"))
     # The 2W key transfer (command 0x32) carries a key the same way and must also
-    # be flagged. (The framed on-air form is covered by the C++ phy-framing suite.)
+    # be flagged. (Its framed on-air form goes through the same path as (a1).)
     check("real 2W 0x32 flagged",
           fires_on(make_0x30(bytes([0x12, 0x34, 0x56]), cmd=0x32).hex()))
 
@@ -118,6 +118,18 @@ def main():
     check("framed placeholder 0x30 not flagged",
           not fires_on("55 55 FF 33 " + " ".join(
               f"{b:02X}" for b in uart_frame(make_0x30(bytes([0xAB, 0xCD, 0xEF]))))))
+    #   - a bit dump that did not start on a byte boundary: every shift of the
+    #     frame within a byte, as a demodulator that locked on mid-preamble
+    #     writes it (idle 1s ahead of the frame, as on the air). A 4-bit shift
+    #     is a nibble and was always found; the other six were not.
+    wire_bits = int.from_bytes(wire, "big")
+    for lead in range(1, 8):
+        total = lead + len(wire) * 8
+        pad = -total % 8
+        value = (((1 << lead) - 1) << (len(wire) * 8) | wire_bits) << pad | ((1 << pad) - 1)
+        shifted = value.to_bytes((total + pad) // 8, "big")
+        check(f"framed real 0x30 shifted by {lead} bit(s) flagged",
+              fires_on("AA AA AA " + " ".join(f"{b:02X}" for b in shifted)))
 
     # (a2) encodings an earlier version missed (reviewer evasion probes).
     #   - base64 of the shortest key frames (27/29 bytes -> 36/40 chars incl. pad)

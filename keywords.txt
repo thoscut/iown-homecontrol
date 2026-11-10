@@ -48,6 +48,7 @@ set_priority	KEYWORD2
 get_snr	KEYWORD2
 set_log_callback	KEYWORD2
 set_raw_frame_callback	KEYWORD2
+raw_frame_carries_key	KEYWORD2
 use_radio_packet_length	KEYWORD2
 pull_device_key_2w	KEYWORD2
 set_accept_pairing	KEYWORD2
@@ -104,6 +105,7 @@ is_2w_mode	KEYWORD2
 get_frame_length	KEYWORD2
 set_frame_length	KEYWORD2
 is_unauthenticated_command	KEYWORD2
+carries_key_material	KEYWORD2
 expected_payload_size	KEYWORD2
 
 compute_crc16	KEYWORD2

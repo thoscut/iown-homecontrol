@@ -752,6 +752,57 @@ void test_pairing_expires_after_timeout(void) {
   TEST_ASSERT_TRUE(radio.last_transmission.empty());   // no 0x32 emitted
 }
 
+void test_pairing_expires_without_any_traffic(void) {
+  // A device that is not there sends nothing, and on a quiet channel nothing
+  // else arrives either. The documented loop - pump check_received() until
+  // is_pairing() goes false - must still end: the timeout cannot wait for a
+  // packet to come along and trigger it. Checked in both waits of the push.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                 0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NONCE[6] = {0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6};
+
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, STACK_KEY, /*is_1w=*/false));
+  controller.start_receive();
+  iohome::frame::IoFrame got;
+
+  // Waiting for the device's 0x3C.
+  controller.set_pairing_clock_ms(1000);
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));
+  controller.set_pairing_clock_ms(1000 + 4000);
+  TEST_ASSERT_FALSE(controller.check_received(&got));  // nothing arrived
+  TEST_ASSERT_TRUE(controller.is_pairing());           // and not due yet
+  controller.set_pairing_clock_ms(1000 + 6000);
+  TEST_ASSERT_FALSE(controller.check_received(&got));
+  TEST_ASSERT_FALSE(controller.is_pairing());
+
+  // Waiting for the device's 0x33.
+  controller.set_pairing_clock_ms(10000);
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, STACK_KEY));
+  iohome::frame::IoFrame chal;
+  iohome::frame::init_frame(&chal, false);
+  iohome::frame::set_destination(&chal, CTRL);
+  iohome::frame::set_source(&chal, DEV);
+  iohome::frame::set_command(&chal, iohome::CMD_CHALLENGE_REQUEST, NONCE, 6);
+  iohome::frame::finalize_frame_plain(&chal);
+  deliver_frame(radio, chal);
+  controller.check_received(&got);
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, parse_last(radio).command_id);
+  TEST_ASSERT_TRUE(controller.is_pairing());
+  controller.set_pairing_clock_ms(10000 + 6000);
+  TEST_ASSERT_FALSE(controller.check_received(&got));
+  TEST_ASSERT_FALSE(controller.is_pairing());
+
+  // The device's late 0x3C for that 0x32 is no longer answered with the key.
+  radio.last_transmission.clear();
+  deliver_frame(radio, chal);
+  controller.check_received(&got);
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());
+}
+
 void test_pairing_rejects_truncated_frames(void) {
   // Pairing frames are CRC-checked but NOT MAC-checked, so their contents are
   // attacker-controlled. The data_len guards in handle_pairing_frame must reject
@@ -1645,6 +1696,58 @@ void test_raw_sniffer_sees_every_packet(void) {
   TEST_ASSERT_EQUAL_UINT32(4, controller.rx_stats().received);
 }
 
+void test_raw_sniffer_can_tell_a_key_transfer(void) {
+  // What a RawFrameCallback is handed for a key transfer is the system key
+  // behind a public mask. raw_frame_carries_key() is how a sniffer keeps it out
+  // of its log - on the bytes exactly as the callback receives them.
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+
+  SnifferCapture capture;
+  controller.set_raw_frame_callback(sniffer_cb, &capture);
+  TEST_ASSERT_EQUAL_INT(RADIOLIB_ERR_NONE, controller.start_receive());
+  iohome::frame::IoFrame frame;
+
+  // A 1W key transfer (0x30), as pair_device_1w() puts it on the air.
+  TEST_ASSERT_TRUE(controller.pair_device_1w(PEER_NODE, SYSTEM_KEY));
+  const std::vector<uint8_t> key_transfer = radio.last_transmission;
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_SEND_1W_KEY, key_transfer[iohome::OFFSET_COMMAND_ID]);
+  radio.deliver(key_transfer.data(), key_transfer.size());
+  controller.check_received(&frame);
+  TEST_ASSERT_EQUAL_INT(1, capture.calls);
+  TEST_ASSERT_TRUE(IoHomeControl::raw_frame_carries_key(capture.frames[0].data(),
+                                                        capture.frames[0].size()));
+
+  // The same capture with a start bit knocked out of its header no longer
+  // de-frames, but its key cells are intact - it must still be recognised.
+  std::vector<uint8_t> damaged = capture.frames[0];
+  damaged[2] ^= 0x08;  // bit 20: the start bit of the third cell
+  uint8_t out[iohome::FRAME_MAX_SIZE];
+  TEST_ASSERT_EQUAL_UINT(0, iohome::phy::uart_decode_frame(damaged.data(), damaged.size(),
+                                                           out, sizeof out));
+  TEST_ASSERT_TRUE(IoHomeControl::raw_frame_carries_key(damaged.data(), damaged.size()));
+
+  // An ordinary command is not flagged, nor is a capture too short to have a
+  // command byte, nor a null one.
+  TEST_ASSERT_TRUE(controller.close(PEER_NODE));
+  const std::vector<uint8_t> command = radio.last_transmission;
+  radio.deliver(command.data(), command.size());
+  controller.check_received(&frame);
+  TEST_ASSERT_EQUAL_INT(2, capture.calls);
+  TEST_ASSERT_FALSE(IoHomeControl::raw_frame_carries_key(capture.frames[1].data(),
+                                                         capture.frames[1].size()));
+  TEST_ASSERT_FALSE(IoHomeControl::raw_frame_carries_key(capture.frames[0].data(), 11));
+  TEST_ASSERT_FALSE(IoHomeControl::raw_frame_carries_key(nullptr, 64));
+
+  // The two key transfers, and nothing else.
+  TEST_ASSERT_TRUE(iohome::frame::carries_key_material(iohome::CMD_SEND_1W_KEY));
+  TEST_ASSERT_TRUE(iohome::frame::carries_key_material(iohome::CMD_KEY_TRANSFER));
+  TEST_ASSERT_FALSE(iohome::frame::carries_key_material(iohome::CMD_ASK_CHALLENGE));
+  TEST_ASSERT_FALSE(iohome::frame::carries_key_material(iohome::CMD_KEY_TRANSFER_ACK));
+  TEST_ASSERT_FALSE(iohome::frame::carries_key_material(iohome::CMD_EXECUTE));
+}
+
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
@@ -2313,6 +2416,7 @@ int main(int, char**) {
   RUN_TEST(test_check_received_needs_a_packet);
   RUN_TEST(test_packet_length_helper_programs_each_frame);
   RUN_TEST(test_raw_sniffer_sees_every_packet);
+  RUN_TEST(test_raw_sniffer_can_tell_a_key_transfer);
   RUN_TEST(test_stats_reset);
 
   RUN_TEST(test_log_sink_receives_messages_with_severity);
@@ -2322,6 +2426,7 @@ int main(int, char**) {
   RUN_TEST(test_2w_push_pairing_transfers_the_key);
   RUN_TEST(test_2w_pairing_ignores_a_stranger_challenge);
   RUN_TEST(test_pairing_expires_after_timeout);
+  RUN_TEST(test_pairing_expires_without_any_traffic);
   RUN_TEST(test_pairing_rejects_truncated_frames);
   RUN_TEST(test_2w_push_adopts_new_key_only_after_ack);
   RUN_TEST(test_2w_push_answers_the_challenge_for_the_key_transfer);

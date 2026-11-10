@@ -662,8 +662,7 @@ bool IOWNHomeControlComponent::may_log_frame_contents_(const uint8_t *data, size
   if (this->key_capture_ || len <= 8) {
     return true;
   }
-  const uint8_t cmd = data[8];
-  return cmd != iohome::CMD_SEND_1W_KEY && cmd != iohome::CMD_KEY_TRANSFER;
+  return !iohome::frame::carries_key_material(data[8]);
 }
 
 void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int16_t rssi) {

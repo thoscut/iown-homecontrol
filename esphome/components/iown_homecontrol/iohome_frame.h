@@ -106,6 +106,18 @@ enum class AuthTrailer : uint8_t {
 bool is_unauthenticated_command(uint8_t command_id);
 
 /**
+ * @brief Whether a command's payload is a system key in all but name
+ *
+ * The key transfers - 0x30 (1W) and 0x32 (2W) - mask the key only with the
+ * public transfer key and an address or challenge that is on air next to it, so
+ * whoever can read the payload has the key. Anything that prints, logs or
+ * stores frame bytes should ask this first and leave the payload out.
+ */
+constexpr bool carries_key_material(uint8_t command_id) {
+  return command_id == CMD_SEND_1W_KEY || command_id == CMD_KEY_TRANSFER;
+}
+
+/**
  * @brief Parameter length for commands whose payload has a fixed size
  *
  * @return Length in bytes, or -1 when the command's payload length varies

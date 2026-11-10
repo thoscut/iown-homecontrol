@@ -171,6 +171,17 @@ cover:
 See [`esphome/example.yaml`](esphome/example.yaml) for a complete configuration
 example with board-specific pin mappings, tilt and diagnostic sensors.
 
+The component needs an ESP32 on the Arduino framework (RadioLib is driven
+through its Arduino HAL). ESPHome defaults to ESP-IDF on the ESP32, so say so
+explicitly, or the configuration is rejected:
+
+```yaml
+esp32:
+  board: heltec_wifi_lora_32_V2
+  framework:
+    type: arduino
+```
+
 To pair, put the actuator in learn mode and call `id(iohc_hub).send_1w_pairing()`
 from a button lambda (`send_1w_remove()` unpairs):
 

@@ -65,6 +65,10 @@ typedef int16_t (*PacketLengthCallback)(uint8_t length, void* context);
  *
  * Called from check_received(), not from the ISR, so it may print.
  *
+ * Mind what it prints: a key transfer (0x30 / 0x32) arrives here like any other
+ * capture, and its bytes are the system key behind a public mask. Filter with
+ * IoHomeControl::raw_frame_carries_key() before logging or storing.
+ *
  * @param data Frame bytes as delivered by the radio
  * @param len Number of bytes
  * @param rssi Received signal strength, dBm
@@ -529,6 +533,23 @@ public:
   void set_raw_frame_callback(RawFrameCallback callback, void* context = nullptr);
 
   /**
+   * @brief Whether the bytes handed to a RawFrameCallback are a key transfer
+   *
+   * A received 0x30 / 0x32 carries the system key masked only with public
+   * values, so a sniffer that prints or stores every capture verbatim leaks the
+   * key of whatever was paired within earshot. Ask this first and drop (or
+   * summarise) the captures it flags - src/main.cpp does.
+   *
+   * The command byte is read straight out of its cell, without checking the
+   * start/stop bits before it, so a capture with a damaged header is still
+   * recognised. One whose command cell itself took a bit error is not.
+   *
+   * @param data Raw on-air bytes, as a RawFrameCallback receives them
+   * @param len Number of bytes
+   */
+  static bool raw_frame_carries_key(const uint8_t* data, size_t len);
+
+  /**
    * @brief Route log messages to the application instead of the serial port
    *
    * See LogCallback. Installing a sink also turns logging on: the verbose flag
@@ -728,6 +749,10 @@ public:
 
   /**
    * @brief Whether a pairing exchange is currently in progress
+   *
+   * A handshake the peer never completes is abandoned after PAIRING_TIMEOUT_MS.
+   * That is checked on every check_received() call, packet or not, so a loop
+   * that pumps the receive path until this goes false always terminates.
    */
   bool is_pairing() const { return pairing_state_ != Pairing2W::IDLE; }
 
@@ -842,8 +867,8 @@ protected:
   static constexpr uint32_t PAIRING_TIMEOUT_MS = 5000;
 
   /// Reset a pairing handshake to IDLE if it has been waiting too long, and
-  /// close the accept-pairing window once it has run out. Called on the receive
-  /// path so the guard runs even without a matching answer.
+  /// close the accept-pairing window once it has run out. Called on every
+  /// check_received() poll, so the guard runs even when nothing at all arrives.
   void expire_stale_pairing();
 
   /// Return to IDLE and wipe everything a handshake was holding.

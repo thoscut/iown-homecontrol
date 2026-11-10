@@ -260,10 +260,11 @@ Anything other than 6 or 8 is new information.
 ### K9 - the 2W pairing exchange (resolved)
 
 **Implemented and host-tested.** `pair_device_2w()` runs the full documented
-push - 0x31 ask-challenge out, the device's 0x3C in, the 0x32 key transfer, then
-the device's 0x33 ack - and `pull_device_key_2w()` runs the 0x38/0x32 pull; both
-have two-instance host tests (V62/V63). The controller adopts the key only once
-the 0x33 ack arrives. The only thing left is hardware confirmation against a real
+push - 0x31 ask-challenge out, the device's 0x3C in, the 0x32 key transfer, the
+device's 0x3C for that 0x32 answered with a 0x3D under the key being pushed,
+then the device's 0x33 ack - and `pull_device_key_2w()` runs the 0x38/0x32 pull;
+both have two-instance host tests (V62/V63). The controller adopts the key only
+once the 0x33 ack arrives, and gives up after 5 s without one. The only thing left is hardware confirmation against a real
 actuator, which K1 already covers; a captured real pairing would still be
 valuable for cross-checking the exact frame timing.
 

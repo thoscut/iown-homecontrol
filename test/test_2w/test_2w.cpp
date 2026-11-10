@@ -621,8 +621,53 @@ void test_2w_auth_matches_documented_capture(void) {
     TEST_ASSERT_FALSE(device.take_verified_request(&verified));  // handed out once
 }
 
+void test_2w_pull_key_answer_matches_documented_capture(void) {
+    // docs/linklayer.md, "Pull": the one documented exchange in which a 0x32 and
+    // the 0x3D that authenticates it belong together.
+    //   18 04 F00F00 FEEFEE 32 EA425A7A182885D4EAEEFD416D625E01 6379   device's key
+    //   .. .. FEEFEE F00F00 3C 123456789ABC ....                       challenge
+    //   8E 00 F00F00 FEEFEE 3D 0AE519A73C99 2400                       answer
+    // The answer is the MAC over the 0x32 as it went out - command byte and
+    // masked key - under the key that 0x32 transfers. That is the rule
+    // pair_device_2w() follows when a device challenges the 0x32 it pushed.
+    const uint8_t DEVICE_KEY[16] = {0xAB, 0xCD, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                    0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13};
+    const uint8_t nonce[6] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+    const uint8_t ctrl[3] = {0xF0, 0x0F, 0x00}, dev[3] = {0xFE, 0xEF, 0xEE};
+
+    // The 0x32 itself: the device's key masked against the 0x38 and its challenge.
+    const uint8_t launch[7] = {0x38, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC};
+    mode2w::DiscoveryManager builder;
+    builder.begin(dev);
+    iohome::frame::IoFrame kt;
+    TEST_ASSERT_TRUE(builder.create_key_transfer_2w(&kt, ctrl, dev, DEVICE_KEY, nonce,
+                                                    launch, sizeof(launch)));
+    uint8_t documented_0x32[17];
+    unhex("32EA425A7A182885D4EAEEFD416D625E01", documented_0x32);
+    uint8_t req[1 + iohome::FRAME_MAX_DATA_SIZE];
+    const size_t req_len = iohome::frame::build_mac_input(&kt, req);
+    TEST_ASSERT_EQUAL_UINT(sizeof(documented_0x32), req_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(documented_0x32, req, sizeof(documented_0x32));
+
+    // And the answer to the challenge for it.
+    const uint8_t expected[6] = {0x0A, 0xE5, 0x19, 0xA7, 0x3C, 0x99};
+    mode2w::AuthenticationManager m;
+    m.begin(DEVICE_KEY);
+    iohome::frame::IoFrame f;
+    TEST_ASSERT_TRUE(m.create_challenge_response(&f, ctrl, dev, nonce, req, req_len));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, f.data, 6);
+}
+
 void test_2w_push_key_answer_matches_documented_capture(void) {
-    // The same rule on the push example's 0x32: 3D payload 8DC9D40DC7A4.
+    // The push example's 3D payload, 8DC9D40DC7A4 - which pins the MAC
+    // primitive, but NOT the push exchange: the request it was computed over is
+    // not the 0x32 of that example. The example's 0x32 carries 102E49A1...4AD9,
+    // which is what masking the stack key against the 0x31 and the challenge
+    // gives (asserted below); its 0x3D was generated over a different,
+    // hard-coded 0x32 (scripts/Iown-ioCrypto.py, "frame32"). The two lines do
+    // not belong together, so no device will ever see this pair. The pull
+    // example above is the one whose 0x32 and 0x3D agree, and that is the
+    // reference for what pair_device_2w() answers.
     const uint8_t STACK_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
                                    0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
     uint8_t req[17];
@@ -636,6 +681,19 @@ void test_2w_push_key_answer_matches_documented_capture(void) {
     const uint8_t dev[3] = {0xFE, 0xEF, 0xEE}, ctrl[3] = {0xF0, 0x0F, 0x00};
     TEST_ASSERT_TRUE(m.create_challenge_response(&f, dev, ctrl, nonce, req, sizeof(req)));
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, f.data, 6);
+
+    // The 0x32 the example actually shows, and the library actually sends.
+    const uint8_t ask[1] = {iohome::CMD_ASK_CHALLENGE};
+    mode2w::DiscoveryManager builder;
+    builder.begin(ctrl);
+    iohome::frame::IoFrame kt;
+    TEST_ASSERT_TRUE(builder.create_key_transfer_2w(&kt, dev, ctrl, STACK_KEY, nonce,
+                                                    ask, sizeof(ask)));
+    uint8_t documented_payload[16];
+    unhex("102E49A16D3B69726F3192CF17534AD9", documented_payload);
+    TEST_ASSERT_EQUAL_UINT(16, kt.data_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(documented_payload, kt.data, 16);
+    TEST_ASSERT_TRUE(memcmp(documented_payload, &req[1], 16) != 0);
 }
 
 void test_auth_handshake_succeeds(void) {
@@ -971,6 +1029,7 @@ int main(int, char **) {
     RUN_TEST(test_auth_manager_generates_unpredictable_challenges);
     RUN_TEST(test_auth_manager_reset);
     RUN_TEST(test_2w_auth_matches_documented_capture);
+    RUN_TEST(test_2w_pull_key_answer_matches_documented_capture);
     RUN_TEST(test_2w_push_key_answer_matches_documented_capture);
     RUN_TEST(test_auth_handshake_succeeds);
     RUN_TEST(test_auth_rejects_response_without_mac);

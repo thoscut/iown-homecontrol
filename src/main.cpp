@@ -139,16 +139,8 @@ static void on_raw_frame(const uint8_t* data, size_t len, int16_t rssi, float sn
   g_raw_frames++;
 
   // A received key transfer (0x30 / 0x32) carries the system key masked only
-  // with public values, so its raw bytes are the key. Peek at the command byte
-  // and print nothing for those. The peek reads the command cell's data bits
-  // directly rather than de-framing up to it: a de-frame stops at the first
-  // damaged start/stop bit, and a capture with one such error in its header
-  // would then be printed in full, key cells intact.
-  uint8_t command = 0;
-  const bool carries_key =
-    iohome::phy::uart_peek_byte(data, len, iohome::OFFSET_COMMAND_ID, &command) &&
-    (command == iohome::CMD_SEND_1W_KEY || command == iohome::CMD_KEY_TRANSFER);
-  if (carries_key) {
+  // with public values, so its raw bytes are the key. Print nothing for those.
+  if (iohome::IoHomeControl::raw_frame_carries_key(data, len)) {
     Serial.printf("[RAW] <key transfer redacted> rssi=%d snr=%.1f len=%u\n", rssi, snr,
                   static_cast<unsigned>(len));
     return;

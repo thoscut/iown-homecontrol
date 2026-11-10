@@ -626,10 +626,8 @@ void print_frame(const IoFrame* frame, void (*print_func)(const char*)) {
   snprintf(buf, sizeof(buf), "  Cmd:  0x%02X", frame->command_id);
   print_func(buf);
 
-  // A key transfer (0x30 / 0x32) is masked only with the public transfer key
-  // and an address or challenge that is also on air, so its payload IS the
-  // system key. Same redaction as IoHomeControl's transmit log.
-  if (frame->command_id == CMD_SEND_1W_KEY || frame->command_id == CMD_KEY_TRANSFER) {
+  // Same redaction as IoHomeControl's transmit log: see carries_key_material().
+  if (carries_key_material(frame->command_id)) {
     print_func("  Data: <key redacted>");
   } else if (frame->data_len > 0) {
     // 3 chars per byte plus terminator.

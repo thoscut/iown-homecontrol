@@ -163,6 +163,11 @@ void test_discovery_request_is_broadcast_and_finalized(void) {
     TEST_ASSERT_EQUAL_UINT8_ARRAY(iohome::ADDRESS_BROADCAST, frame.dest_node, 3);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(node, frame.src_node, 3);
 
+    // Every captured 0x28 starts with C8: order bits 11, 2W, no data.
+    uint8_t wire[iohome::FRAME_MAX_SIZE];
+    TEST_ASSERT_TRUE(iohome::frame::serialize_frame(&frame, wire, sizeof(wire)) > 0);
+    TEST_ASSERT_EQUAL_HEX8(0xC8, wire[0]);
+
     // A frame that was never finalized would carry a zero CRC and be dropped
     // by every receiver.
     TEST_ASSERT_TRUE(iohome::frame::validate_frame(&frame));
@@ -194,6 +199,24 @@ void test_discovery_filters_by_device_type(void) {
     TEST_ASSERT_FALSE(mgr.process_discovery_response(&answer, -70, 100));
 
     TEST_ASSERT_EQUAL_UINT(1, mgr.get_discovered_count());
+
+    // The type is ten bits wide. A remote controller (0xFFC0) has type 0x3FF,
+    // which a one-byte filter could not express - and must not be confused
+    // with a central house control (0x3FC0, type 0xFF) either.
+    mgr.start_discovery(iohome::node_type_of(static_cast<uint16_t>(
+                          iohome::NodeType::REMOTE_CONTROLLER)), 10000, 0);
+    const uint8_t remote[] = {0xFF, 0xC0, 0xAA, 0xBB, 0x03, 0x0C, 0xCC, 0x0F, 0xB8};
+    const uint8_t central[] = {0x3F, 0xC0, 0xAA, 0xBB, 0x04, 0x0C, 0xCC, 0x0F, 0xB8};
+    const uint8_t src3[3] = {0xAA, 0xBB, 0x03};
+    iohome::frame::set_source(&answer, src3);
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&answer, iohome::CMD_DISCOVER_ANSWER,
+                                                remote, sizeof(remote)));
+    TEST_ASSERT_TRUE(mgr.process_discovery_response(&answer, -70, 100));
+    const uint8_t src4[3] = {0xAA, 0xBB, 0x04};
+    iohome::frame::set_source(&answer, src4);
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&answer, iohome::CMD_DISCOVER_ANSWER,
+                                                central, sizeof(central)));
+    TEST_ASSERT_FALSE(mgr.process_discovery_response(&answer, -70, 100));
 }
 
 void test_discovery_collects_multiple_devices(void) {

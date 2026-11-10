@@ -271,7 +271,7 @@ class IOWNHomeControlComponent : public Component {
   /** Compute CRC-16/KERMIT over the given data. */
   static uint16_t compute_crc(const uint8_t *data, size_t len);
 
-  /** RSSI of the most recently received frame, in dBm. */
+  /** RSSI of the most recently received frame, in dBm (0 until frames_received() > 0). */
   int16_t last_rssi() const { return this->last_rssi_; }
 
   /** Number of frames accepted since boot. */

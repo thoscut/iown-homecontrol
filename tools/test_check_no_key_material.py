@@ -37,6 +37,17 @@ def make_0x30(src, cmd=0x30, key=None):
     return bytes(body) + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
 
+def uart_frame(frame):
+    """UART-frame bytes the way they go on air: start 0, 8 data bits LSB first,
+    stop 1, packed MSB first (the inverse of the scanner's deframe())."""
+    bits = []
+    for b in frame:
+        bits += [0] + [(b >> k) & 1 for k in range(8)] + [1]
+    bits += [1] * (-len(bits) % 8)   # idle line
+    return bytes(sum(bit << (7 - k) for k, bit in enumerate(bits[i:i + 8]))
+                 for i in range(0, len(bits), 8))
+
+
 def fires_on(text):
     # Same entry point main() uses per file, so every extractor is exercised.
     hits = []
@@ -90,6 +101,23 @@ def main():
     # be flagged. (The framed on-air form is covered by the C++ phy-framing suite.)
     check("real 2W 0x32 flagged",
           fires_on(make_0x30(bytes([0x12, 0x34, 0x56]), cmd=0x32).hex()))
+
+    # (a1) the framed on-air form, which is what a raw capture or a sniffer log
+    #      actually contains - on its own, and behind bytes that are not part of
+    #      the frame.
+    wire = uart_frame(real)
+    check("uart_frame round-trips through deframe", g.deframe(wire) == real)
+    wire_hex = " ".join(f"{b:02X}" for b in wire)
+    check("framed real 0x30 flagged", fires_on(wire_hex))
+    check("framed real 0x30 behind preamble and sync word flagged",
+          fires_on("55 55 55 55 FF 33 " + wire_hex))
+    #   - the ESPHome component's own VERBOSE line: the rssi digits join the hex
+    #     region, so the capture arrives with a stray leading byte.
+    check("framed real 0x30 in an ESPHome RAW log line flagged",
+          fires_on(f"[V][iown_homecontrol:260]: RAW {len(wire)} bytes rssi=-71: {wire_hex}"))
+    check("framed placeholder 0x30 not flagged",
+          not fires_on("55 55 FF 33 " + " ".join(
+              f"{b:02X}" for b in uart_frame(make_0x30(bytes([0xAB, 0xCD, 0xEF]))))))
 
     # (a2) encodings an earlier version missed (reviewer evasion probes).
     #   - base64 of the shortest key frames (27/29 bytes -> 36/40 chars incl. pad)

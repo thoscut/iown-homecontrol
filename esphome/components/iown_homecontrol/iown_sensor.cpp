@@ -15,7 +15,10 @@ void IOWNSensor::update() {
     return;
   }
 
-  if (this->rssi_sensor_ != nullptr) {
+  // There is no "last RSSI" until a frame has arrived. Publishing the initial 0
+  // would show a perfect 0 dBm link in Home Assistant - and in its history -
+  // for as long as the air stays quiet, so the sensor stays unknown instead.
+  if (this->rssi_sensor_ != nullptr && this->hub_->frames_received() > 0) {
     this->rssi_sensor_->publish_state(this->hub_->last_rssi());
   }
   if (this->frames_received_sensor_ != nullptr) {

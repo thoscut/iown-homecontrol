@@ -83,6 +83,8 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     accept_pairing_since_ms_(0),
     accept_pairing_window_ms_(DEFAULT_PAIRING_WINDOW_MS),
     pairing_state_(Pairing2W::IDLE),
+    pairing_request_len_(0),
+    pairing_answers_(0),
     pairing_started_ms_(0),
     pairing_clock_overridden_(false),
     pairing_clock_ms_(0),
@@ -93,6 +95,7 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
   memset(pairing_peer_, 0, NODE_ID_SIZE);
   memset(pairing_key_, 0, AES_KEY_SIZE);
   memset(pairing_challenge_, 0, HMAC_SIZE);
+  memset(pairing_request_, 0, sizeof(pairing_request_));
 }
 
 IoHomeControl::~IoHomeControl() {
@@ -101,9 +104,8 @@ IoHomeControl::~IoHomeControl() {
   }
   destroy_2w_components();
   crypto::secure_zero(system_key_, AES_KEY_SIZE);
-  // A push/pull destroyed mid-handshake still holds key material in these.
-  crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
-  crypto::secure_zero(pairing_challenge_, sizeof(pairing_challenge_));
+  // A push/pull destroyed mid-handshake still holds key material.
+  end_pairing();
 }
 
 void IoHomeControl::destroy_2w_components() {
@@ -613,7 +615,17 @@ void IoHomeControl::set_rolling_code(uint16_t code) {
 
 void IoHomeControl::set_rolling_code_store(RollingCodeStore* store, uint16_t reserve_block) {
   rolling_code_store_ = store;
-  rolling_code_reserve_block_ = (reserve_block == 0) ? 1 : reserve_block;
+  // The reservation arithmetic is modulo 2^16 and tells "block used up" from
+  // "nothing reserved yet" by remaining > block. A block of 0xFFFF makes those
+  // indistinguishable - no reservation is ever written, so a reboot resumes at
+  // codes already sent - and anything past half the range reserves "behind" the
+  // counter. Neither is a batch size anyone needs.
+  if (reserve_block == 0) {
+    reserve_block = 1;
+  } else if (reserve_block > MAX_ROLLING_CODE_RESERVE_BLOCK) {
+    reserve_block = MAX_ROLLING_CODE_RESERVE_BLOCK;
+  }
+  rolling_code_reserve_block_ = reserve_block;
 }
 
 void IoHomeControl::set_packet_length_callback(PacketLengthCallback callback, void* context) {
@@ -1045,14 +1057,14 @@ mode2w::ChallengeState IoHomeControl::get_auth_state() {
   return auth_manager_->get_state(NOW_MS());
 }
 
-bool IoHomeControl::start_discovery(uint8_t device_type, unsigned long timeout_ms) {
+bool IoHomeControl::start_discovery(uint16_t device_type, unsigned long timeout_ms) {
   if (discovery_manager_ == nullptr) {
     LOG_ERROR("Discovery manager not initialized");
     return false;
   }
 
-  LOG_INFO("Starting discovery (device type: 0x%02X, timeout: %lu ms)",
-             device_type, timeout_ms);
+  LOG_INFO("Starting discovery (device type: 0x%03X, timeout: %lu ms)",
+             static_cast<unsigned>(device_type), timeout_ms);
   discovery_manager_->start_discovery(device_type, timeout_ms, NOW_MS());
 
   frame::IoFrame tx_frame;
@@ -1193,8 +1205,7 @@ bool IoHomeControl::pair_device_2w(const uint8_t dest_node[NODE_ID_SIZE],
   pairing_started_ms_ = pairing_now_ms();
 
   if (!transmit_frame(&ask)) {
-    pairing_state_ = Pairing2W::IDLE;
-    crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+    end_pairing();
     return false;
   }
   return true;
@@ -1255,7 +1266,9 @@ bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
   // Addressed to us (or broadcast), and a command that belongs to a pairing
   // exchange this node is currently part of. 0x3C and 0x33 are only diverted
   // while we are the initiator waiting for them; otherwise 0x3C is an ordinary
-  // session challenge and must go through the normal gate.
+  // session challenge and must go through the normal gate. After the 0x32 only
+  // the peer's own 0x3C is diverted - it challenges the key transfer, which is
+  // answered with the key being pushed rather than the session key.
   const bool for_us = memcmp(frame->dest_node, own_node_id_, NODE_ID_SIZE) == 0 ||
                       frame::is_broadcast(frame->dest_node);
   if (!for_us) {
@@ -1268,7 +1281,9 @@ bool IoHomeControl::is_pairing_frame(const frame::IoFrame* frame) const {
     case CMD_KEY_TRANSFER:   // 0x32 - pushed to us, or pulled by us
       return accept_pairing_ || pairing_state_ == Pairing2W::PULL_WAIT_KEY;
     case CMD_CHALLENGE_REQUEST:  // 0x3C
-      return pairing_state_ == Pairing2W::PUSH_WAIT_CHALLENGE;
+      return pairing_state_ == Pairing2W::PUSH_WAIT_CHALLENGE ||
+             (pairing_state_ == Pairing2W::PUSH_WAIT_ACK &&
+              memcmp(frame->src_node, pairing_peer_, NODE_ID_SIZE) == 0);
     case CMD_KEY_TRANSFER_ACK:   // 0x33
       return pairing_state_ == Pairing2W::PUSH_WAIT_ACK;
     default:
@@ -1297,9 +1312,16 @@ void IoHomeControl::expire_stale_pairing() {
     return;
   }
   LOG_WARN("Pairing timed out; abandoning the handshake");
+  end_pairing();
+}
+
+void IoHomeControl::end_pairing() {
   pairing_state_ = Pairing2W::IDLE;
   crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
   crypto::secure_zero(pairing_challenge_, sizeof(pairing_challenge_));
+  crypto::secure_zero(pairing_request_, sizeof(pairing_request_));
+  pairing_request_len_ = 0;
+  pairing_answers_ = 0;
 }
 
 void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
@@ -1336,10 +1358,13 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
       request_frame, sizeof(request_frame));
     if (!built) {
       LOG_ERROR("Pairing: failed to build key transfer");
-      pairing_state_ = Pairing2W::IDLE;
-      crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+      end_pairing();
       return;
     }
+    // The device challenges this 0x32 before it acknowledges; keep what the
+    // answer has to be computed over (command byte + masked key).
+    pairing_request_len_ = frame::build_mac_input(&kt, pairing_request_);
+    pairing_answers_ = 0;
     // Do NOT adopt the key yet. If this transmit fails or the 0x32 is lost, the
     // device never stores the key; adopting it here would leave the controller on
     // a key the device does not have, so every later command would fail its MAC
@@ -1350,12 +1375,36 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     crypto::secure_zero(&kt, sizeof(kt));  // holds the masked key
     if (!sent) {
       LOG_ERROR("Pairing: key transfer failed to send");
-      pairing_state_ = Pairing2W::IDLE;
-      crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+      end_pairing();
       return;
     }
     pairing_state_ = Pairing2W::PUSH_WAIT_ACK;
     pairing_started_ms_ = pairing_now_ms();
+    return;
+  }
+
+  if (pairing_state_ == Pairing2W::PUSH_WAIT_ACK &&
+      frame->command_id == CMD_CHALLENGE_REQUEST && from_peer) {
+    // The device authenticates the 0x32 before storing the key: it challenges
+    // it, and the answer is signed with the key being pushed - the only key the
+    // two sides can share at this point. Without this answer a device that
+    // follows the documented flow never sends its 0x33 and the push times out.
+    if (frame->data_len != HMAC_SIZE || pairing_request_len_ == 0 ||
+        pairing_answers_ >= mode2w::AuthenticationManager::MAX_ANSWERS_PER_REQUEST) {
+      LOG_WARN("Pairing: ignoring challenge for the key transfer");
+      return;
+    }
+    mode2w::AuthenticationManager signer;
+    frame::IoFrame answer;
+    if (!signer.begin(pairing_key_) ||
+        !signer.create_challenge_response(&answer, pairing_peer_, own_node_id_, frame->data,
+                                          pairing_request_, pairing_request_len_)) {
+      LOG_ERROR("Pairing: failed to answer the key transfer challenge");
+      return;
+    }
+    pairing_answers_++;
+    LOG_INFO("Pairing: answering the challenge for the key transfer");
+    transmit_frame(&answer);
     return;
   }
 
@@ -1365,8 +1414,7 @@ void IoHomeControl::handle_pairing_frame(const frame::IoFrame* frame) {
     // under it - this is what makes PUSH_WAIT_ACK meaningful.
     LOG_INFO("Pairing complete: device acknowledged the key");
     set_system_key(pairing_key_);
-    pairing_state_ = Pairing2W::IDLE;
-    crypto::secure_zero(pairing_key_, sizeof(pairing_key_));
+    end_pairing();
     return;
   }
 

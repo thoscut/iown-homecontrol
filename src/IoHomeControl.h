@@ -134,6 +134,7 @@ enum class Pairing2W : uint8_t {
   IDLE = 0,
   PUSH_WAIT_CHALLENGE,  // controller sent 0x31, waiting for the device's 0x3C
   PUSH_WAIT_ACK,        // controller sent 0x32, waiting for the device's 0x33
+                        // (and answering its 0x3C for that 0x32 on the way)
   PULL_WAIT_KEY         // controller sent 0x38, waiting for the device's 0x32
 };
 
@@ -468,9 +469,13 @@ public:
    * transmitted, without writing to flash on every command.
    *
    * @param store Store implementation, or nullptr to disable persistence
-   * @param reserve_block Number of codes reserved per flash write (min 1)
+   * @param reserve_block Number of codes reserved per flash write, clamped to
+   *        1..MAX_ROLLING_CODE_RESERVE_BLOCK
    */
   void set_rolling_code_store(RollingCodeStore* store, uint16_t reserve_block = 64);
+
+  /// Largest reservation block: half the 16-bit counter range.
+  static constexpr uint16_t MAX_ROLLING_CODE_RESERVE_BLOCK = 0x7FFF;
 
   /**
    * @brief Whether frames without a MAC are accepted
@@ -616,11 +621,14 @@ public:
   /**
    * @brief Start device discovery
    *
-   * @param device_type Type of device to discover (0xFF for all)
+   * @param device_type Type of device to discover: the 10-bit type half of the
+   *        node type field (node_type_of() of a NodeType - 2 for a roller
+   *        shutter, 4 for a window opener), or 0xFF for all
    * @param timeout_ms Discovery timeout in milliseconds
    * @return true if the discovery request was transmitted
    */
-  bool start_discovery(uint8_t device_type = 0xFF, unsigned long timeout_ms = 10000);
+  bool start_discovery(uint16_t device_type = mode2w::DISCOVER_ALL_TYPES,
+                       unsigned long timeout_ms = 10000);
 
   /**
    * @brief Stop device discovery
@@ -660,10 +668,12 @@ public:
    *   1. this -> device:  0x31  ask challenge
    *   2. device -> this:  0x3C  challenge (a nonce the device chose)
    *   3. this -> device:  0x32  the key, masked against that nonce
-   *   4. device -> this:  0x33  key transfer acknowledged
+   *   4. device -> this:  0x3C  challenge for the 0x32 (a device may skip this)
+   *   5. this -> device:  0x3D  answer, signed with the key being pushed
+   *   6. device -> this:  0x33  key transfer acknowledged
    *
-   * This call performs step 1 and returns; steps 2-4 are driven by the received
-   * 0x3C and 0x33, so the caller must keep pumping the receive path (with 2W
+   * This call performs step 1 and returns; the remaining steps are driven by the
+   * received 0x3C and 0x33, so the caller must keep pumping the receive path (with 2W
    * frequency hopping updated) until is_pairing() goes false. On success this
    * node adopts @p new_system_key, so its later commands to the device
    * authenticate under it. Closes the gap where the old one-shot version sent
@@ -814,6 +824,14 @@ protected:
   uint8_t pairing_key_[AES_KEY_SIZE];
   /// Challenge sent in our 0x38, needed to unmask the device's 0x32 (pull).
   uint8_t pairing_challenge_[HMAC_SIZE];
+  /// Command byte + payload of the 0x32 we pushed. The device challenges that
+  /// frame before it acknowledges, and the answer is a MAC over exactly this
+  /// under the key being pushed (the device cannot know any other key yet).
+  uint8_t pairing_request_[mode2w::AuthenticationManager::MAX_REQUEST_SIZE];
+  size_t pairing_request_len_;
+  /// Answers given for the pushed 0x32, capped like any other request so the
+  /// handshake cannot be used as a signing oracle.
+  uint8_t pairing_answers_;
   /// When the current pairing wait began, so a stalled peer cannot leave us
   /// stuck. See expire_stale_pairing() / PAIRING_TIMEOUT_MS.
   uint32_t pairing_started_ms_;
@@ -827,6 +845,9 @@ protected:
   /// close the accept-pairing window once it has run out. Called on the receive
   /// path so the guard runs even without a matching answer.
   void expire_stale_pairing();
+
+  /// Return to IDLE and wipe everything a handshake was holding.
+  void end_pairing();
 
   /// The clock the pairing timeout reads. In production it is NOW_MS(); a host
   /// test can pin it via set_pairing_clock_ms() to exercise the 5 s expiry,

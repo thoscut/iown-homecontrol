@@ -312,6 +312,13 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_config,
+    # The C++ side drives RadioLib through its Arduino HAL (SPI.h, the
+    # three-argument SPI.begin(), pinMode) and draws its nonces from the ESP32
+    # hardware RNG. ESPHome's ESP32 default is ESP-IDF, so a configuration that
+    # merely leaves `framework:` out would otherwise validate and then die in
+    # the compiler on "SPI.h: No such file or directory". Say so here instead.
+    cv.only_on_esp32,
+    cv.only_with_arduino,
 )
 
 

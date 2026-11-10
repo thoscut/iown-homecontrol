@@ -860,6 +860,87 @@ void test_2w_push_adopts_new_key_only_after_ack(void) {
   TEST_ASSERT_FALSE(speaks_key(controller, ctrl_radio, CTRL, DEV, OLD_KEY));
 }
 
+void test_2w_push_answers_the_challenge_for_the_key_transfer(void) {
+  // docs/linklayer.md: a device does not acknowledge a pushed key on sight. It
+  // challenges the 0x32 (0x3C), and the controller answers (0x3D) with a MAC
+  // over the 0x32 under the key being pushed - only then does the 0x33 follow.
+  // The controller's session key is a different one, so an answer under that
+  // key (or no answer at all) leaves the device silent and the push stuck.
+  const uint8_t CTRL[3] = {0xF0, 0x0F, 0x00};
+  const uint8_t DEV[3] = {0xFE, 0xEF, 0xEE};
+  const uint8_t STRANGER[3] = {0x12, 0x34, 0x56};
+  const uint8_t OLD_KEY[16] = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F};
+  const uint8_t NEW_KEY[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                               0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16};
+  const uint8_t NONCE_1[6] = {0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6};
+  const uint8_t NONCE_2[6] = {0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6};
+
+  PhysicalLayer radio;
+  IoHomeControl controller(&radio);
+  TEST_ASSERT_TRUE(controller.begin(CTRL, OLD_KEY, /*is_1w=*/false));
+  controller.start_receive();
+
+  auto challenge_from = [&](const uint8_t src[3], const uint8_t nonce[6]) {
+    iohome::frame::IoFrame f;
+    iohome::frame::init_frame(&f, false);
+    iohome::frame::set_destination(&f, CTRL);
+    iohome::frame::set_source(&f, src);
+    iohome::frame::set_command(&f, iohome::CMD_CHALLENGE_REQUEST, nonce, 6);
+    iohome::frame::finalize_frame_plain(&f);
+    radio.last_transmission.clear();
+    deliver_frame(radio, f);
+    iohome::frame::IoFrame received;
+    controller.check_received(&received);
+  };
+
+  TEST_ASSERT_TRUE(controller.pair_device_2w(DEV, NEW_KEY));
+  challenge_from(DEV, NONCE_1);  // the nonce the key is masked against
+
+  iohome::frame::IoFrame kt;
+  TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
+                                              radio.last_transmission.size(), &kt));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_KEY_TRANSFER, kt.command_id);
+
+  // A stranger's 0x3C at this point is not part of the handshake: it must not
+  // be answered with the key being pushed.
+  challenge_from(STRANGER, NONCE_2);
+  TEST_ASSERT_TRUE(radio.last_transmission.empty());
+
+  // The device challenges the 0x32.
+  challenge_from(DEV, NONCE_2);
+  iohome::frame::IoFrame answer;
+  TEST_ASSERT_TRUE(iohome::frame::parse_frame(radio.last_transmission.data(),
+                                              radio.last_transmission.size(), &answer));
+  TEST_ASSERT_EQUAL_HEX8(iohome::CMD_CHALLENGE_RESPONSE, answer.command_id);
+  TEST_ASSERT_EQUAL_MEMORY(DEV, answer.dest_node, 3);
+  TEST_ASSERT_EQUAL_MEMORY(CTRL, answer.src_node, 3);
+
+  uint8_t request[1 + iohome::FRAME_MAX_DATA_SIZE];
+  const size_t request_len = iohome::frame::build_mac_input(&kt, request);
+  uint8_t expected[6];
+  TEST_ASSERT_TRUE(iohome::crypto::create_2w_hmac(request, request_len, NONCE_2, NEW_KEY,
+                                                  expected));
+  TEST_ASSERT_EQUAL(6, answer.data_len);
+  TEST_ASSERT_EQUAL_MEMORY(expected, answer.data, 6);
+
+  // Still waiting for the acknowledgement, still on the old key.
+  TEST_ASSERT_TRUE(controller.is_pairing());
+
+  iohome::frame::IoFrame ack;
+  iohome::frame::init_frame(&ack, false);
+  iohome::frame::set_destination(&ack, CTRL);
+  iohome::frame::set_source(&ack, DEV);
+  iohome::frame::set_command(&ack, iohome::CMD_KEY_TRANSFER_ACK, nullptr, 0);
+  iohome::frame::finalize_frame_plain(&ack);
+  deliver_frame(radio, ack);
+  iohome::frame::IoFrame received;
+  controller.check_received(&received);
+
+  TEST_ASSERT_FALSE(controller.is_pairing());
+  TEST_ASSERT_TRUE(speaks_key(controller, radio, CTRL, DEV, NEW_KEY));
+}
+
 void test_2w_push_transmit_failure_keeps_old_key(void) {
   // If the 0x32 key transfer cannot be sent, the controller must abandon the
   // handshake and stay on its old key (not switch to a key the device never got).
@@ -1209,6 +1290,22 @@ void test_rolling_code_writes_are_batched(void) {
   }
   TEST_ASSERT_EQUAL_INT(1, store.saves);
   TEST_ASSERT_EQUAL_UINT16(9, store.stored);  // reserved past code 8 (1 + block)
+}
+
+void test_rolling_code_reserve_block_is_clamped(void) {
+  // A block of 0xFFFF used to make "nothing reserved yet" look like "block not
+  // used up": the first command wrote nothing, and neither did the next 65534,
+  // so a reboot resumed at codes already on the air.
+  PhysicalLayer radio;
+  CountingStore store;
+  IoHomeControl controller(&radio);
+
+  controller.set_rolling_code_store(&store, 0xFFFF);
+  TEST_ASSERT_TRUE(controller.begin(OWN_NODE, SYSTEM_KEY));
+  controller.close(PEER_NODE);
+
+  TEST_ASSERT_EQUAL_INT(1, store.saves);
+  TEST_ASSERT_EQUAL_UINT16(1 + IoHomeControl::MAX_ROLLING_CODE_RESERVE_BLOCK, store.stored);
 }
 
 void test_rolling_code_resumes_past_reservation(void) {
@@ -2200,6 +2297,7 @@ int main(int, char**) {
   RUN_TEST(test_rolling_code_increments);
   RUN_TEST(test_rolling_code_goes_high_byte_first);
   RUN_TEST(test_rolling_code_writes_are_batched);
+  RUN_TEST(test_rolling_code_reserve_block_is_clamped);
   RUN_TEST(test_rolling_code_resumes_past_reservation);
   RUN_TEST(test_rolling_code_noop_reboots_burn_nothing);
 
@@ -2226,6 +2324,7 @@ int main(int, char**) {
   RUN_TEST(test_pairing_expires_after_timeout);
   RUN_TEST(test_pairing_rejects_truncated_frames);
   RUN_TEST(test_2w_push_adopts_new_key_only_after_ack);
+  RUN_TEST(test_2w_push_answers_the_challenge_for_the_key_transfer);
   RUN_TEST(test_2w_push_transmit_failure_keeps_old_key);
   RUN_TEST(test_initiator_ignores_stranger_pairing_requests);
   RUN_TEST(test_2w_follower_rejects_unsolicited_key_transfer);

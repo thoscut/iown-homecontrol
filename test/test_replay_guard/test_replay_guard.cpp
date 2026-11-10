@@ -370,6 +370,32 @@ void test_known_peers_survive_an_eviction_flood(void) {
     TEST_ASSERT_FALSE(guard.accept(NODE_A, 300));
 }
 
+void test_registering_never_evicts_a_known_peer(void) {
+    // Round-1 regression: allocate() fell back to evicting the LRU known peer,
+    // so registering one peer too many silently dropped another (and its
+    // primed sequence). Both registration paths must report a full table.
+    ReplayGuard guard;
+    for (size_t i = 0; i < ReplayGuard::MAX_NODES; i++) {
+        const uint8_t node[3] = {0x66, 0x00, static_cast<uint8_t>(i)};
+        TEST_ASSERT_TRUE(guard.prime(node, static_cast<uint16_t>(100 + i)));
+    }
+
+    const uint8_t extra[3] = {0x66, 0x01, 0x00};
+    TEST_ASSERT_FALSE(guard.add_known_peer(extra));
+    TEST_ASSERT_FALSE(guard.prime(extra, 1));
+    TEST_ASSERT_EQUAL_UINT(ReplayGuard::MAX_NODES, guard.tracked_count());
+
+    // The oldest registration is still there, sequence and all.
+    const uint8_t first[3] = {0x66, 0x00, 0x00};
+    uint16_t stored = 0;
+    TEST_ASSERT_TRUE(guard.last_sequence(first, stored));
+    TEST_ASSERT_EQUAL_UINT16(100, stored);
+
+    // Re-registering a node already in the table still works.
+    TEST_ASSERT_TRUE(guard.add_known_peer(first));
+    TEST_ASSERT_TRUE(guard.prime(first, 500));
+}
+
 void test_rejects_nullptr(void) {
     ReplayGuard guard;
 
@@ -415,6 +441,7 @@ int main(int, char **) {
     RUN_TEST(test_accept_with_mac_checks_both);
     RUN_TEST(test_strict_mode_rejects_unknown_sources);
     RUN_TEST(test_known_peers_survive_an_eviction_flood);
+    RUN_TEST(test_registering_never_evicts_a_known_peer);
     RUN_TEST(test_rejects_nullptr);
 
     return UNITY_END();

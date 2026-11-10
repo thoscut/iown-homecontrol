@@ -20,6 +20,10 @@
 namespace iohome {
 namespace mode2w {
 
+/// Discovery filter value that accepts every device type. See
+/// DiscoveryManager::start_discovery().
+constexpr uint16_t DISCOVER_ALL_TYPES = 0xFF;
+
 // ============================================================================
 // Frequency Hopping (FHSS)
 // ============================================================================
@@ -563,11 +567,16 @@ public:
   /**
    * @brief Start device discovery
    *
-   * @param device_type Type of device to discover (0xFF for all)
+   * @param device_type Type of device to discover: the 10-bit type half of the
+   *        node type field, i.e. node_type_of() of a NodeType (2 for a roller
+   *        shutter, 4 for a window opener, 0x3FF for a remote controller), or
+   *        DISCOVER_ALL_TYPES (0xFF) for all. Because 0xFF has always meant
+   *        "all", the one type with that index (CENTRAL_HOUSE_CONTROL) cannot
+   *        be singled out.
    * @param timeout_ms Discovery timeout in milliseconds
    * @param now_ms Current time in milliseconds
    */
-  void start_discovery(uint8_t device_type, unsigned long timeout_ms, unsigned long now_ms);
+  void start_discovery(uint16_t device_type, unsigned long timeout_ms, unsigned long now_ms);
 
   /**
    * @brief Stop device discovery
@@ -590,7 +599,7 @@ public:
    *
    * @return true on success
    */
-  bool create_discovery_request(frame::IoFrame* frame, uint8_t device_type);
+  bool create_discovery_request(frame::IoFrame* frame, uint16_t device_type);
 
   /**
    * @brief Process a discovery answer (command 0x29 / 0x2B)
@@ -671,7 +680,7 @@ protected:
   DiscoveryState state_;
   unsigned long discovery_start_time_;
   unsigned long discovery_timeout_;
-  uint8_t discovery_device_type_;
+  uint16_t discovery_device_type_;  // 10-bit type index, or DISCOVER_ALL_TYPES
 
   DiscoveredDevice discovered_devices_[MAX_DISCOVERED_DEVICES];
   size_t discovered_count_;

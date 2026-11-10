@@ -137,6 +137,15 @@ static uint32_t g_raw_frames = 0;
 static void on_raw_frame(const uint8_t* data, size_t len, int16_t rssi, float snr, void* ctx) {
   (void) ctx;
   g_raw_frames++;
+
+  // A received key transfer (0x30 / 0x32) carries the system key masked only
+  // with public values, so its raw bytes are the key. Print nothing for those.
+  if (iohome::IoHomeControl::raw_frame_carries_key(data, len)) {
+    Serial.printf("[RAW] <key transfer redacted> rssi=%d snr=%.1f len=%u\n", rssi, snr,
+                  static_cast<unsigned>(len));
+    return;
+  }
+
   Serial.print(F("[RAW] "));
   for (size_t i = 0; i < len; i++) {
     if (data[i] < 0x10) {
@@ -215,14 +224,14 @@ void setup() {
                                  iohome::BIT_RATE,           // 38.4 kbps
                                  iohome::FREQ_DEVIATION,     // 19.2 kHz
                                  125.0f,                     // RX bandwidth, kHz (RadioLib default)
-                                 14,                         // dBm
+                                 iohome::IoHomeControl::EU_MAX_TX_POWER_DBM,  // dBm
                                  iohome::PREAMBLE_LENGTH);   // bits
 #else
   int16_t state = radio.beginFSK(IOHC_START_CHANNEL,         // MHz
                                  iohome::BIT_RATE,           // 38.4 kbps
                                  iohome::FREQ_DEVIATION,     // 19.2 kHz
                                  156.2f,                     // RX bandwidth, kHz (RadioLib default)
-                                 14,                         // dBm
+                                 iohome::IoHomeControl::EU_MAX_TX_POWER_DBM,  // dBm
                                  iohome::PREAMBLE_LENGTH,    // bits
                                  IOHC_TCXO_VOLTAGE);         // V on DIO3, 0 = crystal
 #endif

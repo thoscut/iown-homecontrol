@@ -112,23 +112,6 @@ void ChannelHopper::next_channel() {
 // Challenge-Response Authentication Implementation
 // ============================================================================
 
-namespace {
-
-/// Command id + parameters, the input the 2W MAC is computed over.
-size_t request_bytes(const frame::IoFrame* frame, uint8_t out[AuthenticationManager::MAX_REQUEST_SIZE]) {
-  out[0] = frame->command_id;
-  size_t len = frame->data_len;
-  if (len > FRAME_MAX_DATA_SIZE) {
-    len = FRAME_MAX_DATA_SIZE;
-  }
-  if (len > 0) {
-    memcpy(&out[1], frame->data, len);
-  }
-  return 1 + len;
-}
-
-} // namespace
-
 AuthenticationManager::AuthenticationManager()
   : key_set_(false),
     peer_known_(false),
@@ -295,7 +278,7 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
 
   if (ok) {
     uint8_t request[MAX_REQUEST_SIZE];
-    const size_t request_len = request_bytes(&held_request_, request);
+    const size_t request_len = frame::build_mac_input(&held_request_, request);
     ok = crypto::verify_hmac(request, request_len, frame->data, current_challenge_,
                              system_key_, /*is_2w=*/true);
     crypto::secure_zero(request, sizeof(request));
@@ -331,7 +314,7 @@ bool AuthenticationManager::note_request_sent(const frame::IoFrame* request,
   if (request == nullptr) {
     return false;
   }
-  pending_len_ = request_bytes(request, pending_request_);
+  pending_len_ = frame::build_mac_input(request, pending_request_);
   memcpy(pending_dest_, request->dest_node, NODE_ID_SIZE);
   memcpy(pending_src_, request->src_node, NODE_ID_SIZE);
   pending_ts_ms_ = now_ms;
@@ -568,7 +551,7 @@ DiscoveryManager::DiscoveryManager()
   : state_(DiscoveryState::IDLE),
     discovery_start_time_(0),
     discovery_timeout_(0),
-    discovery_device_type_(0xFF),
+    discovery_device_type_(DISCOVER_ALL_TYPES),
     discovered_count_(0)
 {
   memset(own_node_id_, 0, NODE_ID_SIZE);
@@ -585,7 +568,7 @@ bool DiscoveryManager::begin(const uint8_t own_node_id[NODE_ID_SIZE]) {
   return true;
 }
 
-void DiscoveryManager::start_discovery(uint8_t device_type, unsigned long timeout_ms,
+void DiscoveryManager::start_discovery(uint16_t device_type, unsigned long timeout_ms,
                                        unsigned long now_ms) {
   state_ = DiscoveryState::DISCOVERING;
   discovery_start_time_ = now_ms;
@@ -611,14 +594,20 @@ bool DiscoveryManager::update(unsigned long now_ms) {
   return true;
 }
 
-bool DiscoveryManager::create_discovery_request(frame::IoFrame* frame, uint8_t device_type) {
+bool DiscoveryManager::create_discovery_request(frame::IoFrame* frame, uint16_t device_type) {
   if (frame == nullptr) {
     return false;
   }
 
   // Discovery is a 2W broadcast, see the capture in docs/linklayer.md:
   //   C8 00 00003B F00F00 28 1234
+  // Control byte 0 is C8 in that capture and in the three Velux ones in
+  // docs/commands.md: order bits 11 on a 2W frame with no data. init_frame()
+  // leaves the order at 00, which is a frame no controller has been seen to
+  // send. (The captures also address the 0x3B broadcast sector rather than
+  // 0x3F; that part is left as it was until it can be tried against a device.)
   frame::init_frame(frame, false);
+  frame::set_order(frame, FrameOrder::GROUP_END);
   frame::set_destination(frame, ADDRESS_BROADCAST);
   frame::set_source(frame, own_node_id_);
 
@@ -652,6 +641,17 @@ bool DiscoveryManager::process_discovery_response(const frame::IoFrame* frame, i
   }
 
   if (discovered_count_ >= MAX_DISCOVERED_DEVICES) {
+    return false;
+  }
+
+  // start_discovery()'s device type filters the answers (0xFF: all). Without
+  // this the parameter was accepted and then ignored. The comparison is on the
+  // 10-bit type index, so the filter value has to be wider than a byte: the
+  // controller types sit at 0x3F0 and 0x3FF.
+  if (discovery_device_type_ != DISCOVER_ALL_TYPES &&
+      (frame->data_len < 2 ||
+       node_type_of(static_cast<uint16_t>((static_cast<uint16_t>(frame->data[0]) << 8) |
+                                          frame->data[1])) != discovery_device_type_)) {
     return false;
   }
 
@@ -731,6 +731,10 @@ bool DiscoveryManager::create_key_transfer_1w(
   }
 
   frame::init_frame(frame, true);
+  // Real 0x30 frames carry order bits 11 (ctrl0 0xFC); an actuator ignores an
+  // otherwise valid 1W frame sent as order 00. Matches the ESPHome component's
+  // send_1w_pairing() and IoHomeControl::send_command().
+  frame::set_order(frame, FrameOrder::GROUP_END);
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 
@@ -812,6 +816,7 @@ bool DiscoveryManager::create_remove_1w_controller(
   }
 
   frame::init_frame(frame, true);
+  frame::set_order(frame, FrameOrder::GROUP_END);  // order 11, as on the wire
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 

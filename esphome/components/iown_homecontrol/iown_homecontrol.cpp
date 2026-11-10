@@ -161,18 +161,10 @@ void IOWNHomeControlComponent::setup() {
   // the replay guard exactly those and nobody else. Without it, a recorded
   // report re-addressed to a made-up source (the MAC does not cover addresses;
   // the CRC is trivial to recompute) was a fresh "first frame" every time.
+  // The covers themselves are registered as known peers by register_cover():
+  // they set up after this component, so covers_ is still empty here.
   if (this->position_feedback_) {
     this->replay_guard_.set_strict(true);
-    for (IOWNCover *cover : this->covers_) {
-      if (cover == nullptr) {
-        continue;
-      }
-      uint8_t node[iohome::NODE_ID_SIZE];
-      address_to_node(cover->get_target_address(), node);
-      if (!iohome::frame::is_broadcast(node)) {
-        this->replay_guard_.add_known_peer(node);
-      }
-    }
   }
 
   // Set up interrupt-driven receive
@@ -185,6 +177,23 @@ void IOWNHomeControlComponent::setup() {
   }
 
   ESP_LOGI(TAG, "io-homecontrol initialized on %.2f MHz", this->frequency_);
+}
+
+void IOWNHomeControlComponent::register_cover(IOWNCover *cover) {
+  if (cover == nullptr) {
+    return;
+  }
+  this->covers_.push_back(cover);
+
+  if (!this->position_feedback_) {
+    return;
+  }
+  uint8_t node[iohome::NODE_ID_SIZE];
+  address_to_node(cover->get_target_address(), node);
+  if (!iohome::frame::is_broadcast(node) && !this->replay_guard_.add_known_peer(node)) {
+    ESP_LOGW(TAG, "Replay guard full: position reports from 0x%06X will be rejected",
+             static_cast<unsigned int>(cover->get_target_address()));
+  }
 }
 
 void IOWNHomeControlComponent::loop() { this->receive_frame_(); }
@@ -357,20 +366,12 @@ uint16_t IOWNHomeControlComponent::compute_crc(const uint8_t *data, size_t len) 
 }
 
 uint16_t IOWNHomeControlComponent::main_param_from_percent_closed(uint8_t percent_closed) {
-  if (percent_closed >= 100) {
-    return IOHC_PARAM_PERCENT_MAX;
-  }
-  return static_cast<uint16_t>((static_cast<uint32_t>(percent_closed) * IOHC_PARAM_PERCENT_MAX) /
-                               100u);
+  return iohome::mp_from_percent_closed(percent_closed);
 }
 
 uint8_t IOWNHomeControlComponent::percent_closed_from_main_param(uint16_t main_param) {
-  if (main_param > IOHC_PARAM_PERCENT_MAX) {
-    return 0xFF;  // Not a percentage: a function code such as 0xD200 (stop)
-  }
-  return static_cast<uint8_t>(
-      (static_cast<uint32_t>(main_param) * 100u + IOHC_PARAM_PERCENT_MAX / 2u) /
-      IOHC_PARAM_PERCENT_MAX);
+  // 0xFF for a function code such as 0xD200 (stop), which is not a percentage.
+  return iohome::percent_closed_from_mp(main_param);
 }
 
 void IOWNHomeControlComponent::set_system_key(const std::vector<uint8_t> &key) {
@@ -445,6 +446,11 @@ uint16_t IOWNHomeControlComponent::consume_rolling_code_() {
       // and the actuator ignores them until the counter catches up.
       ESP_LOGE(TAG, "Could not persist the rolling-code reservation (0x%04X)",
                this->rolling_code_reserved_until_);
+      // Do not trust a reservation that is not on flash: leaving it in place
+      // skipped the write for the rest of the block, so a transient failure
+      // kept up to a block of codes unpersisted. Make the next call retry
+      // (remaining wraps past the block), as src/IoHomeControl.cpp does.
+      this->rolling_code_reserved_until_ = this->rolling_code_;
     }
   }
 
@@ -576,10 +582,8 @@ void IOWNHomeControlComponent::handle_challenge_frame_(const iohome::frame::IoFr
     rf.authenticated = true;
     rf.ctrl0 = verified.ctrl_byte_0;
     rf.ctrl1 = verified.ctrl_byte_1;
-    rf.dest_address = (static_cast<uint32_t>(verified.dest_node[0]) << 16) |
-                      (static_cast<uint32_t>(verified.dest_node[1]) << 8) | verified.dest_node[2];
-    rf.src_address = (static_cast<uint32_t>(verified.src_node[0]) << 16) |
-                     (static_cast<uint32_t>(verified.src_node[1]) << 8) | verified.src_node[2];
+    rf.dest_address = node_to_address(verified.dest_node);
+    rf.src_address = node_to_address(verified.src_node);
     rf.command = verified.command_id;
     rf.payload = verified.data;
     rf.payload_len = verified.data_len;
@@ -658,8 +662,7 @@ bool IOWNHomeControlComponent::may_log_frame_contents_(const uint8_t *data, size
   if (this->key_capture_ || len <= 8) {
     return true;
   }
-  const uint8_t cmd = data[8];
-  return cmd != iohome::CMD_SEND_1W_KEY && cmd != iohome::CMD_KEY_TRANSFER;
+  return !iohome::frame::carries_key_material(data[8]);
 }
 
 void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int16_t rssi) {
@@ -710,10 +713,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
 
   // Fixed-length receive mode delivers trailing bytes past the frame, so every
   // field below is taken relative to frame_len, never to the received count.
-  const uint32_t dest_addr =
-      (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 8) | data[4];
-  const uint32_t src_addr =
-      (static_cast<uint32_t>(data[5]) << 16) | (static_cast<uint32_t>(data[6]) << 8) | data[7];
+  const uint32_t dest_addr = node_to_address(&data[2]);
+  const uint32_t src_addr = node_to_address(&data[5]);
   const uint8_t cmd = data[8];
 
   // CRC-16/KERMIT over everything but the last two bytes, LSB transmitted first.
@@ -740,19 +741,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
            is_1w ? "1W" : "2W", order, static_cast<unsigned int>(src_addr),
            static_cast<unsigned int>(dest_addr), cmd, static_cast<unsigned>(frame_len), rssi);
 
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
-  // Only build the hex dump when it can actually be logged.
-  if (this->may_log_frame_contents_(data, frame_len)) {
-    std::string hex_str;
-    hex_str.reserve(frame_len * 3);
-    for (size_t i = 0; i < frame_len; i++) {
-      char buf[4];
-      snprintf(buf, sizeof(buf), "%02X ", data[i]);
-      hex_str += buf;
-    }
-    ESP_LOGD(TAG, "Raw: %s", hex_str.c_str());
-  }
-#endif
+  // The frame's bytes were already dumped at the top of this function
+  // ("RX frame ..."): receive_frame_() hands over exactly the declared length.
 
   // A 1W key transfer is the one frame that cannot be checked against the
   // configured key, because it is what carries that key. It is taken here,
@@ -1075,7 +1065,7 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address, uint8
    * Byte 13:    Functional Parameter 1
    * Byte 14:    Functional Parameter 2
    * 1W only:
-   * Byte 15-16: Sequence number (2 bytes, LSB first)
+   * Byte 15-16: Sequence number (2 bytes, high byte first)
    * Byte 17-22: MAC (6 bytes)
    * Last two:   CRC-16/KERMIT (LSB first)
    */

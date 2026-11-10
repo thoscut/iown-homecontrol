@@ -52,6 +52,12 @@ a MAC over the nonce it carried. Now:
   default, at most three answers). A nonce from anyone else is never signed, so
   there is no chosen-input MAC oracle; and signing our own request is no gift,
   because the actuator will pick its own fresh nonce for any replay of it.
+- The one other 0x3C that is answered belongs to a 2W push in progress
+  (`pair_device_2w()`): after the 0x32 has gone out, the device being paired may
+  challenge it, and that challenge - from that device only, at most three times,
+  until the 0x33 or the 5 s timeout - is answered with a MAC under the key being
+  *pushed*, never the session key. It gives away nothing the 0x32 itself did
+  not: that frame already carries the pushed key behind a public mask.
 - A plain command a peer sends *us* is held, challenged with a CSPRNG nonce, and
   delivered only after its 0x3D verifies (constant-time compare). A missing,
   short or wrong 0x3D consumes the nonce.
@@ -245,7 +251,7 @@ apart from the MAC).
 | Attacker records and replays a 1W command | **Within a power cycle** | Receive-side `ReplayGuard` rejects it while the node stays up. Its state is in RAM only and is *not* primed on boot, so after a reboot a known peer's first frame is accepted at any sequence - one replay per *known* source per reboot, provided its MAC is not still in the ring. Harmless in this project — received 1W frames only update reported position, never actuator motion — but a receiver that *acts* on 1W commands must persist the last-accepted sequence per peer and restore it with `prime()`. |
 | Attacker replays a 1W frame re-addressed to a new source | Yes | Global recent-MAC ring (32 deep); strict known-peers mode rejects unknown sources outright (on in ESPHome with `position_feedback`) |
 | Attacker replays a 2W command or 0x3D | Yes | Receiver-chosen single-use challenge per command |
-| Attacker gets our 2W key to sign a chosen nonce | Yes | 0x3C answered only for our own pending command to that peer |
+| Attacker gets our 2W key to sign a chosen nonce | Yes | 0x3C answered only for our own pending command to that peer (during a push, for the 0x32 just sent - under the key being pushed, not the session key) |
 | Attacker replays a command *we sent* after we power-cycle | Yes | Our transmit rolling code is persisted in NVS with block reservation, so we never reuse a sequence the actuator has already seen (distinct from the receive-side guard in the row above) |
 | Attacker learns the MAC by timing your receiver | Yes | Constant-time comparison |
 | Attacker predicts a 2W challenge | Yes | CSPRNG-backed challenges |

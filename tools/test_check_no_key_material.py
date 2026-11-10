@@ -37,6 +37,17 @@ def make_0x30(src, cmd=0x30, key=None):
     return bytes(body) + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
 
+def uart_frame(frame):
+    """UART-frame bytes the way they go on air: start 0, 8 data bits LSB first,
+    stop 1, packed MSB first (the inverse of the scanner's deframe())."""
+    bits = []
+    for b in frame:
+        bits += [0] + [(b >> k) & 1 for k in range(8)] + [1]
+    bits += [1] * (-len(bits) % 8)   # idle line
+    return bytes(sum(bit << (7 - k) for k, bit in enumerate(bits[i:i + 8]))
+                 for i in range(0, len(bits), 8))
+
+
 def fires_on(text):
     # Same entry point main() uses per file, so every extractor is exercised.
     hits = []
@@ -87,9 +98,38 @@ def main():
           fires_on("{" + ",".join("0x" + real_hex[i:i + 2]
                                   for i in range(0, len(real_hex), 2)) + "}"))
     # The 2W key transfer (command 0x32) carries a key the same way and must also
-    # be flagged. (The framed on-air form is covered by the C++ phy-framing suite.)
+    # be flagged. (Its framed on-air form goes through the same path as (a1).)
     check("real 2W 0x32 flagged",
           fires_on(make_0x30(bytes([0x12, 0x34, 0x56]), cmd=0x32).hex()))
+
+    # (a1) the framed on-air form, which is what a raw capture or a sniffer log
+    #      actually contains - on its own, and behind bytes that are not part of
+    #      the frame.
+    wire = uart_frame(real)
+    check("uart_frame round-trips through deframe", g.deframe(wire) == real)
+    wire_hex = " ".join(f"{b:02X}" for b in wire)
+    check("framed real 0x30 flagged", fires_on(wire_hex))
+    check("framed real 0x30 behind preamble and sync word flagged",
+          fires_on("55 55 55 55 FF 33 " + wire_hex))
+    #   - the ESPHome component's own VERBOSE line: the rssi digits join the hex
+    #     region, so the capture arrives with a stray leading byte.
+    check("framed real 0x30 in an ESPHome RAW log line flagged",
+          fires_on(f"[V][iown_homecontrol:260]: RAW {len(wire)} bytes rssi=-71: {wire_hex}"))
+    check("framed placeholder 0x30 not flagged",
+          not fires_on("55 55 FF 33 " + " ".join(
+              f"{b:02X}" for b in uart_frame(make_0x30(bytes([0xAB, 0xCD, 0xEF]))))))
+    #   - a bit dump that did not start on a byte boundary: every shift of the
+    #     frame within a byte, as a demodulator that locked on mid-preamble
+    #     writes it (idle 1s ahead of the frame, as on the air). A 4-bit shift
+    #     is a nibble and was always found; the other six were not.
+    wire_bits = int.from_bytes(wire, "big")
+    for lead in range(1, 8):
+        total = lead + len(wire) * 8
+        pad = -total % 8
+        value = (((1 << lead) - 1) << (len(wire) * 8) | wire_bits) << pad | ((1 << pad) - 1)
+        shifted = value.to_bytes((total + pad) // 8, "big")
+        check(f"framed real 0x30 shifted by {lead} bit(s) flagged",
+              fires_on("AA AA AA " + " ".join(f"{b:02X}" for b in shifted)))
 
     # (a2) encodings an earlier version missed (reviewer evasion probes).
     #   - base64 of the shortest key frames (27/29 bytes -> 36/40 chars incl. pad)

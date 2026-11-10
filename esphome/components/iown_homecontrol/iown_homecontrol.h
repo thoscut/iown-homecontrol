@@ -230,7 +230,10 @@ class IOWNHomeControlComponent : public Component {
     this->fem_tx_pin_ = tx_pin;
   }
 
-  void register_cover(IOWNCover *cover) { this->covers_.push_back(cover); }
+  /// Called from each cover's setup(), which runs AFTER this hub's setup()
+  /// (DATA < HARDWARE priority), so the replay guard's known peers are added
+  /// here rather than in setup(), where covers_ is still empty.
+  void register_cover(IOWNCover *cover);
 
   /** Send a raw frame over the radio. */
   bool send_frame(const uint8_t *data, size_t len);
@@ -268,7 +271,7 @@ class IOWNHomeControlComponent : public Component {
   /** Compute CRC-16/KERMIT over the given data. */
   static uint16_t compute_crc(const uint8_t *data, size_t len);
 
-  /** RSSI of the most recently received frame, in dBm. */
+  /** RSSI of the most recently received frame, in dBm (0 until frames_received() > 0). */
   int16_t last_rssi() const { return this->last_rssi_; }
 
   /** Number of frames accepted since boot. */
@@ -311,6 +314,12 @@ class IOWNHomeControlComponent : public Component {
     node[0] = static_cast<uint8_t>((address >> 16) & 0xFF);
     node[1] = static_cast<uint8_t>((address >> 8) & 0xFF);
     node[2] = static_cast<uint8_t>(address & 0xFF);
+  }
+
+  /// Inverse of address_to_node(): three bytes, most significant first.
+  static uint32_t node_to_address(const uint8_t node[iohome::NODE_ID_SIZE]) {
+    return (static_cast<uint32_t>(node[0]) << 16) | (static_cast<uint32_t>(node[1]) << 8) |
+           node[2];
   }
 
   /// Whether an authenticated frame is also *fresh*, by whichever mechanism

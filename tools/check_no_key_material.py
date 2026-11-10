@@ -12,7 +12,10 @@ This check is structural and encoding-agnostic. For every tracked text file it
 pulls out candidate byte sequences - hex written with any mix of separators
 (spaces, newlines, commas, colons, hyphens, underscores, `0x`/`\\x` prefixes) and
 base64 runs - and interprets each both as a de-framed frame and as framed UART
-wire (de-framing it first), scanning every command-byte position. It flags any
+wire (de-framing it first, from every bit offset, so whatever sits ahead of the
+frame - a preamble and sync word, digits of a log prefix that read as hex, or
+the odd bits of a capture that did not start on a byte boundary - does not hide
+it), scanning every command-byte position. It flags any
 frame that is a key transfer (command 0x30 or 0x32) **and validates its
 CRC-16/KERMIT** - the CRC is what distinguishes a real frame from a coincidental
 hex alignment (the AES S-box, ASCII text, MAC tails of ordinary commands, etc.
@@ -46,7 +49,27 @@ KEY_TRANSFER_CMDS = {0x30, 0x32}  # 1W send-key, 2W key-transfer
 CTRL0_LENGTH_MASK = 0x1F
 FRAME_SIZE_FIELD_BIAS = 3
 CMD_OFFSET = 8                    # ctrl0 ctrl1 dest[3] src[3] cmd
+MIN_KEY_FRAME = 27                # shortest key transfer worth flagging (bytes)
+MAX_FRAME = 34                    # longest frame the size field can declare
+# Bytes of UART wire the shortest key frame occupies (10 bits per byte).
+MIN_KEY_FRAME_WIRE = (MIN_KEY_FRAME * 10 + 7) // 8
 _KEY_CMD_RE = re.compile(b"[\\x30\\x32]")
+
+
+def _byte_class(mask: int, value: int) -> bytes:
+    return b"[" + b"".join(re.escape(bytes([b])) for b in range(256)
+                           if b & mask == value) + b"]"
+
+
+# Where UART wire could begin: four consecutive well-framed cells span exactly
+# five bytes, with start bits (0) at bit 0, 10, 20, 30 and stop bits (1) at bit
+# 9, 19, 29, 39. Matching that as five byte classes lets the regex engine
+# reject 255 offsets in 256 before any Python runs; the lookahead makes the
+# matches overlap, so every byte offset is tried.
+_FRAMED_START_RE = re.compile(
+    b"(?=" + _byte_class(0x80, 0x00) + _byte_class(0x60, 0x40)
+    + _byte_class(0x18, 0x10) + _byte_class(0x06, 0x04)
+    + _byte_class(0x01, 0x01) + b")", re.DOTALL)
 
 
 def looks_binary(data: bytes) -> bool:
@@ -75,16 +98,17 @@ def frame_crc_ok(frame: bytes) -> bool:
     return len(frame) >= 3 and crc16_kermit(frame[:-2]) == (frame[-2] | (frame[-1] << 8))
 
 
-def deframe(wire: bytes) -> bytes:
+def deframe(wire: bytes, start: int = 0, max_cells: int = 0) -> bytes:
     """Strip UART framing: 10-bit cells, start 0, 8 data LSB-first, stop 1.
-    Stops at the first invalid cell; bits are read on demand, so a long stream
+    Begins at byte `start` and stops at the first invalid cell (or after
+    `max_cells` cells when given); bits are read on demand, so a long stream
     that is not framed costs only a few cells."""
     def bit(p):
         return (wire[p >> 3] >> (7 - (p & 7))) & 1
     out = bytearray()
     total = len(wire) * 8
-    pos = 0
-    while pos + 10 <= total:
+    pos = start * 8
+    while pos + 10 <= total and (max_cells == 0 or len(out) < max_cells):
         if bit(pos) != 0 or bit(pos + 9) != 1:
             break
         val = 0
@@ -107,7 +131,7 @@ def targeted_scan(stream: bytes, name: str, kind: str, hits: list) -> bool:
         if i >= n - CMD_OFFSET - 3:
             break
         declared = (stream[i] & CTRL0_LENGTH_MASK) + FRAME_SIZE_FIELD_BIAS
-        if declared < 27 or i + declared > n:
+        if declared < MIN_KEY_FRAME or i + declared > n:
             continue
         candidate = stream[i:i + declared]
         if not frame_crc_ok(candidate):
@@ -126,8 +150,31 @@ def scan_bytes(seq: bytes, name: str, kind: str, hits: list) -> None:
     if targeted_scan(seq, name, kind + "/de-framed", hits):
         return
     df = deframe(seq)
-    if len(df) >= CMD_OFFSET + 4:
-        targeted_scan(df, name, kind + "/framed", hits)
+    if len(df) >= MIN_KEY_FRAME and targeted_scan(df, name, kind + "/framed", hits):
+        return
+    # The wire form can also sit behind things that are not part of it: the
+    # preamble and sync word of an SDR dump, or digits a log prefix contributes
+    # to the hex region - the ESPHome component's own "RAW 54 bytes rssi=-71:
+    # .." line reads as the capture with a 0x71 glued in front. And it need not
+    # start on a byte boundary at all: a demodulator's bit dump begins wherever
+    # it locked on, so a row that opens on a 1 of the 0x55 preamble ("AA AA ..")
+    # has every frame byte straddling two dump bytes. So de-frame from every
+    # bit offset: the stream is shifted left one bit at a time and searched for
+    # places where framed cells could begin, each attempt capped at two frames'
+    # worth of cells.
+    n = len(seq)
+    as_int = int.from_bytes(seq, "big")
+    keep = (1 << (8 * n)) - 1
+    for shift in range(8):
+        stream = seq if shift == 0 else ((as_int << shift) & keep).to_bytes(n, "big")
+        for m in _FRAMED_START_RE.finditer(stream, 0 if shift else 1):
+            off = m.start()
+            if off > n - MIN_KEY_FRAME_WIRE:
+                break
+            df = deframe(stream, off, 2 * MAX_FRAME)
+            if len(df) >= MIN_KEY_FRAME and targeted_scan(
+                    df, name, f"{kind}/framed+{off}.{shift}", hits):
+                return
 
 
 def hex_candidates(text: str):

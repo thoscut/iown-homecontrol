@@ -169,6 +169,35 @@ void test_start_and_stop_bits_are_checked(void) {
   TEST_ASSERT_EQUAL_UINT(0, phy::uart_decode_frame(wire, wire_len, out, sizeof out));
 }
 
+void test_peek_reads_a_byte_past_damaged_framing(void) {
+  // What the sniffer needs to keep a key transfer out of its raw dump: the
+  // command byte of a capture whose header took a bit error. uart_decode()
+  // stops at the damaged cell; the peek does not care.
+  const uint8_t frame[] = {0xFC, 0x00, 0x00, 0x00, 0x3F, 0xAB, 0xCD, 0xEF, 0x30, 0x11, 0x22};
+  uint8_t wire[16];
+  const size_t wire_len = phy::uart_encode(frame, sizeof(frame), wire, sizeof(wire));
+  TEST_ASSERT_TRUE(wire_len > 0);
+
+  uint8_t value = 0;
+  for (size_t i = 0; i < sizeof(frame); i++) {
+    TEST_ASSERT_TRUE(phy::uart_peek_byte(wire, wire_len, i, &value));
+    TEST_ASSERT_EQUAL_HEX8(frame[i], value);
+  }
+
+  wire[1] = static_cast<uint8_t>(wire[1] & ~0x40);  // clear the first cell's stop bit
+  uint8_t decoded[sizeof(frame)];
+  TEST_ASSERT_EQUAL_UINT(0, phy::uart_decode(wire, wire_len, decoded, sizeof(decoded)));
+  TEST_ASSERT_TRUE(phy::uart_peek_byte(wire, wire_len, 8, &value));
+  TEST_ASSERT_EQUAL_HEX8(0x30, value);
+
+  // A cell the buffer does not hold completely is not read.
+  TEST_ASSERT_FALSE(phy::uart_peek_byte(wire, wire_len, sizeof(frame), &value));
+  TEST_ASSERT_FALSE(phy::uart_peek_byte(wire, 11, 8, &value));  // needs 89 bits
+  TEST_ASSERT_TRUE(phy::uart_peek_byte(wire, 12, 8, &value));
+  TEST_ASSERT_FALSE(phy::uart_peek_byte(nullptr, wire_len, 0, &value));
+  TEST_ASSERT_FALSE(phy::uart_peek_byte(wire, wire_len, 0, nullptr));
+}
+
 void test_trailing_preamble_ends_the_frame(void) {
   // Real captures are followed by a run of 0x55/0xAA preamble. uart_decode_frame
   // must return exactly the frame and ignore what follows.
@@ -223,6 +252,7 @@ int main(void) {
   RUN_TEST(test_encode_every_length_round_trips);
 
   RUN_TEST(test_start_and_stop_bits_are_checked);
+  RUN_TEST(test_peek_reads_a_byte_past_damaged_framing);
   RUN_TEST(test_trailing_preamble_ends_the_frame);
   RUN_TEST(test_short_buffer_yields_no_frame);
   RUN_TEST(test_rejects_bad_arguments);

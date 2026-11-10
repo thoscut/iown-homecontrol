@@ -106,6 +106,18 @@ enum class AuthTrailer : uint8_t {
 bool is_unauthenticated_command(uint8_t command_id);
 
 /**
+ * @brief Whether a command's payload is a system key in all but name
+ *
+ * The key transfers - 0x30 (1W) and 0x32 (2W) - mask the key only with the
+ * public transfer key and an address or challenge that is on air next to it, so
+ * whoever can read the payload has the key. Anything that prints, logs or
+ * stores frame bytes should ask this first and leave the payload out.
+ */
+constexpr bool carries_key_material(uint8_t command_id) {
+  return command_id == CMD_SEND_1W_KEY || command_id == CMD_KEY_TRANSFER;
+}
+
+/**
  * @brief Parameter length for commands whose payload has a fixed size
  *
  * @return Length in bytes, or -1 when the command's payload length varies
@@ -227,7 +239,7 @@ bool set_execute_command_fp(IoFrame* frame,
  * @brief Set rolling code (1W mode only)
  *
  * @param frame Pointer to IoFrame structure
- * @param code Rolling code value (0-65535), stored LSB first
+ * @param code Rolling code value (0-65535), stored high byte first
  */
 void set_rolling_code(IoFrame* frame, uint16_t code);
 
@@ -305,6 +317,15 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame,
  * @return true if frame is valid, false otherwise
  */
 bool validate_frame(const IoFrame* frame, const uint8_t* system_key = nullptr, const uint8_t* challenge = nullptr);
+
+/**
+ * @brief Copy command id + parameters - the bytes a MAC is computed over
+ *
+ * Used for the 1W trailer MAC and for the 2W 0x3D answer alike.
+ *
+ * @return Number of bytes written (1 + data_len, data_len capped at FRAME_MAX_DATA_SIZE)
+ */
+size_t build_mac_input(const IoFrame* frame, uint8_t out[1 + FRAME_MAX_DATA_SIZE]);
 
 // ============================================================================
 // Helper Functions

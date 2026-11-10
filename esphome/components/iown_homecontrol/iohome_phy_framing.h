@@ -88,6 +88,23 @@ size_t uart_decode(const uint8_t* wire, size_t wire_len,
                    uint8_t* logical_out, size_t max_logical);
 
 /**
+ * @brief Read one frame byte out of a raw bitstream without checking framing.
+ *
+ * Takes the eight data bits of cell @p index and ignores every start and stop
+ * bit, in that cell and in the ones before it. This is for deciding what a
+ * capture *is* before printing it: uart_decode() gives up at the first damaged
+ * cell, so a key transfer with one flipped stop bit in its header would not be
+ * recognised as one - while the cells holding the key are still intact.
+ *
+ * @param wire Raw bytes from the radio
+ * @param wire_len Number of raw bytes
+ * @param index Which frame byte to read (0 = first control byte)
+ * @param out Receives the byte
+ * @return false on bad arguments or when the buffer ends before that cell does
+ */
+bool uart_peek_byte(const uint8_t* wire, size_t wire_len, size_t index, uint8_t* out);
+
+/**
  * @brief De-frame exactly one complete frame from a raw radio buffer.
  *
  * Decodes the first cell to get the control byte, reads its 5-bit size field to

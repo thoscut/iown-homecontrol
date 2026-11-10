@@ -94,6 +94,23 @@ size_t uart_decode(const uint8_t* wire, size_t wire_len,
   return out;
 }
 
+bool uart_peek_byte(const uint8_t* wire, size_t wire_len, size_t index, uint8_t* out) {
+  if (wire == nullptr || out == nullptr || index > wire_len) {
+    return false;  // (index > wire_len also keeps the multiplication below small)
+  }
+  const size_t first = index * UART_BITS_PER_BYTE + 1;  // past the start bit
+  if (first + 8 > wire_len * 8) {
+    return false;
+  }
+  uint8_t value = 0;
+  for (size_t d = 0; d < 8; d++) {
+    const size_t position = first + d;
+    value = static_cast<uint8_t>(value | (bit_msb_first(wire[position >> 3], position & 7) << d));
+  }
+  *out = value;
+  return true;
+}
+
 size_t uart_decode_frame(const uint8_t* wire, size_t wire_len,
                          uint8_t* frame_out, size_t frame_cap) {
   if (wire == nullptr || frame_out == nullptr) {

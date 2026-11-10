@@ -32,16 +32,19 @@ bool refresh_length(IoFrame* frame) {
   return true;
 }
 
-/// Copy command id + parameters into the buffer the MAC is computed over.
+} // namespace
+
 size_t build_mac_input(const IoFrame* frame, uint8_t out[1 + FRAME_MAX_DATA_SIZE]) {
   out[0] = frame->command_id;
-  if (frame->data_len > 0) {
-    memcpy(&out[1], frame->data, frame->data_len);
+  size_t len = frame->data_len;
+  if (len > FRAME_MAX_DATA_SIZE) {
+    len = FRAME_MAX_DATA_SIZE;
   }
-  return 1u + frame->data_len;
+  if (len > 0) {
+    memcpy(&out[1], frame->data, len);
+  }
+  return 1u + len;
 }
-
-} // namespace
 
 // ============================================================================
 // Command metadata
@@ -185,18 +188,20 @@ bool set_command(IoFrame* frame, uint8_t cmd_id, const uint8_t* params, size_t p
 
   const uint8_t previous_len = frame->data_len;
 
-  frame->command_id = cmd_id;
+  // Check the new length before touching the payload: refresh_length() only
+  // looks at data_len, and copying first left a rejected update's bytes in
+  // data under the old data_len (and the old command id).
   frame->data_len = static_cast<uint8_t>(params_len);
-
-  if (params_len > 0) {
-    memcpy(frame->data, params, params_len);
-  }
-
   if (!refresh_length(frame)) {
     // Roll back so the frame stays consistent after a rejected update.
     frame->data_len = previous_len;
     refresh_length(frame);
     return false;
+  }
+
+  frame->command_id = cmd_id;
+  if (params_len > 0) {
+    memcpy(frame->data, params, params_len);
   }
 
   return true;
@@ -621,7 +626,10 @@ void print_frame(const IoFrame* frame, void (*print_func)(const char*)) {
   snprintf(buf, sizeof(buf), "  Cmd:  0x%02X", frame->command_id);
   print_func(buf);
 
-  if (frame->data_len > 0) {
+  // Same redaction as IoHomeControl's transmit log: see carries_key_material().
+  if (carries_key_material(frame->command_id)) {
+    print_func("  Data: <key redacted>");
+  } else if (frame->data_len > 0) {
     // 3 chars per byte plus terminator.
     char hex[3 * FRAME_MAX_DATA_SIZE + 1];
     size_t used = 0;

@@ -137,6 +137,21 @@ static uint32_t g_raw_frames = 0;
 static void on_raw_frame(const uint8_t* data, size_t len, int16_t rssi, float snr, void* ctx) {
   (void) ctx;
   g_raw_frames++;
+
+  // A received key transfer (0x30 / 0x32) carries the system key masked only
+  // with public values, so its raw bytes are the key. Peek at the command byte
+  // through the de-framing and print nothing past the header for those.
+  uint8_t header[iohome::OFFSET_DATA];
+  const bool carries_key =
+    iohome::phy::uart_decode(data, len, header, sizeof(header)) == sizeof(header) &&
+    (header[iohome::OFFSET_COMMAND_ID] == iohome::CMD_SEND_1W_KEY ||
+     header[iohome::OFFSET_COMMAND_ID] == iohome::CMD_KEY_TRANSFER);
+  if (carries_key) {
+    Serial.printf("[RAW] <key transfer redacted> rssi=%d snr=%.1f len=%u\n", rssi, snr,
+                  static_cast<unsigned>(len));
+    return;
+  }
+
   Serial.print(F("[RAW] "));
   for (size_t i = 0; i < len; i++) {
     if (data[i] < 0x10) {

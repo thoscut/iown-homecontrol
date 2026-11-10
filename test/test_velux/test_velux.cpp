@@ -88,6 +88,20 @@ void test_stop_frame(void) {
   TEST_ASSERT_EQUAL_HEX16(iohome::MP_STOP, main_param_of(frame));
 }
 
+void test_control_frames_carry_order_bits(void) {
+  // Real 1W commands go out as order 11; an actuator ignores order 00.
+  velux::VeluxWindow window(WINDOW_NODE, velux::VeluxModel::GGL_ELECTRIC);
+  velux::VeluxBlind blind(WINDOW_NODE, velux::VeluxModel::FML);
+  iohome::frame::IoFrame frame;
+
+  TEST_ASSERT_TRUE(window.create_position_frame(&frame, SRC_NODE, velux::WindowPosition::HALF_OPEN));
+  TEST_ASSERT_EQUAL(iohome::FrameOrder::GROUP_END, iohome::frame::get_order(frame.ctrl_byte_0));
+  TEST_ASSERT_TRUE(iohome::frame::is_1w_mode(frame.ctrl_byte_0));
+
+  TEST_ASSERT_TRUE(blind.create_tilt_frame(&frame, SRC_NODE, 50));
+  TEST_ASSERT_EQUAL(iohome::FrameOrder::GROUP_END, iohome::frame::get_order(frame.ctrl_byte_0));
+}
+
 void test_protective_closes_use_the_right_originator(void) {
   velux::VeluxWindow window(WINDOW_NODE, velux::VeluxModel::GGL_ELECTRIC);
   iohome::frame::IoFrame frame;
@@ -362,6 +376,7 @@ int main(int, char**) {
   RUN_TEST(test_window_position_mapping);
   RUN_TEST(test_ventilation_levels);
   RUN_TEST(test_stop_frame);
+  RUN_TEST(test_control_frames_carry_order_bits);
   RUN_TEST(test_protective_closes_use_the_right_originator);
   RUN_TEST(test_window_helpers_reject_nullptr);
   RUN_TEST(test_rain_sensor_parsing);

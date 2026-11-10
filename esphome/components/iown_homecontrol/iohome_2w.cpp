@@ -638,6 +638,15 @@ bool DiscoveryManager::process_discovery_response(const frame::IoFrame* frame, i
     return false;
   }
 
+  // start_discovery()'s device type filters the answers (0xFF: all). Without
+  // this the parameter was accepted and then ignored.
+  if (discovery_device_type_ != 0xFF &&
+      (frame->data_len < 2 ||
+       node_type_of(static_cast<uint16_t>((static_cast<uint16_t>(frame->data[0]) << 8) |
+                                          frame->data[1])) != discovery_device_type_)) {
+    return false;
+  }
+
   for (size_t i = 0; i < discovered_count_; i++) {
     if (memcmp(discovered_devices_[i].node_id, frame->src_node, NODE_ID_SIZE) == 0) {
       return false;  // Already in the list

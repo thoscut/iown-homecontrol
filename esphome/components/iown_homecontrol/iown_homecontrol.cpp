@@ -366,20 +366,12 @@ uint16_t IOWNHomeControlComponent::compute_crc(const uint8_t *data, size_t len) 
 }
 
 uint16_t IOWNHomeControlComponent::main_param_from_percent_closed(uint8_t percent_closed) {
-  if (percent_closed >= 100) {
-    return IOHC_PARAM_PERCENT_MAX;
-  }
-  return static_cast<uint16_t>((static_cast<uint32_t>(percent_closed) * IOHC_PARAM_PERCENT_MAX) /
-                               100u);
+  return iohome::mp_from_percent_closed(percent_closed);
 }
 
 uint8_t IOWNHomeControlComponent::percent_closed_from_main_param(uint16_t main_param) {
-  if (main_param > IOHC_PARAM_PERCENT_MAX) {
-    return 0xFF;  // Not a percentage: a function code such as 0xD200 (stop)
-  }
-  return static_cast<uint8_t>(
-      (static_cast<uint32_t>(main_param) * 100u + IOHC_PARAM_PERCENT_MAX / 2u) /
-      IOHC_PARAM_PERCENT_MAX);
+  // 0xFF for a function code such as 0xD200 (stop), which is not a percentage.
+  return iohome::percent_closed_from_mp(main_param);
 }
 
 void IOWNHomeControlComponent::set_system_key(const std::vector<uint8_t> &key) {
@@ -750,19 +742,8 @@ void IOWNHomeControlComponent::parse_frame_(const uint8_t *data, size_t len, int
            is_1w ? "1W" : "2W", order, static_cast<unsigned int>(src_addr),
            static_cast<unsigned int>(dest_addr), cmd, static_cast<unsigned>(frame_len), rssi);
 
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
-  // Only build the hex dump when it can actually be logged.
-  if (this->may_log_frame_contents_(data, frame_len)) {
-    std::string hex_str;
-    hex_str.reserve(frame_len * 3);
-    for (size_t i = 0; i < frame_len; i++) {
-      char buf[4];
-      snprintf(buf, sizeof(buf), "%02X ", data[i]);
-      hex_str += buf;
-    }
-    ESP_LOGD(TAG, "Raw: %s", hex_str.c_str());
-  }
-#endif
+  // The frame's bytes were already dumped at the top of this function
+  // ("RX frame ..."): receive_frame_() hands over exactly the declared length.
 
   // A 1W key transfer is the one frame that cannot be checked against the
   // configured key, because it is what carries that key. It is taken here,
@@ -1085,7 +1066,7 @@ bool IOWNHomeControlComponent::send_cover_command(uint32_t target_address, uint8
    * Byte 13:    Functional Parameter 1
    * Byte 14:    Functional Parameter 2
    * 1W only:
-   * Byte 15-16: Sequence number (2 bytes, LSB first)
+   * Byte 15-16: Sequence number (2 bytes, high byte first)
    * Byte 17-22: MAC (6 bytes)
    * Last two:   CRC-16/KERMIT (LSB first)
    */

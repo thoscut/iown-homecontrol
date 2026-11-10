@@ -169,6 +169,33 @@ void test_discovery_request_is_broadcast_and_finalized(void) {
     TEST_ASSERT_FALSE(frame.crc[0] == 0x00 && frame.crc[1] == 0x00);
 }
 
+void test_discovery_filters_by_device_type(void) {
+    // start_discovery()'s device type must filter the answers; 0xFF takes all.
+    mode2w::DiscoveryManager mgr;
+    const uint8_t node[3] = {0x11, 0x22, 0x33};
+    mgr.begin(node);
+    mgr.start_discovery(0x04, 10000, 0);  // window openers only
+
+    iohome::frame::IoFrame answer;
+    iohome::frame::init_frame(&answer, false);
+    const uint8_t window[] = {0x01, 0x01, 0xAA, 0xBB, 0x01, 0x0C, 0xCC, 0x0F, 0xB8};  // type 4
+    const uint8_t shutter[] = {0x00, 0x80, 0xAA, 0xBB, 0x02, 0x0C, 0xCC, 0x0F, 0xB8};  // type 2
+
+    const uint8_t src1[3] = {0xAA, 0xBB, 0x01};
+    iohome::frame::set_source(&answer, src1);
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&answer, iohome::CMD_DISCOVER_ANSWER,
+                                                window, sizeof(window)));
+    TEST_ASSERT_TRUE(mgr.process_discovery_response(&answer, -70, 100));
+
+    const uint8_t src2[3] = {0xAA, 0xBB, 0x02};
+    iohome::frame::set_source(&answer, src2);
+    TEST_ASSERT_TRUE(iohome::frame::set_command(&answer, iohome::CMD_DISCOVER_ANSWER,
+                                                shutter, sizeof(shutter)));
+    TEST_ASSERT_FALSE(mgr.process_discovery_response(&answer, -70, 100));
+
+    TEST_ASSERT_EQUAL_UINT(1, mgr.get_discovered_count());
+}
+
 void test_discovery_collects_multiple_devices(void) {
     mode2w::DiscoveryManager mgr;
     const uint8_t node[3] = {0x11, 0x22, 0x33};
@@ -904,6 +931,7 @@ int main(int, char **) {
 
     RUN_TEST(test_discovery_manager_initial);
     RUN_TEST(test_discovery_request_is_broadcast_and_finalized);
+    RUN_TEST(test_discovery_filters_by_device_type);
     RUN_TEST(test_discovery_collects_multiple_devices);
     RUN_TEST(test_discovery_ignores_duplicates);
     RUN_TEST(test_discovery_ignores_unrelated_commands);

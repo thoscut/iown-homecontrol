@@ -227,7 +227,7 @@ bool set_execute_command_fp(IoFrame* frame,
  * @brief Set rolling code (1W mode only)
  *
  * @param frame Pointer to IoFrame structure
- * @param code Rolling code value (0-65535), stored LSB first
+ * @param code Rolling code value (0-65535), stored high byte first
  */
 void set_rolling_code(IoFrame* frame, uint16_t code);
 

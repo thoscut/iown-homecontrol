@@ -26,6 +26,10 @@ void begin_control_frame(frame::IoFrame* frame,
                          const uint8_t dest_node[NODE_ID_SIZE],
                          const uint8_t src_node[NODE_ID_SIZE]) {
   frame::init_frame(frame, true);  // 1W - most Velux actuators are 1W driven
+  // Real 1W commands carry order bits 11 (ctrl0 0xF6 on a Velux remote's
+  // Execute); an actuator ignores an otherwise valid frame sent as order 00.
+  // Matches IoHomeControl::send_command() and the 0x30/0x39 builders.
+  frame::set_order(frame, FrameOrder::GROUP_END);
   frame::set_destination(frame, dest_node);
   frame::set_source(frame, src_node);
 }

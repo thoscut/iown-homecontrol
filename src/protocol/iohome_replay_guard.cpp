@@ -217,6 +217,19 @@ bool ReplayGuard::add_known_peer(const uint8_t node_id[NODE_ID_SIZE]) {
 
   Entry* entry = find(node_id);
   if (entry == nullptr) {
+    // allocate() falls back to evicting the LRU known peer when every slot is
+    // one. Registering a peer must not silently push out another registered
+    // peer, so report a full table instead.
+    bool has_room = false;
+    for (const Entry& e : entries_) {
+      if (!e.used || !e.known) {
+        has_room = true;
+        break;
+      }
+    }
+    if (!has_room) {
+      return false;
+    }
     entry = allocate(node_id);
     if (entry == nullptr) {
       return false;

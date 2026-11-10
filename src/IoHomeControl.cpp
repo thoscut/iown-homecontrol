@@ -86,8 +86,7 @@ IoHomeControl::IoHomeControl(PhysicalLayer* radio)
     pairing_started_ms_(0),
     pairing_clock_overridden_(false),
     pairing_clock_ms_(0),
-    tx_power_dbm_(EU_MAX_TX_POWER_DBM),
-    allow_above_eu_limit_(false)
+    tx_power_dbm_(EU_MAX_TX_POWER_DBM)
 {
   memset(own_node_id_, 0, NODE_ID_SIZE);
   memset(system_key_, 0, AES_KEY_SIZE);
@@ -214,7 +213,6 @@ bool IoHomeControl::begin(
 }
 
 void IoHomeControl::set_tx_power(int8_t dbm, bool allow_above_eu_limit) {
-  allow_above_eu_limit_ = allow_above_eu_limit;
   if (!allow_above_eu_limit && dbm > EU_MAX_TX_POWER_DBM) {
     LOG_WARN("TX power %d dBm exceeds the EU 868 MHz limit; using %d dBm",
              static_cast<int>(dbm), static_cast<int>(EU_MAX_TX_POWER_DBM));
@@ -1000,6 +998,12 @@ bool IoHomeControl::update_frequency_hopping() {
 
   // The 2.7 ms dwell time needs microsecond timing; millis() cannot express it.
   if (!channel_hopper_->update_us(NOW_US())) {
+    return false;
+  }
+
+  // A packet is waiting in the radio's buffer: restarting reception now would
+  // discard it before check_received() reads it. Hop on the next call instead.
+  if (receiving_ && g_packet_flag) {
     return false;
   }
 

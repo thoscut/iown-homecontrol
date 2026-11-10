@@ -215,14 +215,14 @@ void setup() {
                                  iohome::BIT_RATE,           // 38.4 kbps
                                  iohome::FREQ_DEVIATION,     // 19.2 kHz
                                  125.0f,                     // RX bandwidth, kHz (RadioLib default)
-                                 14,                         // dBm
+                                 iohome::IoHomeControl::EU_MAX_TX_POWER_DBM,  // dBm
                                  iohome::PREAMBLE_LENGTH);   // bits
 #else
   int16_t state = radio.beginFSK(IOHC_START_CHANNEL,         // MHz
                                  iohome::BIT_RATE,           // 38.4 kbps
                                  iohome::FREQ_DEVIATION,     // 19.2 kHz
                                  156.2f,                     // RX bandwidth, kHz (RadioLib default)
-                                 14,                         // dBm
+                                 iohome::IoHomeControl::EU_MAX_TX_POWER_DBM,  // dBm
                                  iohome::PREAMBLE_LENGTH,    // bits
                                  IOHC_TCXO_VOLTAGE);         // V on DIO3, 0 = crystal
 #endif

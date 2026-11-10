@@ -162,8 +162,8 @@ void IOWNCover::control(const cover::CoverCall &call) {
   if (call.get_stop()) {
     ESP_LOGI(TAG, "STOP -> 0x%06X", static_cast<unsigned int>(this->target_address_));
     if (!this->send_main_param_(IOHC_PARAM_STOP)) {
-      // The STOP did not go out (radio error, missing system key, or a failed
-      // rolling-code write). The actuator never received it and keeps moving, so leaving the movement
+      // The STOP did not go out (radio error or missing system key). The
+      // actuator never received it and keeps moving, so leaving the movement
       // running lets the estimate keep tracking; freezing here would strand the
       // reported position at a value the actuator sails past. Same gating the
       // OPEN/CLOSE/position paths already use.
@@ -247,8 +247,9 @@ void IOWNCover::control(const cover::CoverCall &call) {
                                 : cover::COVER_OPERATION_CLOSING;
   }
 
-  // If the command did not actually go out - a radio error, a missing system
-  // key, or a rolling code that could not be persisted - do NOT animate to a
+  // If the command did not actually go out - a radio error or a missing
+  // system key (a failed rolling-code write is only logged, the command still
+  // goes out; see consume_rolling_code_()) - do NOT animate to a
   // position the actuator never received. (2W commands are no longer deferred
   // behind a handshake: they go out at once and the actuator's 0x3C is
   // answered when it arrives.) Leaving the state untouched keeps the reported

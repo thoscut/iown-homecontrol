@@ -230,7 +230,10 @@ class IOWNHomeControlComponent : public Component {
     this->fem_tx_pin_ = tx_pin;
   }
 
-  void register_cover(IOWNCover *cover) { this->covers_.push_back(cover); }
+  /// Called from each cover's setup(), which runs AFTER this hub's setup()
+  /// (DATA < HARDWARE priority), so the replay guard's known peers are added
+  /// here rather than in setup(), where covers_ is still empty.
+  void register_cover(IOWNCover *cover);
 
   /** Send a raw frame over the radio. */
   bool send_frame(const uint8_t *data, size_t len);

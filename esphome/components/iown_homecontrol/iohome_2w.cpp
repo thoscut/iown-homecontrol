@@ -112,23 +112,6 @@ void ChannelHopper::next_channel() {
 // Challenge-Response Authentication Implementation
 // ============================================================================
 
-namespace {
-
-/// Command id + parameters, the input the 2W MAC is computed over.
-size_t request_bytes(const frame::IoFrame* frame, uint8_t out[AuthenticationManager::MAX_REQUEST_SIZE]) {
-  out[0] = frame->command_id;
-  size_t len = frame->data_len;
-  if (len > FRAME_MAX_DATA_SIZE) {
-    len = FRAME_MAX_DATA_SIZE;
-  }
-  if (len > 0) {
-    memcpy(&out[1], frame->data, len);
-  }
-  return 1 + len;
-}
-
-} // namespace
-
 AuthenticationManager::AuthenticationManager()
   : key_set_(false),
     peer_known_(false),
@@ -295,7 +278,7 @@ bool AuthenticationManager::verify_challenge_response(const frame::IoFrame* fram
 
   if (ok) {
     uint8_t request[MAX_REQUEST_SIZE];
-    const size_t request_len = request_bytes(&held_request_, request);
+    const size_t request_len = frame::build_mac_input(&held_request_, request);
     ok = crypto::verify_hmac(request, request_len, frame->data, current_challenge_,
                              system_key_, /*is_2w=*/true);
     crypto::secure_zero(request, sizeof(request));
@@ -331,7 +314,7 @@ bool AuthenticationManager::note_request_sent(const frame::IoFrame* request,
   if (request == nullptr) {
     return false;
   }
-  pending_len_ = request_bytes(request, pending_request_);
+  pending_len_ = frame::build_mac_input(request, pending_request_);
   memcpy(pending_dest_, request->dest_node, NODE_ID_SIZE);
   memcpy(pending_src_, request->src_node, NODE_ID_SIZE);
   pending_ts_ms_ = now_ms;

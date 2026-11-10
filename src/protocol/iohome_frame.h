@@ -306,6 +306,15 @@ bool parse_frame(const uint8_t* buffer, size_t buffer_len, IoFrame* frame,
  */
 bool validate_frame(const IoFrame* frame, const uint8_t* system_key = nullptr, const uint8_t* challenge = nullptr);
 
+/**
+ * @brief Copy command id + parameters - the bytes a MAC is computed over
+ *
+ * Used for the 1W trailer MAC and for the 2W 0x3D answer alike.
+ *
+ * @return Number of bytes written (1 + data_len)
+ */
+size_t build_mac_input(const IoFrame* frame, uint8_t out[1 + FRAME_MAX_DATA_SIZE]);
+
 // ============================================================================
 // Helper Functions
 // ============================================================================

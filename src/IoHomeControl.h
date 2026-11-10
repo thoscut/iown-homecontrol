@@ -895,7 +895,6 @@ protected:
   float read_snr();
 
   int8_t tx_power_dbm_;
-  bool allow_above_eu_limit_;
 };
 
 } // namespace iohome

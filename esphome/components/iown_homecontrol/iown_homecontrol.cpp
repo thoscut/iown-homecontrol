@@ -161,18 +161,10 @@ void IOWNHomeControlComponent::setup() {
   // the replay guard exactly those and nobody else. Without it, a recorded
   // report re-addressed to a made-up source (the MAC does not cover addresses;
   // the CRC is trivial to recompute) was a fresh "first frame" every time.
+  // The covers themselves are registered as known peers by register_cover():
+  // they set up after this component, so covers_ is still empty here.
   if (this->position_feedback_) {
     this->replay_guard_.set_strict(true);
-    for (IOWNCover *cover : this->covers_) {
-      if (cover == nullptr) {
-        continue;
-      }
-      uint8_t node[iohome::NODE_ID_SIZE];
-      address_to_node(cover->get_target_address(), node);
-      if (!iohome::frame::is_broadcast(node)) {
-        this->replay_guard_.add_known_peer(node);
-      }
-    }
   }
 
   // Set up interrupt-driven receive
@@ -185,6 +177,23 @@ void IOWNHomeControlComponent::setup() {
   }
 
   ESP_LOGI(TAG, "io-homecontrol initialized on %.2f MHz", this->frequency_);
+}
+
+void IOWNHomeControlComponent::register_cover(IOWNCover *cover) {
+  if (cover == nullptr) {
+    return;
+  }
+  this->covers_.push_back(cover);
+
+  if (!this->position_feedback_) {
+    return;
+  }
+  uint8_t node[iohome::NODE_ID_SIZE];
+  address_to_node(cover->get_target_address(), node);
+  if (!iohome::frame::is_broadcast(node) && !this->replay_guard_.add_known_peer(node)) {
+    ESP_LOGW(TAG, "Replay guard full: position reports from 0x%06X will be rejected",
+             static_cast<unsigned int>(cover->get_target_address()));
+  }
 }
 
 void IOWNHomeControlComponent::loop() { this->receive_frame_(); }

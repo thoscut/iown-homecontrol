@@ -32,16 +32,19 @@ bool refresh_length(IoFrame* frame) {
   return true;
 }
 
-/// Copy command id + parameters into the buffer the MAC is computed over.
+} // namespace
+
 size_t build_mac_input(const IoFrame* frame, uint8_t out[1 + FRAME_MAX_DATA_SIZE]) {
   out[0] = frame->command_id;
-  if (frame->data_len > 0) {
-    memcpy(&out[1], frame->data, frame->data_len);
+  size_t len = frame->data_len;
+  if (len > FRAME_MAX_DATA_SIZE) {
+    len = FRAME_MAX_DATA_SIZE;
   }
-  return 1u + frame->data_len;
+  if (len > 0) {
+    memcpy(&out[1], frame->data, len);
+  }
+  return 1u + len;
 }
-
-} // namespace
 
 // ============================================================================
 // Command metadata
